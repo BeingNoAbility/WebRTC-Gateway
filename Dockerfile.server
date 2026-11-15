@@ -1,0 +1,66 @@
+# ==============================================================================
+# Dockerfile.server - Zero-Client WebRTC P2P Integrated Server
+#
+# Combines:
+# 1. Web Portal static assets (HTML5, Service Worker, Virtualization Patches)
+# 2. WebSocket Signaling & SDP/ICE Relay Broker
+#
+# Default Port: 8888 (Web Portal: http://<ip>:8888/ | Signaling: ws://<ip>:8888/ws)
+# Supports Native HTTPS/TLS (:443) via TLS_AUTO or custom TLS_CERT / TLS_KEY.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Stage 1: Build Web Portal Frontend
+# ------------------------------------------------------------------------------
+FROM node:20-alpine AS web-builder
+WORKDIR /build/web
+
+COPY web/package*.json ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+COPY web/ ./
+RUN node esbuild.config.mjs
+
+# ------------------------------------------------------------------------------
+# Stage 2: Build Go Integrated Server (Signal + Embedded Portal)
+# ------------------------------------------------------------------------------
+FROM golang:alpine AS server-builder
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY pkg/ ./pkg/
+COPY cmd/ ./cmd/
+COPY --from=web-builder /build/web/dist ./web/dist
+COPY web/assets.go ./web/assets.go
+
+# Multi-arch compatible build (uses builder native arch)
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w -buildid=" \
+    -o /build/server ./cmd/signal
+
+# ------------------------------------------------------------------------------
+# Stage 3: Minimal Production Image
+# ------------------------------------------------------------------------------
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates tzdata
+
+WORKDIR /app
+COPY --from=server-builder /build/server /app/server
+
+# Default environment variables
+ENV ADDR=:8888 \
+    TLS_AUTO=false \
+    TLS_CERT="" \
+    TLS_KEY="" \
+    STATIC_DIR=""
+
+EXPOSE 8888 443
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget -q --spider http://127.0.0.1:8888/ || exit 1
+
+ENTRYPOINT ["/app/server"]

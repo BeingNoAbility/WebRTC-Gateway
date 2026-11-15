@@ -1,0 +1,16 @@
+.git
+.wrangler
+edge/.wrangler
+web/.wrangler
+bin
+node_modules
+web/node_modules
+agent.exe
+signal.exe
+mock_service.exe
+signal_linux_amd64
+agent_linux_amd64
+test
+*.log
+*.tmp
+*.zip

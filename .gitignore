@@ -1,0 +1,41 @@
+# Binaries and build outputs
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*_linux_amd64
+mock_service
+
+# Source maps
+web/dist/*.map
+
+# Dependencies
+node_modules/
+web/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Cloudflare / Wrangler local cache
+.wrangler/
+web/.wrangler/
+edge/.wrangler/
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files and archives
+*.tmp
+*.zip
+*.tar.gz

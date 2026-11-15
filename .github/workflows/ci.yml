@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  test-and-build:
+    name: Test & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Go Unit & Integration Tests
+        run: go test -v ./...
+
+      - name: Run Web & Routing Tests
+        run: |
+          node test/test_subdomain_logic.cjs
+          node test/node_id_preservation_test.cjs
+
+      - name: Verify Web Frontend Build
+        working-directory: ./web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Agent & Server Binaries
+        run: |
+          mkdir -p bin
+          go build -v -ldflags="-s -w" -o bin/agent ./cmd/agent
+          go build -v -ldflags="-s -w" -o bin/signal ./cmd/signal

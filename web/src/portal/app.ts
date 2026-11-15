@@ -1,0 +1,1269 @@
+import { P2PMux, P2PStream } from '../protocol/mux';
+
+const DEFAULT_NODE_ID = 'myhome';
+const DEFAULT_SIGNAL_URL = (typeof window !== 'undefined' && window.location && window.location.host)
+  ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`
+  : 'ws://127.0.0.1:8888/ws';
+
+class PortalApp {
+  private peerId: string;
+  private signalUrl: string;
+  private secret: string = '';
+  private ws: WebSocket | null = null;
+  private pc: RTCPeerConnection | null = null;
+  private dc: RTCDataChannel | null = null;
+  private mux: P2PMux | null = null;
+  private pingInterval: any = null;
+  private swRegistration: ServiceWorkerRegistration | null = null;
+
+  // UI Elements
+  private connBadge = document.getElementById('connBadge') as HTMLElement;
+  private peerVal = document.getElementById('peerVal') as HTMLElement;
+  private signalVal = document.getElementById('signalVal') as HTMLElement;
+  private rttVal = document.getElementById('rttVal') as HTMLElement;
+  private streamsVal = document.getElementById('streamsVal') as HTMLElement;
+  private logBox = document.getElementById('logBox') as HTMLElement;
+  private btnPing = document.getElementById('btnPing') as HTMLButtonElement;
+  private btnEcho = document.getElementById('btnEcho') as HTMLButtonElement;
+  private btnClearLog = document.getElementById('btnClearLog') as HTMLButtonElement;
+  private testOutput = document.getElementById('testOutput') as HTMLElement;
+
+  private appFrame: HTMLIFrameElement | null = null;
+  private activeStreamsCount = 0;
+
+  constructor() {
+    const config = this.resolveInitialConfig();
+    this.peerId = config.peerId;
+    this.signalUrl = config.signalUrl;
+    this.secret = config.secret;
+
+    if (this.peerVal) this.peerVal.textContent = this.peerId;
+    if (this.signalVal) this.signalVal.textContent = this.signalUrl;
+
+    this.bindEvents();
+    this.initServiceWorker();
+    this.startSignaling();
+    this.listenChildMessages();
+    this.createSettingsModal();
+  }
+
+  // Extracts explicit Node ID from subdomain with ".p2p." delimiter (e.g. bili.p2p.example.com)
+  private extractExplicitP2PSubdomain(): string | null {
+    try {
+      const hostname = window.location.hostname.toLowerCase().trim();
+      if (!hostname) return null;
+      const reserved = new Set([
+        'p2p', 'www', 'webrtc', 'webrtc-p2p-signal', 'signal', 'signaling',
+        'gateway', 'portal', 'api', 'admin', 'proxy', 'vpn', 'tunnel'
+      ]);
+      const p2pIndex = hostname.indexOf('.p2p.');
+      if (p2pIndex > 0) {
+        const sub = hostname.substring(0, p2pIndex);
+        const parts = sub.split('.');
+        const candidate = parts[parts.length - 1];
+        if (candidate && !reserved.has(candidate)) {
+          return candidate;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  // Extracts Node ID from subdomain (supports multi-level custom subdomains)
+  // Non-explicit subdomains are checked only as fallback after stored peer ID
+  private extractNodeIdFromHostname(): string | null {
+    try {
+      const hostname = window.location.hostname.toLowerCase().trim();
+      if (!hostname) return null;
+
+      // Ignore raw IP addresses and bare localhost
+      if (/^(\d{1,3}\.){3}\d{1,3}$/.test(hostname) || hostname === 'localhost') {
+        return null;
+      }
+
+      // Exclude common PaaS/host roots where 1st label is project/account name, not peer ID
+      const paasSuffixes = [
+        '.pages.dev', '.workers.dev', '.eu.org', '.github.io',
+        '.vercel.app', '.netlify.app', '.onrender.com', '.fly.dev'
+      ];
+      for (const suffix of paasSuffixes) {
+        if (hostname.endsWith(suffix)) {
+          const prefix = hostname.slice(0, -suffix.length);
+          if (!prefix.includes('.')) {
+            return null;
+          }
+        }
+      }
+
+      // Reserved keywords that represent portal infrastructure, not a node ID
+      const reserved = new Set([
+        'p2p', 'www', 'webrtc', 'webrtc-p2p-signal', 'signal', 'signaling',
+        'gateway', 'portal', 'api', 'admin', 'proxy', 'vpn', 'tunnel',
+        'webrtc-gateway', 'p2p-gateway', 'app', 'web', 'client', 'relay',
+        'service', 'hub', 'test', 'demo', 'node', 'nodes', 'server', 'direct',
+        'static', 'assets', 'cdn'
+      ]);
+
+      // Multi-level subdomain (e.g. "immich.example.com", "bili.localhost")
+      const parts = hostname.split('.');
+      if (parts.length >= 3 || (parts.length === 2 && parts[1] === 'localhost')) {
+        const firstLabel = parts[0];
+        if (firstLabel && !reserved.has(firstLabel)) {
+          return firstLabel;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  // Resolves configuration with priority: Query -> Hash (#nodeId) -> Explicit .p2p. Subdomain -> Stored Peer -> Subdomain -> Built-in Defaults
+  private resolveInitialConfig(): { peerId: string; signalUrl: string; secret: string } {
+    const params = new URLSearchParams(window.location.search);
+
+    // 1. Peer ID and Secret resolution:
+    // Priority 1: Query parameter ?peer= or ?node= (explicit in virtualized link / window.open)
+    let peerId = params.get('peer') || params.get('node');
+    let secret = params.get('secret') || params.get('token') || '';
+
+    // Priority 2: URL hash (#nodeId or #nodeId?secret=xxx)
+    if (!peerId && window.location.hash) {
+      const rawHash = window.location.hash.replace(/^#\/?/, '').trim();
+      if (rawHash) {
+        const parts = rawHash.split(/[?&]/);
+        peerId = parts[0];
+        for (let i = 1; i < parts.length; i++) {
+          const [k, v] = parts[i].split('=');
+          if ((k === 'secret' || k === 'token') && v) {
+            secret = decodeURIComponent(v);
+          }
+        }
+      }
+    }
+
+    // Priority 3: Explicit .p2p. subdomain (e.g. bili.p2p.example.com)
+    if (!peerId) {
+      const explicitSub = this.extractExplicitP2PSubdomain();
+      if (explicitSub) {
+        peerId = explicitSub;
+      }
+    }
+
+    // Priority 4: Cached active peer from sessionStorage / localStorage (preserves active node across new windows/tabs)
+    if (!peerId) {
+      peerId = sessionStorage.getItem('p2p_active_peer_id') || localStorage.getItem('p2p_peer_id') || '';
+    }
+
+    // Priority 5: Fallback generic custom subdomain (e.g. immich.mycustomdomain.com)
+    if (!peerId) {
+      const subdomainNode = this.extractNodeIdFromHostname();
+      if (subdomainNode) {
+        peerId = subdomainNode;
+      }
+    }
+
+    // Priority 6: Built-in default
+    if (!peerId) {
+      peerId = DEFAULT_NODE_ID;
+    }
+
+    if (!secret && peerId) {
+      secret = sessionStorage.getItem('p2p_secret') || localStorage.getItem('p2p_secret_' + peerId) || '';
+    }
+
+    // 2. Signaling URL: ?signal= -> localStorage -> auto-detected co-located /ws on server hosts
+    const isStaticPlatform =
+      window.location.hostname.includes('pages.dev') ||
+      window.location.hostname.includes('github.io') ||
+      window.location.hostname.includes('vercel.app');
+
+    let signalUrl = params.get('signal');
+    if (!signalUrl) {
+      const cached = localStorage.getItem('p2p_signal_url');
+      if (cached) {
+        signalUrl = cached;
+      } else if (!isStaticPlatform && window.location.host) {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        signalUrl = `${proto}//${window.location.host}/ws`;
+      } else {
+        signalUrl = DEFAULT_SIGNAL_URL;
+      }
+    }
+
+    // Persist active settings in sessionStorage and localStorage for future visits / windows
+    try {
+      sessionStorage.setItem('p2p_active_peer_id', peerId);
+      localStorage.setItem('p2p_peer_id', peerId);
+      localStorage.setItem('p2p_signal_url', signalUrl);
+      if (secret) {
+        sessionStorage.setItem('p2p_secret', secret);
+        localStorage.setItem('p2p_secret_' + peerId, secret);
+      }
+    } catch {}
+
+    return { peerId, signalUrl, secret };
+  }
+
+  private log(msg: string) {
+    const time = new Date().toLocaleTimeString();
+    if (this.logBox) {
+      this.logBox.textContent += `[${time}] ${msg}\n`;
+      this.logBox.scrollTop = this.logBox.scrollHeight;
+    }
+    console.log(`[Portal] ${msg}`);
+  }
+
+  private bindEvents() {
+    if (this.btnClearLog) {
+      this.btnClearLog.onclick = () => {
+        if (this.logBox) this.logBox.textContent = '';
+      };
+    }
+
+    if (this.btnPing) {
+      this.btnPing.onclick = async () => {
+        if (!this.mux) return;
+        try {
+          const rtt = await this.mux.ping();
+          this.rttVal.textContent = `${rtt.toFixed(1)} ms`;
+          this.log(`Manual Ping successful: RTT = ${rtt.toFixed(2)} ms`);
+        } catch (err: any) {
+          this.log(`Ping failed: ${err.message}`);
+        }
+      };
+    }
+
+    if (this.btnEcho) {
+      this.btnEcho.onclick = async () => {
+        await this.runEchoTest();
+      };
+    }
+
+    // Portal header & card direct settings trigger
+    document.getElementById('btnHeaderSettings')?.addEventListener('click', () => {
+      this.openSettingsModal();
+    });
+    document.getElementById('cardPeer')?.addEventListener('click', () => {
+      this.openSettingsModal();
+    });
+    document.getElementById('cardSignal')?.addEventListener('click', () => {
+      this.openSettingsModal();
+    });
+
+    // Listen to hash changes (e.g. #linux_node -> #win_node or #nodeId?secret=xxx)
+    window.addEventListener('hashchange', () => {
+      const rawHash = window.location.hash.replace(/^#\/?/, '').trim();
+      if (rawHash) {
+        const parts = rawHash.split(/[?&]/);
+        const newHash = parts[0];
+        let newSecret = '';
+        for (let i = 1; i < parts.length; i++) {
+          const [k, v] = parts[i].split('=');
+          if ((k === 'secret' || k === 'token') && v) {
+            newSecret = decodeURIComponent(v);
+          }
+        }
+        if (newHash && (newHash !== this.peerId || (newSecret && newSecret !== this.secret))) {
+          this.log(`URL hash changed to #${rawHash}, switching peer...`);
+          this.peerId = newHash;
+          if (newSecret) {
+            this.secret = newSecret;
+            try {
+              sessionStorage.setItem('p2p_secret', newSecret);
+              localStorage.setItem('p2p_secret_' + newHash, newSecret);
+            } catch {}
+          } else {
+            this.secret = sessionStorage.getItem('p2p_secret') || localStorage.getItem('p2p_secret_' + newHash) || '';
+          }
+          try {
+            sessionStorage.setItem('p2p_active_peer_id', newHash);
+            localStorage.setItem('p2p_peer_id', newHash);
+          } catch {}
+          const sw = navigator.serviceWorker?.controller;
+          if (sw) {
+            sw.postMessage({ type: 'NODE_CHANGE', peerId: newHash, secret: this.secret });
+          }
+          this.reconnect();
+        }
+      }
+    });
+  }
+
+  private async initServiceWorker() {
+    if ('serviceWorker' in navigator) {
+      try {
+        this.log('Registering Service Worker (sw.js)...');
+        this.swRegistration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+        await navigator.serviceWorker.ready;
+        this.log('Service Worker is active and controlling scope /');
+
+        const attachTunnel = () => {
+          const sw = navigator.serviceWorker.controller;
+          if (!sw) return;
+          const channel = new MessageChannel();
+          channel.port1.onmessage = (event) => {
+            this.handleSWMessage(event);
+          };
+          sw.postMessage({ type: 'PORTAL_ATTACH', peerId: this.peerId, secret: this.secret }, [channel.port2]);
+          this.log('Attached dedicated MessagePort tunnel to Service Worker');
+        };
+
+        attachTunnel();
+        navigator.serviceWorker.addEventListener('controllerchange', attachTunnel);
+
+        // Fallback listener for requests from Service Worker
+        navigator.serviceWorker.addEventListener('message', (event) => {
+          this.handleSWMessage(event);
+        });
+      } catch (err: any) {
+        this.log(`Failed to register Service Worker: ${err.message}`);
+      }
+    } else {
+      this.log('Warning: Service Worker not supported or disabled (Insecure Context).');
+      this.showInsecureContextBanner();
+    }
+  }
+
+  private startSignaling() {
+    this.log(`Connecting to signaling server at ${this.signalUrl}...`);
+    this.signalVal.textContent = 'Connecting...';
+
+    this.ws = new WebSocket(this.signalUrl);
+
+    this.ws.onopen = () => {
+      this.log('Signaling WebSocket connected. Joining peer room...');
+      this.signalVal.textContent = 'Connected (Joining...)';
+      this.ws?.send(
+        JSON.stringify({
+          type: 'join',
+          node_id: this.peerId,
+          secret: this.secret,
+        })
+      );
+    };
+
+    this.ws.onmessage = async (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        await this.handleSignalMessage(msg);
+      } catch (err: any) {
+        this.log(`Signaling parse error: ${err.message}`);
+      }
+    };
+
+    this.ws.onerror = () => {
+      this.log('Signaling WebSocket error.');
+      this.signalVal.textContent = 'Error';
+    };
+
+    this.ws.onclose = () => {
+      this.log('Signaling WebSocket closed.');
+      this.signalVal.textContent = 'Disconnected';
+    };
+  }
+
+  private async handleSignalMessage(msg: any) {
+    switch (msg.type) {
+      case 'peer_status':
+        if (msg.node_id && msg.node_id !== this.peerId) {
+          return;
+        }
+        if (msg.status === 'online') {
+          this.hideOfflinePrompt();
+          if (msg.requires_secret && !this.secret) {
+            this.log(`Node [${this.peerId}] requires an access token (secret).`);
+            if (this.signalVal) this.signalVal.textContent = 'Auth Required';
+            this.showAuthPrompt(this.peerId);
+            return;
+          }
+          this.hideAuthPrompt();
+          this.log(`Target peer [${this.peerId}] is ONLINE. Initializing WebRTC Offer...`);
+          if (this.signalVal) this.signalVal.textContent = 'Peer Online';
+          await this.initWebRTC();
+        } else {
+          this.log(`Target peer [${this.peerId}] is OFFLINE.`);
+          if (this.signalVal) this.signalVal.textContent = 'Peer Offline';
+          this.showOfflinePrompt(this.peerId);
+        }
+        break;
+
+      case 'answer':
+        this.log('Received WebRTC Answer from Agent. Setting remote description...');
+        if (this.pc && msg.sdp) {
+          await this.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+          this.log('Remote description applied successfully.');
+        }
+        break;
+
+      case 'candidate':
+        if (this.pc && msg.candidate) {
+          await this.pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        }
+        break;
+
+      case 'error':
+        this.log(`Signaling error message: ${msg.error}`);
+        if (msg.error && msg.error.toLowerCase().includes('unauthorized')) {
+          this.log(`Access rejected by node: ${msg.error}`);
+          if (this.signalVal) this.signalVal.textContent = 'Auth Failed (401)';
+          this.updateConnState('disconnected');
+          this.showAuthPrompt(this.peerId, '访问口令不正确或缺失，请重新输入');
+        }
+        break;
+    }
+  }
+
+  private async initWebRTC() {
+    const config: RTCConfiguration = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' },
+      ],
+    };
+
+    this.pc = new RTCPeerConnection(config);
+    this.updateConnState('connecting');
+
+    this.pc.onicecandidate = (event) => {
+      if (event.candidate && this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(
+          JSON.stringify({
+            type: 'candidate',
+            node_id: this.peerId,
+            candidate: event.candidate,
+          })
+        );
+      }
+    };
+
+    this.pc.oniceconnectionstatechange = () => {
+      this.log(`ICE Connection State: ${this.pc?.iceConnectionState}`);
+      if (this.pc?.iceConnectionState === 'disconnected' || this.pc?.iceConnectionState === 'failed') {
+        this.updateConnState('disconnected');
+      }
+    };
+
+    // Create DataChannel with label "p2pmux"
+    this.dc = this.pc.createDataChannel('p2pmux', {
+      ordered: true,
+    });
+
+    this.setupDataChannel(this.dc);
+
+    // Create Offer
+    const offer = await this.pc.createOffer();
+    await this.pc.setLocalDescription(offer);
+
+    this.log('Generated WebRTC Offer. Sending to Agent via Signaling...');
+    this.ws?.send(
+      JSON.stringify({
+        type: 'offer',
+        node_id: this.peerId,
+        sdp: offer,
+        secret: this.secret,
+      })
+    );
+  }
+
+  private setupDataChannel(dc: RTCDataChannel) {
+    dc.onopen = () => {
+      this.log('DataChannel [p2pmux] OPENED! Direct P2P tunnel established.');
+      this.updateConnState('connected');
+
+      this.mux = new P2PMux(dc, true);
+      if (this.btnPing) this.btnPing.disabled = false;
+      if (this.btnEcho) this.btnEcho.disabled = false;
+
+      this.startPingLoop();
+      this.mountAppViewport();
+    };
+
+    dc.onclose = () => {
+      this.log('DataChannel closed.');
+      this.updateConnState('disconnected');
+      if (this.pingInterval) clearInterval(this.pingInterval);
+      if (this.btnPing) this.btnPing.disabled = true;
+      if (this.btnEcho) this.btnEcho.disabled = true;
+    };
+
+    dc.onerror = (err) => {
+      this.log(`DataChannel error: ${err}`);
+    };
+  }
+
+  private updateConnState(state: 'connected' | 'connecting' | 'disconnected') {
+    if (this.connBadge) {
+      this.connBadge.className = `badge ${state}`;
+      this.connBadge.textContent = state.toUpperCase();
+    }
+  }
+
+  private startPingLoop() {
+    if (this.pingInterval) clearInterval(this.pingInterval);
+    this.pingInterval = setInterval(async () => {
+      if (!this.mux) return;
+      try {
+        const rtt = await this.mux.ping();
+        if (this.rttVal) this.rttVal.textContent = `${rtt.toFixed(1)} ms`;
+      } catch {}
+    }, 2500);
+  }
+
+  // Mounts seamless full-screen app viewport iframe
+  private mountAppViewport() {
+    if (!('serviceWorker' in navigator) || (typeof window !== 'undefined' && !window.isSecureContext)) {
+      this.log('Service Worker is inactive (Insecure Context). App viewport mounting blocked to prevent blank recursion.');
+      this.showInsecureContextBanner();
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const shouldMountFrame = params.get('mode') !== 'debug';
+    if (!shouldMountFrame) return;
+
+    const startPath = params.get('path') || '/';
+    if (this.appFrame) {
+      this.appFrame.src = startPath;
+      this.createFloatingPill();
+      return;
+    }
+
+    this.log('Mounting App Shell Viewport iframe...');
+    const frame = document.createElement('iframe');
+    frame.id = 'appViewport';
+    frame.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      border: none;
+      z-index: 100;
+      background: #ffffff;
+    `;
+    // Hardware browser-level anti-frame-busting via sandbox:
+    // By deliberately omitting 'allow-top-navigation', scripts cannot hijack the outer tunnel window
+    frame.setAttribute(
+      'sandbox',
+      'allow-scripts allow-forms allow-same-origin allow-downloads allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation'
+    );
+    frame.setAttribute(
+      'allow',
+      'fullscreen; clipboard-read; clipboard-write; autoplay; camera; microphone; display-capture; web-share; publickey-credentials-get; publickey-credentials-create; identity-credentials-get; cross-origin-isolated; storage-access; encrypted-media; presentation; screen-wake-lock; picture-in-picture'
+    );
+
+    frame.src = startPath; // Intercepted by Service Worker
+    document.body.appendChild(frame);
+    this.appFrame = frame;
+
+    frame.addEventListener('load', () => {
+      try {
+        if (frame.contentDocument?.title) {
+          document.title = frame.contentDocument.title;
+        }
+      } catch {}
+      try {
+        frame.contentWindow?.postMessage(
+          {
+            type: 'P2P_PORTAL_CONTEXT',
+            nodeId: this.peerId,
+            portalOrigin: window.location.origin,
+            secret: this.secret,
+          },
+          '*'
+        );
+      } catch {}
+    });
+
+    // Create floating status pill
+    this.createFloatingPill();
+  }
+
+  private showInsecureContextBanner() {
+    if (document.getElementById('insecureBanner')) return;
+    const banner = document.createElement('div');
+    banner.id = 'insecureBanner';
+    banner.style.cssText = `
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 90%;
+      max-width: 680px;
+      background: #1c1917;
+      border: 1px solid #d29922;
+      border-radius: 10px;
+      padding: 18px 22px;
+      color: #f0f6fc;
+      z-index: 10000;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.6);
+      font-size: 13px;
+      line-height: 1.6;
+    `;
+    const curHost = window.location.host;
+    const curPort = window.location.port || '8888';
+    banner.innerHTML = `
+      <div style="display: flex; align-items: flex-start; gap: 14px;">
+        <span style="font-size: 26px; line-height: 1;">⚠️</span>
+        <div style="flex: 1;">
+          <h4 style="font-size: 15px; font-weight: 600; color: #e3b341; margin-bottom: 6px;">
+            当前处于非安全上下文（Insecure Context），已暂停加载目标网页
+          </h4>
+          <p style="color: #c9d1d9; margin-bottom: 10px;">
+            根据 W3C Web 标准与现代浏览器安全规范：在非 HTTPS 且非 localhost 的局域网纯 HTTP IP（如 <code>${window.location.origin}</code>）下，<strong>Service Worker 将被强制禁用</strong>。本网关依赖 Service Worker 虚拟化拦截和转发请求，请选择以下任一方式使用：
+          </p>
+          <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-bottom: 10px;">
+            <div style="margin-bottom: 8px;">
+              <span style="color: #58a6ff; font-weight: 600;">方案 1（本机访问，最快）</span>：若浏览器与信令服务运行在同一台设备，请直接在地址栏打开 
+              <a href="http://localhost:${curPort}/#${this.peerId}" style="color: #388bfd; text-decoration: underline;">http://localhost:${curPort}/#${this.peerId}</a> 或 <code>http://127.0.0.1:${curPort}/#${this.peerId}</code>（localhost 属于标准安全上下文）。
+            </div>
+            <div style="margin-bottom: 8px;">
+              <span style="color: #3fb950; font-weight: 600;">方案 2（生产推荐，零配置）</span>：部署在支持 HTTPS 的域名或免费部署至 Cloudflare Workers（如 <code>https://p2p.yourdomain.com/#${this.peerId}</code>）。
+            </div>
+            <div>
+              <span style="color: #d29922; font-weight: 600;">方案 3（局域网跨设备 HTTP 免证书测试）</span>：在 Chrome/Edge 浏览器地址栏打开：<br/>
+              <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>（Edge 为 <code>edge://flags/...</code>）<br/>
+              将 <code>http://${curHost}</code> 填入白名单输入框，并在右侧下拉框选择 <strong>Enabled</strong>，点击 <strong>Relaunch</strong> 重启浏览器即可！
+            </div>
+          </div>
+          <div style="display: flex; justify-content: flex-end;">
+            <button id="btnCloseInsecureBanner" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer;">
+              保留在控制台调试视图
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(banner);
+    document.getElementById('btnCloseInsecureBanner')?.addEventListener('click', () => {
+      banner.style.display = 'none';
+    });
+  }
+
+  private createFloatingPill() {
+    if (document.getElementById('p2pPill')) {
+      const pillNode = document.getElementById('pillNode');
+      if (pillNode) pillNode.textContent = `P2P: ${this.peerId}`;
+      return;
+    }
+
+    const pill = document.createElement('div');
+    pill.id = 'p2pPill';
+    pill.style.cssText = `
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      background: rgba(22, 27, 34, 0.92);
+      backdrop-filter: blur(8px);
+      border: 1px solid #30363d;
+      color: #c9d1d9;
+      padding: 7px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-family: monospace;
+      z-index: 10000;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      user-select: none;
+    `;
+    pill.innerHTML = `
+      <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#3fb950;"></span>
+      <span id="pillNode" style="cursor:pointer;" title="Click to open settings">P2P: ${this.peerId}</span>
+      <span id="pillRtt" style="color:#58a6ff;">-- ms</span>
+      <span id="pillGear" style="cursor:pointer; opacity:0.75; font-size:13px;" title="Connection Settings">⚙</span>
+    `;
+
+    pill.addEventListener('click', () => {
+      this.openSettingsModal();
+    });
+
+    document.body.appendChild(pill);
+
+    // Update pill RTT and Node ID
+    setInterval(() => {
+      const pillRtt = document.getElementById('pillRtt');
+      if (pillRtt && this.rttVal) {
+        pillRtt.textContent = this.rttVal.textContent;
+      }
+      const pillNode = document.getElementById('pillNode');
+      if (pillNode) {
+        pillNode.textContent = `P2P: ${this.peerId}`;
+      }
+    }, 1000);
+  }
+
+  private createSettingsModal() {
+    if (document.getElementById('p2pSettingsModal')) return;
+    const modal = document.createElement('div');
+    modal.id = 'p2pSettingsModal';
+    modal.style.cssText = `
+      position: fixed;
+      top: 0; left: 0; width: 100vw; height: 100vh;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(6px);
+      display: none; justify-content: center; align-items: center;
+      z-index: 20000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    `;
+    modal.innerHTML = `
+      <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; max-width: 440px; width: 90%; color: #c9d1d9; box-shadow: 0 16px 40px rgba(0,0,0,0.6);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+          <h3 style="font-size: 16px; color: #f0f6fc; font-weight: 600;">⚙ P2P Gateway Settings</h3>
+          <button id="btnCloseSettings" style="background: none; border: none; color: #8b949e; font-size: 18px; cursor: pointer;">✕</button>
+        </div>
+        <div style="margin-bottom: 16px;">
+          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">目标节点 ID (Target Node ID)</label>
+          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">支持二级/三级子域名（如 <code>bili.p2p.example.com</code>）、URL Hash（#nodeId）或手动指定。</div>
+          <input id="inputNodeId" type="text" value="${this.peerId}" placeholder="e.g. myhome" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 14px; font-family: monospace;" />
+          <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;" id="nodeChips">
+            <span class="node-chip" data-node="librespeed" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">librespeed</span>
+            <span class="node-chip" data-node="vaultwarden" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">vaultwarden</span>
+            <span class="node-chip" data-node="immich" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">immich</span>
+            <span class="node-chip" data-node="jellyfin" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">jellyfin</span>
+            <span class="node-chip" data-node="openlist" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">openlist</span>
+            <span class="node-chip" data-node="portainer" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">portainer</span>
+            <span class="node-chip" data-node="bili" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">bilibili</span>
+          </div>
+        </div>
+        <div style="margin-bottom: 20px;">
+          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">信令服务端地址 (Signaling Server URL)</label>
+          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">设置 WebRTC 握手撮合信令服务器 WebSocket 地址。</div>
+          <input id="inputSignalUrl" type="text" value="${this.signalUrl}" placeholder="wss://..." style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;" />
+          <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;" id="signalChips">
+            <span class="signal-chip" data-signal="current" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">当前同源信令 (Same-Origin /ws)</span>
+            <span class="signal-chip" data-signal="ws://127.0.0.1:8888/ws" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">本地信令 (localhost:8888)</span>
+          </div>
+        </div>
+        <div style="margin-bottom: 20px;">
+          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">访问口令 / 密钥 (Secret Token - 可选)</label>
+          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">若目标节点开启了 <code>-secret</code> 保护，请输入匹配的口令；留空表示公开访问。</div>
+          <input id="inputSecret" type="password" value="${this.secret}" placeholder="Optional Secret Token" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;" />
+        </div>
+        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+          <button id="btnToggleDebugView" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 14px; border-radius: 6px; font-size: 13px; cursor: pointer;">Toggle Debug View</button>
+          <button id="btnSaveReconnect" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;">Save & Connect</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    document.querySelectorAll('.node-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const targetNode = chip.getAttribute('data-node');
+        const inputNode = document.getElementById('inputNodeId') as HTMLInputElement;
+        if (targetNode && inputNode) {
+          inputNode.value = targetNode;
+        }
+      });
+    });
+
+    document.querySelectorAll('.signal-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        let targetSignal = chip.getAttribute('data-signal');
+        if (targetSignal === 'current') {
+          const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          targetSignal = `${proto}//${window.location.host}/ws`;
+        }
+        const inputSignal = document.getElementById('inputSignalUrl') as HTMLInputElement;
+        if (targetSignal && inputSignal) {
+          inputSignal.value = targetSignal;
+        }
+      });
+    });
+
+    document.getElementById('btnCloseSettings')?.addEventListener('click', () => {
+      modal.style.display = 'none';
+    });
+
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) modal.style.display = 'none';
+    });
+
+    document.getElementById('btnToggleDebugView')?.addEventListener('click', () => {
+      if (this.appFrame) {
+        const isHidden = this.appFrame.style.display === 'none';
+        this.appFrame.style.display = isHidden ? 'block' : 'none';
+      }
+      modal.style.display = 'none';
+    });
+
+    document.getElementById('btnSaveReconnect')?.addEventListener('click', () => {
+      const inputNode = document.getElementById('inputNodeId') as HTMLInputElement;
+      const inputSignal = document.getElementById('inputSignalUrl') as HTMLInputElement;
+      const inputSecret = document.getElementById('inputSecret') as HTMLInputElement;
+      const newNodeId = inputNode?.value.trim() || DEFAULT_NODE_ID;
+      const newSignalUrl = inputSignal?.value.trim() || DEFAULT_SIGNAL_URL;
+      const newSecret = inputSecret ? inputSecret.value.trim() : '';
+
+      this.peerId = newNodeId;
+      this.signalUrl = newSignalUrl;
+      this.secret = newSecret;
+      try {
+        sessionStorage.setItem('p2p_active_peer_id', newNodeId);
+        localStorage.setItem('p2p_peer_id', newNodeId);
+        localStorage.setItem('p2p_signal_url', newSignalUrl);
+        if (newSecret) {
+          sessionStorage.setItem('p2p_secret', newSecret);
+          localStorage.setItem('p2p_secret_' + newNodeId, newSecret);
+        } else {
+          sessionStorage.removeItem('p2p_secret');
+          localStorage.removeItem('p2p_secret_' + newNodeId);
+        }
+      } catch {}
+
+      const sw = navigator.serviceWorker?.controller;
+      if (sw) {
+        sw.postMessage({ type: 'NODE_CHANGE', peerId: newNodeId, secret: newSecret });
+      }
+
+      modal.style.display = 'none';
+      this.hideOfflinePrompt();
+      this.hideAuthPrompt();
+      this.reconnect();
+    });
+  }
+
+  public openSettingsModal() {
+    const modal = document.getElementById('p2pSettingsModal');
+    if (modal) {
+      modal.style.display = 'flex';
+      const inputNode = document.getElementById('inputNodeId') as HTMLInputElement;
+      if (inputNode) inputNode.value = this.peerId;
+      const inputSignal = document.getElementById('inputSignalUrl') as HTMLInputElement;
+      if (inputSignal) inputSignal.value = this.signalUrl;
+      const inputSecret = document.getElementById('inputSecret') as HTMLInputElement;
+      if (inputSecret) inputSecret.value = this.secret;
+    }
+  }
+
+  private showOfflinePrompt(peerId: string) {
+    let overlay = document.getElementById('p2pOfflineOverlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'p2pOfflineOverlay';
+      overlay.style.cssText = `
+        position: fixed;
+        top: 0; left: 0; width: 100vw; height: 100vh;
+        background: rgba(13, 17, 23, 0.85);
+        backdrop-filter: blur(10px);
+        display: flex; justify-content: center; align-items: center;
+        z-index: 15000;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      `;
+      document.body.appendChild(overlay);
+    }
+
+    overlay.innerHTML = `
+      <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px; max-width: 480px; width: 90%; color: #c9d1d9; box-shadow: 0 16px 40px rgba(0,0,0,0.6); text-align: center;">
+        <div style="font-size: 36px; margin-bottom: 12px;">📡</div>
+        <h2 style="font-size: 18px; color: #f0f6fc; margin-bottom: 8px;">Target Node [${peerId}] is Offline</h2>
+        <p style="font-size: 13px; color: #8b949e; line-height: 1.6; margin-bottom: 20px;">
+          The remote agent daemon has not registered with the signaling relay yet. Please verify that <code>agent.exe</code> is running on your server, or switch to another node.
+        </p>
+        <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; font-size: 12px; font-family: monospace; color: #58a6ff; margin-bottom: 20px; text-align: left; word-break: break-all;">
+          ./agent.exe -node-id ${peerId} -signal ${this.signalUrl}
+        </div>
+        <div style="display: flex; gap: 12px; justify-content: center;">
+          <button id="btnRetryConn" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer;">Retry</button>
+          <button id="btnOpenSettings" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 18px; border-radius: 6px; cursor: pointer;">Switch Node</button>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('btnRetryConn')?.addEventListener('click', () => {
+      this.reconnect();
+    });
+    document.getElementById('btnOpenSettings')?.addEventListener('click', () => {
+      this.openSettingsModal();
+    });
+  }
+
+  private hideOfflinePrompt() {
+    const overlay = document.getElementById('p2pOfflineOverlay');
+    if (overlay) overlay.remove();
+  }
+
+  private showAuthPrompt(peerId: string, errorMsg?: string) {
+    let overlay = document.getElementById('p2pAuthOverlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'p2pAuthOverlay';
+      overlay.style.cssText = `
+        position: fixed;
+        top: 0; left: 0; width: 100vw; height: 100vh;
+        background: rgba(13, 17, 23, 0.85);
+        backdrop-filter: blur(10px);
+        display: flex; justify-content: center; align-items: center;
+        z-index: 25000;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      `;
+      document.body.appendChild(overlay);
+    }
+
+    overlay.innerHTML = `
+      <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px; max-width: 440px; width: 90%; color: #c9d1d9; box-shadow: 0 16px 40px rgba(0,0,0,0.6); text-align: center;">
+        <div style="font-size: 36px; margin-bottom: 12px;">🔐</div>
+        <h2 style="font-size: 18px; color: #f0f6fc; margin-bottom: 8px;">访问口令鉴权 (Auth Required)</h2>
+        <p style="font-size: 13px; color: #8b949e; line-height: 1.6; margin-bottom: 16px;">
+          目标节点 <code style="color: #58a6ff; font-weight: 600;">[${peerId}]</code> 已开启访问保护，请输入访问密钥：
+        </p>
+        ${
+          errorMsg
+            ? `<div style="background: rgba(248, 81, 73, 0.15); border: 1px solid rgba(248, 81, 73, 0.4); color: #f85149; border-radius: 6px; padding: 8px 12px; font-size: 12px; margin-bottom: 16px;">${errorMsg}</div>`
+            : ''
+        }
+        <div style="margin-bottom: 16px; text-align: left;">
+          <input id="inputAuthSecret" type="password" placeholder="请输入口令 / Secret Token..." value="${this.secret}" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 10px 12px; border-radius: 6px; font-size: 14px; font-family: monospace;" />
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 20px; font-size: 12px; color: #8b949e; cursor: pointer;">
+          <input type="checkbox" id="chkRememberSecret" checked style="cursor: pointer;" />
+          <label for="chkRememberSecret" style="cursor: pointer;">记住此节点的访问口令 (Remember)</label>
+        </div>
+        <div style="display: flex; gap: 12px; justify-content: center;">
+          <button id="btnSubmitAuth" style="background: #238636; color: #ffffff; font-weight: 600; border: none; padding: 9px 22px; border-radius: 6px; cursor: pointer; font-size: 13px;">验证并连接</button>
+          <button id="btnAuthSwitchNode" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;">切换节点</button>
+        </div>
+      </div>
+    `;
+
+    const input = document.getElementById('inputAuthSecret') as HTMLInputElement;
+    if (input) {
+      setTimeout(() => input.focus(), 50);
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          doSubmit();
+        }
+      });
+    }
+
+    const doSubmit = () => {
+      const val = input ? input.value.trim() : '';
+      const remember = (document.getElementById('chkRememberSecret') as HTMLInputElement)?.checked;
+      this.secret = val;
+      if (remember) {
+        try { localStorage.setItem('p2p_secret_' + peerId, val); } catch {}
+      } else {
+        try { localStorage.removeItem('p2p_secret_' + peerId); } catch {}
+      }
+      this.hideAuthPrompt();
+      this.reconnect();
+    };
+
+    document.getElementById('btnSubmitAuth')?.addEventListener('click', doSubmit);
+    document.getElementById('btnAuthSwitchNode')?.addEventListener('click', () => {
+      this.hideAuthPrompt();
+      this.openSettingsModal();
+    });
+  }
+
+  private hideAuthPrompt() {
+    const overlay = document.getElementById('p2pAuthOverlay');
+    if (overlay) overlay.remove();
+  }
+
+  private reconnect() {
+    this.hideOfflinePrompt();
+    this.hideAuthPrompt();
+    this.log(`Reconnecting to node [${this.peerId}] via ${this.signalUrl}...`);
+    window.location.hash = this.peerId;
+    if (this.peerVal) this.peerVal.textContent = this.peerId;
+    if (this.signalVal) this.signalVal.textContent = this.signalUrl;
+
+    try {
+      sessionStorage.setItem('p2p_active_peer_id', this.peerId);
+      localStorage.setItem('p2p_peer_id', this.peerId);
+      if (this.secret) {
+        sessionStorage.setItem('p2p_secret', this.secret);
+        localStorage.setItem('p2p_secret_' + this.peerId, this.secret);
+      }
+    } catch {}
+
+    const sw = navigator.serviceWorker?.controller;
+    if (sw) {
+      sw.postMessage({ type: 'NODE_CHANGE', peerId: this.peerId, secret: this.secret });
+    }
+
+    if (this.appFrame) {
+      this.appFrame.remove();
+      this.appFrame = null;
+    }
+
+    if (this.pingInterval) clearInterval(this.pingInterval);
+    if (this.mux) {
+      try { this.dc?.close(); } catch {}
+      this.mux = null;
+    }
+    if (this.pc) {
+      try { this.pc.close(); } catch {}
+      this.pc = null;
+    }
+    if (this.ws) {
+      try { this.ws.close(); } catch {}
+      this.ws = null;
+    }
+    this.updateConnState('disconnected');
+    this.startSignaling();
+  }
+
+  // Handle Fetch interception relayed from Service Worker
+  private handleSWMessage(event: MessageEvent) {
+    const msg = event.data;
+    if (!msg || msg.type !== 'TUNNEL_FETCH_REQUEST') return;
+
+    if (!this.mux) {
+      if (event.ports && event.ports[0]) {
+        event.ports[0].postMessage({
+          type: 'RESP_ERROR',
+          error: 'P2P DataChannel is not connected yet',
+        });
+      }
+      return;
+    }
+
+    const port = event.ports[0];
+    const stream = this.mux.openStream();
+    this.updateStreamsCount(1);
+
+    // Send HEADERS frame to Agent
+    stream.sendHeaders({
+      m: msg.method,
+      p: msg.path,
+      h: msg.headers,
+    });
+
+    // Handle upload body from Service Worker with serialized write queue
+    let writeQueue: Promise<void> = Promise.resolve();
+    port.onmessage = (e: MessageEvent) => {
+      const reqMsg = e.data;
+      switch (reqMsg.type) {
+        case 'REQ_BODY_CHUNK':
+          if (reqMsg.chunk) {
+            const chunkData = new Uint8Array(reqMsg.chunk);
+            writeQueue = writeQueue.then(async () => {
+              try {
+                await stream.write(chunkData);
+              } catch {}
+            });
+          }
+          break;
+        case 'REQ_BODY_END':
+          writeQueue = writeQueue.then(async () => {
+            try {
+              stream.close();
+            } catch {}
+          });
+          break;
+        case 'RESP_CANCEL':
+          stream.reset();
+          break;
+      }
+    };
+
+    // Handle response headers from Go Agent
+    stream.onHeaders((respMeta: any) => {
+      // Sync non-HttpOnly cookies to document.cookie
+      if (respMeta.c && Array.isArray(respMeta.c)) {
+        for (const cookieStr of respMeta.c) {
+          try {
+            document.cookie = cookieStr;
+          } catch {}
+        }
+      }
+
+      port.postMessage({
+        type: 'RESP_START',
+        status: respMeta.s || 200,
+        statusText: respMeta.m || 'OK',
+        headers: respMeta.h || {},
+      });
+    });
+
+    // Stream response chunks into Service Worker
+    stream.onData((chunk: Uint8Array, fin: boolean) => {
+      if (chunk.byteLength > 0) {
+        const buf = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+        port.postMessage({
+          type: 'RESP_CHUNK',
+          chunk: buf,
+        }, [buf]);
+      }
+      if (fin) {
+        port.postMessage({ type: 'RESP_END' });
+        this.updateStreamsCount(-1);
+      }
+    });
+  }
+
+  // Listen to messages from child iframes (e.g. WebSocket Monkey Patch & Cookie sync)
+  private listenChildMessages() {
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      if (!msg) return;
+
+      if (msg.type === 'TUNNEL_COOKIE_UPDATE') {
+        // Sync document.cookie
+        try {
+          document.cookie = msg.cookie;
+        } catch {}
+      } else if (msg.type === 'TUNNEL_WS_CONNECT') {
+        this.handleWSConnect(msg, event.ports[0]);
+      }
+    });
+  }
+
+  private handleWSConnect(msg: any, port: MessagePort) {
+    if (!this.mux) {
+      port.postMessage({ type: 'WS_ERROR', error: 'P2P tunnel not open' });
+      return;
+    }
+
+    const stream = this.mux.openStream();
+    this.updateStreamsCount(1);
+    this.log(`Bridging WebSocket connection for [${msg.path}] over Stream ID ${stream.id}`);
+
+    // Send WS_CONNECT headers
+    stream.sendHeaders({
+      p: msg.path,
+      protocols: msg.protocols,
+      h: { upgrade: 'websocket' },
+    });
+
+    // Wait for 101 confirmation
+    stream.onHeaders((respMeta: any) => {
+      if (respMeta.s === 101) {
+        port.postMessage({ type: 'WS_OPENED', protocol: respMeta.h?.['sec-websocket-protocol'] });
+      } else {
+        port.postMessage({ type: 'WS_ERROR', error: respMeta.m || 'WS Upgrade failed' });
+      }
+    });
+
+    // Relays incoming stream data to WS port with defragmentation buffer
+    let wsBuffer = new Uint8Array(0);
+    stream.onData((chunk: Uint8Array, fin: boolean) => {
+      if (chunk.byteLength > 0) {
+        const next = new Uint8Array(wsBuffer.byteLength + chunk.byteLength);
+        next.set(wsBuffer, 0);
+        next.set(chunk, wsBuffer.byteLength);
+        wsBuffer = next;
+
+        while (wsBuffer.byteLength >= 5) {
+          const opcode = wsBuffer[0];
+          const view = new DataView(wsBuffer.buffer, wsBuffer.byteOffset, wsBuffer.byteLength);
+          const length = view.getUint32(1, false);
+
+          if (wsBuffer.byteLength < 5 + length) {
+            // Need more data from next chunk
+            break;
+          }
+
+          const payload = wsBuffer.subarray(5, 5 + length);
+          if (opcode === 1) {
+            const text = new TextDecoder().decode(payload);
+            port.postMessage({ type: 'WS_MSG', data: text });
+          } else {
+            const payloadBuf = wsBuffer.buffer.slice(wsBuffer.byteOffset + 5, wsBuffer.byteOffset + 5 + length);
+            port.postMessage({ type: 'WS_MSG', data: payloadBuf }, [payloadBuf]);
+          }
+          wsBuffer = wsBuffer.subarray(5 + length);
+        }
+      }
+      if (fin) {
+        port.postMessage({ type: 'WS_CLOSED' });
+        this.updateStreamsCount(-1);
+      }
+    });
+
+    // Handle outgoing data from WS port
+    port.onmessage = async (event: MessageEvent) => {
+      const clientMsg = event.data;
+      switch (clientMsg.type) {
+        case 'WS_SEND':
+          let payloadBytes: Uint8Array;
+          if (typeof clientMsg.data === 'string') {
+            payloadBytes = new TextEncoder().encode(clientMsg.data);
+          } else {
+            payloadBytes = new Uint8Array(clientMsg.data);
+          }
+
+          const packet = new Uint8Array(5 + payloadBytes.byteLength);
+          packet[0] = clientMsg.opcode || 1;
+          const view = new DataView(packet.buffer);
+          view.setUint32(1, payloadBytes.byteLength, false);
+          packet.set(payloadBytes, 5);
+
+          await stream.write(packet);
+          break;
+
+        case 'WS_CLOSE':
+          stream.close();
+          this.updateStreamsCount(-1);
+          break;
+      }
+    };
+  }
+
+  private updateStreamsCount(delta: number) {
+    this.activeStreamsCount = Math.max(0, this.activeStreamsCount + delta);
+    if (this.streamsVal) {
+      this.streamsVal.textContent = `${this.activeStreamsCount} Active`;
+    }
+  }
+
+  private async runEchoTest() {
+    if (!this.mux) return;
+
+    this.btnEcho.disabled = true;
+    this.testOutput.textContent = 'Running echo test over P2P stream...';
+
+    const testText = 'Hello P2PMux! Zero-client intranet penetration gateway is working! ' +
+      'Data: ' + Array.from({ length: 50 }, (_, i) => `[Chunk#${i}]`).join(' ');
+
+    const payload = new TextEncoder().encode(testText);
+    const stream = this.mux.openStream();
+    this.log(`Opened new P2P Stream (ID=${stream.id}). Sending ${payload.byteLength} bytes...`);
+
+    const startTime = performance.now();
+    let receivedChunks: Uint8Array[] = [];
+
+    stream.onData((chunk, fin) => {
+      if (chunk.byteLength > 0) {
+        receivedChunks.push(chunk);
+      }
+      if (fin) {
+        const elapsed = performance.now() - startTime;
+        const totalLen = receivedChunks.reduce((acc, c) => acc + c.byteLength, 0);
+        const merged = new Uint8Array(totalLen);
+        let offset = 0;
+        for (const c of receivedChunks) {
+          merged.set(c, offset);
+          offset += c.byteLength;
+        }
+
+        const decoded = new TextDecoder().decode(merged);
+        const isMatched = decoded === testText;
+
+        const report = `Stream ID ${stream.id} finished in ${elapsed.toFixed(1)}ms. ` +
+          `Transferred: ${totalLen} bytes. Verification: ${isMatched ? 'MATCHED (100% OK)' : 'MISMATCH'}`;
+
+        this.log(report);
+        this.testOutput.textContent = report;
+        this.btnEcho.disabled = false;
+      }
+    });
+
+    try {
+      await stream.write(payload);
+      stream.close();
+    } catch (err: any) {
+      this.log(`Stream write error: ${err.message}`);
+      this.btnEcho.disabled = false;
+    }
+  }
+}
+
+// Initialize on page load
+window.addEventListener('DOMContentLoaded', () => {
+  new PortalApp();
+});

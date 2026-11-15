@@ -1,0 +1,27 @@
+{
+  "name": "webrtc-gateway-web",
+  "version": "1.0.0",
+  "description": "Zero-Client WebRTC P2P Gateway Web Portal & Service Worker",
+  "main": "index.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "deploy:cloudflare": "npm run build && wrangler deploy",
+    "test": "node ../test/test_subdomain_logic.cjs && node ../test/node_id_preservation_test.cjs"
+  },
+  "keywords": [
+    "webrtc",
+    "p2p",
+    "tunnel",
+    "gateway",
+    "service-worker",
+    "zero-client"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

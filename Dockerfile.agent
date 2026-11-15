@@ -1,0 +1,46 @@
+# ==============================================================================
+# Dockerfile.agent - Zero-Client WebRTC P2P Gateway Agent
+#
+# Runs on target host / intranet / NAS / home server.
+# Registers with signaling server, connects P2P WebRTC data channels,
+# and reverse-proxies HTTP/WebSocket traffic to local destination services.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Stage 1: Build Go Agent Daemon
+# ------------------------------------------------------------------------------
+FROM golang:alpine AS agent-builder
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY pkg/ ./pkg/
+COPY cmd/ ./cmd/
+
+# Multi-arch compatible build (uses builder native arch)
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w -buildid=" \
+    -o /build/agent ./cmd/agent
+
+# ------------------------------------------------------------------------------
+# Stage 2: Minimal Production Image
+# ------------------------------------------------------------------------------
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates tzdata
+
+WORKDIR /app
+COPY --from=agent-builder /build/agent /app/agent
+
+# Default environment variables for agent
+ENV NODE_ID=homeserver \
+    SIGNAL_URL=ws://127.0.0.1:8888/ws \
+    TARGET_URL=http://127.0.0.1:8080 \
+    SECRET="" \
+    PROXY_URL="" \
+    SNI="" \
+    INSECURE=false
+
+ENTRYPOINT ["/app/agent"]
