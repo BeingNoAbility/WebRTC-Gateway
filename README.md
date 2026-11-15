@@ -273,6 +273,15 @@ Go 二进制通过 `go:embed` 技术将编译好的 Web 门户（HTML、JS、Ser
 - **服务端镜像 (`Dockerfile.server`)**：包含前端编译产物与信令服务，仅约 **16MB**
 - **Agent 镜像 (`Dockerfile.agent`)**：纯 Go 静态编译守护进程，仅约 **20MB**
 
+> [!TIP]
+> 项目已配置 GitHub Container Registry (GHCR) 官方镜像流水线，支持直接拉取多架构（amd64 / arm64）镜像，免除本地构建步骤：
+> ```bash
+> # 拉取服务端镜像 (含前端与信令)
+> docker pull ghcr.io/beingnoability/webrtc-p2p-server:latest
+> # 拉取内网穿透 Agent 客户端
+> docker pull ghcr.io/beingnoability/webrtc-p2p-agent:latest
+> ```
+
 根目录下提供了**高度模块化且内置完备注释的 [docker-compose.yml](docker-compose.yml)**，开箱即用。
 
 #### 1. 快速启动 (默认配置)
