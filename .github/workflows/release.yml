@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-matrix:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            archive_ext: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive_ext: tar.gz
+          - goos: windows
+            goarch: amd64
+            binary_ext: .exe
+            archive_ext: zip
+          - goos: windows
+            goarch: arm64
+            binary_ext: .exe
+            archive_ext: zip
+          - goos: darwin
+            goarch: amd64
+            archive_ext: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive_ext: tar.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+
+      - name: Determine Version Tag
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compile Binaries
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p build_output
+          BIN_EXT="${{ matrix.binary_ext }}"
+          go build -trimpath -ldflags="-s -w -buildid=" -o "build_output/agent${BIN_EXT}" ./cmd/agent
+          go build -trimpath -ldflags="-s -w -buildid=" -o "build_output/signal${BIN_EXT}" ./cmd/signal
+
+      - name: Create Archive
+        id: archive
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          ARCHIVE_NAME="webrtc-gateway_${TAG}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          cp README.md LICENSE build_output/
+          
+          if [ "${{ matrix.archive_ext }}" = "zip" ]; then
+            cd build_output
+            zip -9 -r "../${ARCHIVE_NAME}.zip" .
+            cd ..
+            echo "filename=${ARCHIVE_NAME}.zip" >> $GITHUB_OUTPUT
+          else
+            cd build_output
+            tar -czvf "../${ARCHIVE_NAME}.tar.gz" .
+            cd ..
+            echo "filename=${ARCHIVE_NAME}.tar.gz" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.archive.outputs.filename }}
+          path: ${{ steps.archive.outputs.filename }}
+          retention-days: 1
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Determine Version Tag
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Checksums
+        run: |
+          cd release_assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: ${{ steps.vars.outputs.tag }} - Zero-Client WebRTC P2P Gateway
+          files: release_assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
