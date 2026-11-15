@@ -1,11 +1,16 @@
 # Zero-Client P2P WebRTC Intranet Penetration Gateway
 ### 浏览器零客户端依赖的 P2P WebRTC 端到端内网穿透网关
 
-[![Go Version](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go)](https://go.dev/)
+<p align="center">
+  <a href="README.md"><b>简体中文</b></a> · <a href="README_en.md"><b>English</b></a>
+</p>
+
+[![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go)](https://go.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![WebRTC](https://img.shields.io/badge/WebRTC-Pion%20v4-FF6B6B?logo=webrtc)](https://github.com/pion/webrtc)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://www.docker.com/)
+[![Docker](https://img.shields.io/badge/Docker-Multi--Arch-2496ED?logo=docker)](https://github.com/BeingNoAbility/WebRTC-Gateway/pkgs/container/webrtc-p2p-server)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![CI](https://github.com/BeingNoAbility/WebRTC-Gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/BeingNoAbility/WebRTC-Gateway/actions/workflows/ci.yml)
 
 ---
 

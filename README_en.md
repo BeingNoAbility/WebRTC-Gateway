@@ -1,0 +1,469 @@
+# Zero-Client P2P WebRTC Intranet Penetration Gateway
+### End-to-End P2P WebRTC Reverse Proxy Gateway with Zero Client Dependencies in Visitor Browsers
+
+<p align="center">
+  <a href="README.md"><b>简体中文</b></a> · <a href="README_en.md"><b>English</b></a>
+</p>
+
+[![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go)](https://go.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-3178C6?logo=typescript)](https://www.typescriptlang.org/)
+[![WebRTC](https://img.shields.io/badge/WebRTC-Pion%20v4-FF6B6B?logo=webrtc)](https://github.com/pion/webrtc)
+[![Docker](https://img.shields.io/badge/Docker-Multi--Arch-2496ED?logo=docker)](https://github.com/BeingNoAbility/WebRTC-Gateway/pkgs/container/webrtc-p2p-server)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![CI](https://github.com/BeingNoAbility/WebRTC-Gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/BeingNoAbility/WebRTC-Gateway/actions/workflows/ci.yml)
+
+---
+
+## 💡 What is Zero-Client P2P WebRTC Gateway?
+
+This project introduces a revolutionary intranet penetration and remote access architecture: **"Zero client software, zero browser extensions, zero privileged root CA certificates, and zero network configuration on the visitor's side."**
+
+In traditional penetration solutions (such as FRP, NPS, Ngrok, or Cloudflare Tunnel), all private intranet traffic must be relayed through public relay servers. This architecture is constrained by expensive and narrow bandwidth quotas on relay VPS instances, creates single-point bandwidth bottlenecks, and raises significant privacy concerns. On the other hand, VPN solutions like Tailscale, WireGuard, or ZeroTier mandate that visitors install dedicated desktop/mobile client applications or system-level TUN/TAP virtual network drivers.
+
+This project is built upon **WebRTC RTCDataChannel (SCTP) + In-Browser Service Worker Transparent Interception & DOM Virtualization Sandbox**:
+1. **Visitor Side**: Simply navigate to a portal link or custom subdomain in any modern browser (Chrome, Edge, Safari, Firefox, iOS/Android mobile browsers);
+2. **Penetration Layer**: The browser automatically negotiates via lightweight signaling with the **Agent daemon** running inside your home intranet / private server, executes WebRTC NAT traversal (STUN/ICE), and establishes an **end-to-end encrypted direct peer-to-peer data channel (DTLS-SRTP)**;
+3. **Application Experience**: All HTTP requests, API calls, cookies, media streaming, and WebSocket full-duplex communications are transmitted **directly between the browser and the intranet server**, consuming zero relay server traffic. Your backend web applications require **zero code modifications**!
+
+---
+
+## 📑 Table of Contents
+
+- [🌟 Key Features](#-key-features)
+- [📖 User Guide](#-user-guide)
+  - [1. 30-Second Quickstart](#1-30-second-quickstart)
+  - [2. Classic Intranet Application Practices](#2-classic-intranet-application-practices)
+  - [3. Multi-Node & Subdomain Intelligent Routing](#3-multi-node--subdomain-intelligent-routing)
+  - [4. Web Console & Node Settings Modal](#4-web-console--node-settings-modal)
+  - [5. Agent Command-Line Flags & Environment Variables](#5-agent-command-line-flags--environment-variables)
+  - [6. Integrated Signal Server CLI & Environment Variables](#6-integrated-signal-server-cli--environment-variables)
+  - [7. Security & Access Control](#7-security--access-control)
+- [🛠️ Production Deployment Guide (Self-Hosting & Operations)](#️-production-deployment-guide-self-hosting--operations)
+  - [Option A: Cloudflare Workers Unified Edge Deployment (Zero Server Cost)](#option-a-cloudflare-workers-unified-edge-deployment-zero-server-cost)
+  - [Option B: Self-Hosted Linux / Windows Standalone Server (Single Binary)](#option-b-self-hosted-linux--windows-standalone-server-single-binary)
+  - [Option C: Docker & Docker Compose Containerized Deployment](#option-c-docker--docker-compose-containerized-deployment)
+- [💻 Developer Guide](#-developer-guide)
+  - [1. System Architecture & End-to-End Data Flow](#1-system-architecture--end-to-end-data-flow)
+  - [2. P2PMux v1 Binary Streaming Multiplexing Protocol Specification](#2-p2pmux-v1-binary-streaming-multiplexing-protocol-specification)
+  - [3. In-Browser DOM Virtualization & Service Worker Core Mechanisms](#3-in-browser-dom-virtualization--service-worker-core-mechanisms)
+  - [4. Project Repository Structure Overview](#4-project-repository-structure-overview)
+  - [5. Local Source Build & Automated Test Suite](#5-local-source-build--automated-test-suite)
+- [📄 License](#-license)
+
+---
+
+## 🌟 Key Features
+
+- 🚀 **True Zero-Client Experience**: Visitors only need a modern browser on a desktop or phone. Open the URL to access private intranet services immediately.
+- ⚡ **P2P Direct Line Speed**: Powered by WebRTC ICE/STUN NAT traversal. Enjoy full upstream speeds of home gigabit broadband (verified LAN RTT of 1~3ms; cross-ISP P2P utilizes full broadband uplink without third-party throttling).
+- 🔒 **End-to-End Native Encryption**: Transport layer enforces DTLS-SRTP asymmetric negotiation and strong cryptography. The signaling broker only routes metadata; relay nodes cannot decrypt or inspect application traffic.
+- 🌐 **Multi-Node & Subdomain Awareness**: Run multiple machines and services simultaneously. Route seamlessly via `<nodeId>.p2p.domain.com`, `#nodeId`, or interactive settings modal.
+- 🧰 **Transparent Web Protocol Stack Virtualization**:
+  - **HTTP/HTTPS**: Full method support (GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD), chunked streaming responses, and file downloads.
+  - **HTTP 206 Partial Content**: Complete support for video/audio Range streaming; instant seeking and fast forwarding without waiting for full downloads.
+  - **WebSocket Full-Duplex**: Built-in fragmentation and defragmentation across SCTP frames, supporting arbitrarily large payloads without frame drops.
+  - **Cookie Session Persistence**: Agent isolates independent session CookieJars per visitor; non-HttpOnly cookies synchronize bidirectionally with the browser DOM.
+  - **W3C Upload Progress Virtualization**: Overcomes Chromium's limitation where Service Worker fetch proxies fail to fire `xhr.upload.onprogress`. Upload progress bars advance smoothly in cloud drives and speed tests.
+  - **Hotlink Protection Bypass & Sandbox Security**: Automatically strips restrictive Referrer policies; provides deep defenses against Anti-Frame-Busting techniques.
+  - **New Tab / Window Node ID Persistence**: Service Worker injects `window.__P2P_NODE_ID__` into HTML streams, and `patch.js` rewrites popups to `?peer=${nodeId}#${nodeId}`, preventing new windows from falling back to subdomains and causing offline errors.
+
+---
+
+## 📖 User Guide
+
+### 1. 30-Second Quickstart
+
+Using this gateway requires only two steps: **launch the Agent in your intranet, then open the URL in your browser**.
+
+#### Step 1: Launch Agent on the Intranet Target Machine
+
+Download pre-compiled binaries from [Releases](https://github.com/BeingNoAbility/WebRTC-Gateway/releases) or build from source:
+
+**Windows:**
+```powershell
+.\bin\agent.exe -node-id myhome -signal wss://signal.yourdomain.com/ws -target http://127.0.0.1:8080
+# Local development test:
+# .\bin\agent.exe -node-id myhome -signal ws://127.0.0.1:8888/ws -target http://127.0.0.1:8080
+```
+
+**Linux / NAS / Raspberry Pi:**
+```bash
+chmod +x ./bin/agent_linux_amd64
+./bin/agent_linux_amd64 -node-id myhome -signal wss://signal.yourdomain.com/ws -target http://127.0.0.1:8080
+# Local development test:
+# ./bin/agent_linux_amd64 -node-id myhome -signal ws://127.0.0.1:8888/ws -target http://127.0.0.1:8080
+```
+
+*(Note: `-target` points to the local web application you want to expose, such as an internal NAS dashboard, Alist, Jellyfin, etc.)*
+
+#### Step 2: Open the Portal in Any Remote Browser
+
+In your smartphone or remote computer's browser, open:
+👉 **`https://p2p.yourdomain.com/#myhome`** *(or `http://localhost:8888/#myhome` for local testing)*
+
+The browser automatically exchanges signaling with the Agent, punches through NAT via STUN/ICE in seconds, and renders the service. A floating badge in the bottom-right corner displays real-time RTT latency.
+
+---
+
+### 2. Classic Intranet Application Practices
+
+| Application Scenario | Typical Target Address | Agent Startup Command | Browser Experience |
+| :--- | :--- | :--- | :--- |
+| **Home Media (Jellyfin / Emby / Plex)** | `http://192.168.1.100:8096` | `./agent -node-id media -target http://192.168.1.100:8096` | High-definition media streaming, fast seeking, full Range 206 chunking. |
+| **Password Manager (Vaultwarden)** | `http://127.0.0.1:8080` | `./agent -node-id bitwarden -target http://127.0.0.1:8080` | Full WebCrypto API, Passkey support, Cookie isolation. |
+| **Private Cloud Storage (Alist / FileBrowser)** | `http://127.0.0.1:5244` | `./agent -node-id pan -target http://127.0.0.1:5244` | Multi-file concurrent uploads/downloads, W3C progress bar virtualization. |
+| **Cloud Photos (Immich / PhotoPrism)** | `http://127.0.0.1:2283` | `./agent -node-id photo -target http://127.0.0.1:2283` | Instant thumbnail waterfall rendering, seamless SvelteKit frontend compatibility. |
+| **Container Dashboard (Portainer)** | `https://127.0.0.1:9443` | `./agent -node-id docker -target https://127.0.0.1:9443` | Neutralizes Anti-Frame-Busting restrictions, real-time WebSocket terminal interaction. |
+| **Local Development & Debugging** | `http://localhost:3000` | `./agent -node-id dev -target http://localhost:3000` | Zero-configuration sharing of local Vite / Next.js / Spring Boot apps for clients or peers. |
+
+---
+
+### 3. Multi-Node & Subdomain Intelligent Routing
+
+The portal features an adaptive routing resolution pipeline:
+
+```
+URL Query Parameter (?peer=nas)
+  ➔ URL Short Hash (#nas)
+    ➔ Subdomain Prefix (nas.p2p.domain.com or nas.domain.com)
+      ➔ LocalStorage Stored Node
+        ➔ Built-in Default Node
+```
+
+1. **Subdomain Direct Routing (Recommended)**:
+   - With wildcard DNS configured, visitors can visit `https://nas.p2p.yourdomain.com/`. The portal extracts `nas` as the Node ID automatically.
+   - Secondary subdomains are also supported: `https://jellyfin.yourdomain.com/` ➔ routes to node `jellyfin`.
+2. **URL Short Hash Format**:
+   - `https://p2p.yourdomain.com/#vaultwarden` ➔ connects to node `vaultwarden`.
+3. **URL Query Parameter Format**:
+   - `https://p2p.yourdomain.com/?peer=photo` ➔ connects to node `photo`.
+
+---
+
+### 4. Web Console & Node Settings Modal
+
+A permanent **Status Pill Badge** is rendered in the bottom-right corner:
+- **Network Status**: Displays live connection status (Connected / Connecting) and end-to-end RTT latency (e.g. `⚡ RTT: 2.1ms`).
+- **Settings Modal**: Click the `⚙` icon to open the configuration dialog:
+  - Switch Node ID on the fly;
+  - Configure custom WebSocket signaling server URLs;
+  - Quick-switch node chips;
+  - Hot reconnection with settings saved in `localStorage`.
+
+---
+
+### 5. Agent Command-Line Flags & Environment Variables
+
+The Agent supports both command-line flags and environment variables:
+
+| CLI Flag | Environment Variable (ENV) | Default Value | Description |
+| :--- | :--- | :--- | :--- |
+| `-node-id` | `NODE_ID` | `homeserver` | Unique node identifier in the signaling network |
+| `-signal` | `SIGNAL_URL` | `ws://127.0.0.1:8888/ws` | Signaling server WebSocket URL (`ws://` or `wss://`) |
+| `-target` | `TARGET_URL` | `http://127.0.0.1:8080` | Local or LAN destination Web service URL |
+| `-secret` | `SECRET` | `""` | Optional pre-shared authentication secret token |
+| `-proxy` | `PROXY_URL` | `""` | Optional outbound proxy (`http://`, `https://`, `socks5://`) |
+| `-sni` | `SNI` | `""` | Optional TLS SNI & Host header override (for direct Anycast IP dialing) |
+| `-insecure` | `INSECURE` | `false` | Skip TLS certificate verification for self-signed signaling servers |
+
+---
+
+### 6. Integrated Signal Server CLI & Environment Variables
+
+| CLI Flag | Environment Variable (ENV) | Default Value | Description |
+| :--- | :--- | :--- | :--- |
+| `-addr` | `ADDR` / `PORT` | `:8888` | Listening port and address for HTTP/HTTPS & WebSocket |
+| `-tls-cert` | `TLS_CERT` | `""` | Path to TLS certificate PEM file |
+| `-tls-key` | `TLS_KEY` | `""` | Path to TLS private key PEM file |
+| `-tls-auto` | `TLS_AUTO` | `false` | Automatically generates in-memory ECDSA SAN certificates for LAN IPs |
+| `-secret` | `SECRET` | `""` | Optional global master secret token to restrict Agent registrations |
+| `-static` | `STATIC_DIR` | `./web/dist` | Custom static web directory (defaults to embedded DistFS) |
+
+---
+
+### 7. Security & Access Control
+
+- **End-to-End Native Cryptography**: All data traveling through the WebRTC DataChannel is encrypted via DTLS 1.2/1.3 and AES-GCM. Even if signaling traffic is monitored, payload decryption is cryptographically impossible.
+- **Dual Secret Token Protection**:
+  1. **Visitor Access Control**:
+     - Launch the Agent with `-secret your_token` (or `SECRET` env);
+     - Pass via URL: `https://p2p.yourdomain.com/#myhome?secret=your_token`;
+     - If absent, the portal prompts a dark-mode password modal with local persistence options;
+     - The Agent performs constant-time token comparison upon receiving Offer signals and rejects unauthorized attempts immediately.
+  2. **Signaling Node Anti-Hijacking**:
+     - When an Agent first registers a `node_id`, it binds its secret with the signaling server;
+     - Rogue agents cannot overwrite or hijack an existing online node without providing the matching secret;
+     - The signaling server can also enforce `-secret` cluster-wide master tokens.
+- **Session Isolation**: Each visitor browser session is allocated isolated channel IDs and CookieJars.
+
+---
+
+## 🛠️ Production Deployment Guide (Self-Hosting & Operations)
+
+### Option A: Cloudflare Workers Unified Edge Deployment (Zero Server Cost)
+
+**Recommended production architecture**. Leverages Cloudflare Workers' 300+ global Anycast edge nodes, paired with Durable Objects for signaling and static asset delivery. **Zero hosting cost, high availability, sub-millisecond edge routing**.
+
+```bash
+# 1. Build frontend assets
+cd web
+npm install
+npm run build
+
+# 2. Deploy to Cloudflare Workers
+npx wrangler deploy
+```
+
+Once deployed, the Worker handles both static UI and WebSocket signaling:
+- **Web Portal**: `https://p2p.yourdomain.com/`
+- **Signaling Endpoint**: `wss://p2p.yourdomain.com/ws`
+
+---
+
+### Option B: Self-Hosted Linux / Windows Standalone Server (Single Binary)
+
+The Go binary embeds the compiled Web portal assets via `go:embed`. **Zero external file dependencies, no Node.js runtime, no Nginx reverse proxy required**:
+
+#### 1. Launch Integrated Server
+```bash
+# Production with valid SSL certificate:
+./bin/signal_linux_amd64 -addr :443 -tls-cert /path/to/fullchain.pem -tls-key /path/to/privkey.pem
+
+# LAN / Development with Auto-TLS (automatically generates SAN certificate for all physical IPs):
+./bin/signal_linux_amd64 -addr :8443 -tls-auto
+```
+
+#### 2. Launch Intranet Agent
+```bash
+./bin/agent_linux_amd64 -node-id mynode -signal wss://yourdomain.com/ws -target http://127.0.0.1:8080
+
+# When connecting to -tls-auto self-signed server:
+./bin/agent_linux_amd64 -node-id mynode -signal wss://<LAN_IP>:8443/ws -insecure -target http://127.0.0.1:8080
+```
+
+---
+
+### Option C: Docker & Docker Compose Containerized Deployment
+
+Official pre-built multi-architecture (`linux/amd64`, `linux/arm64`) images are published to GitHub Container Registry (GHCR):
+
+> [!TIP]
+> Pull pre-built multi-arch images directly without local compilation:
+> ```bash
+> # Pull server image (Portal + Signaling broker)
+> docker pull ghcr.io/beingnoability/webrtc-p2p-server:latest
+> # Pull agent image (Intranet reverse proxy client)
+> docker pull ghcr.io/beingnoability/webrtc-p2p-agent:latest
+> ```
+
+#### 1. Quick Launch with Docker Compose
+
+A production-ready [docker-compose.yml](docker-compose.yml) is included:
+
+```bash
+# Start all services
+docker compose up -d
+
+# View live logs
+docker compose logs -f
+
+# Stop services
+docker compose down
+```
+
+#### 2. Standalone Container Execution Examples
+
+**Run Server:**
+```bash
+docker run -d --name webrtc-server --restart unless-stopped \
+  -p 8888:8888 \
+  ghcr.io/beingnoability/webrtc-p2p-server:latest
+```
+
+**Run Agent (Host network mode recommended for Linux):**
+```bash
+docker run -d --name webrtc-agent --restart unless-stopped \
+  --net=host \
+  -e NODE_ID=my-nas \
+  -e SIGNAL_URL=wss://p2p.yourdomain.com/ws \
+  -e TARGET_URL=http://127.0.0.1:8096 \
+  ghcr.io/beingnoability/webrtc-p2p-agent:latest
+```
+
+---
+
+## 💻 Developer Guide
+
+### 1. System Architecture & End-to-End Data Flow
+
+```
+[Visitor Browser]                  [Public Signaling Server]             [Intranet Agent]        [Local Target App]
+      |                                        |                                |                        |
+      | 1. Connect WebSocket                   |                                |                        |
+      |--------------------------------------->|                                |                        |
+      |                                        |<-- 2. Register (Node ID) ------|                        |
+      |                                        |                                |                        |
+      | 3. Send SDP Offer (Target Node ID)     |                                |                        |
+      |--------------------------------------->|--- 4. Relay Offer ------------>|                        |
+      |                                        |<-- 5. Reply SDP Answer --------|                        |
+      |<-- 6. Relay Answer --------------------|                                |                        |
+      |                                        |                                |                        |
+      |<================ 7. WebRTC ICE NAT Traversal (STUN / Host) =============>|                        |
+      |                                                                         |                        |
+      |======= 8. Establish End-to-End Encrypted DataChannel ("p2pmux") =======>|                        |
+      |                                                                         |                        |
+      | [Service Worker intercepts fetch()]                                     |                        |
+      | 9. Encode P2PMux Stream Frame (HTTP Headers & Body)                     |                        |
+      |------------------------------------------------------------------------>|                        |
+      |                                                                         | 10. Reverse proxy req  |
+      |                                                                         |----------------------->|
+      |                                                                         |<-----------------------|
+      |                                                                         | 11. Read response      |
+      | 12. P2PMux Stream Frame (Status, Headers, Chunked Body Stream)          |                        |
+      |<------------------------------------------------------------------------|                        |
+      | 13. Stream into ReadableStream to render webpage                        |                        |
+```
+
+---
+
+### 2. P2PMux v1 Binary Streaming Multiplexing Protocol Specification
+
+To multiplex hundreds of concurrent HTTP requests, WebSocket tunnels, and large file streams over a single WebRTC `RTCDataChannel` while avoiding Head-of-Line Blocking, the gateway utilizes the **P2PMux v1** protocol.
+
+#### Frame Structure (10-byte fixed header):
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                          Stream ID (32 bits)                  |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|   Type (8)    |   Flags (8)   |       Payload Length (32)     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|       Payload Length (cont.)  |   Payload Data (0 ~ 32KB) ... |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               |
+```
+
+- **Stream ID (uint32, 4 bytes)**: Unique stream identifier. Browser initiates odd IDs (1, 3, 5...), Agent initiates even IDs (2, 4, 6...).
+- **Type (uint8, 1 byte)**:
+  - `0x01 (FrameHeaders)`: Stream metadata (HTTP method, URL, headers serialized in JSON).
+  - `0x02 (FrameData)`: Stream payload chunks.
+  - `0x03 (FrameRst)`: Stream reset or abnormal termination.
+  - `0x04 (FramePing)` / `0x05 (FramePong)`: Latency measurement and keep-alive heartbeats.
+- **Flags (uint8, 1 byte)**:
+  - `0x01 (FlagFIN)`: Indicates completion of data stream.
+- **Payload Length (uint32, 4 bytes)**: Big-endian payload byte length (capped strictly at 32KB to match SCTP MTU).
+
+---
+
+### 3. In-Browser DOM Virtualization & Service Worker Core Mechanisms
+
+1. **Service Worker Dedicated MessagePort**: Bypasses origin boundary limits via bidirectional `MessagePort` channels (`PORTAL_ATTACH`).
+2. **W3C Fetch Strict Null-Body Alignment**: Enforces `new Response(null, { status })` for HTTP 204, 205, and 304 responses, preventing Chromium/WebKit type errors.
+3. **W3C XHR Upload Progress Virtualization**: Intercepts `XMLHttpRequest.prototype.send` to dispatch simulated `ProgressEvent` sequences based on physical transfer speed.
+4. **WebSocket Defragmentation**: Employs circular buffers and 5-byte headers (Opcode + Length) to reassemble fragmented frames up to hundreds of kilobytes across SCTP boundaries.
+5. **Session-Isolated CookieJar & DOM Synchronization**: Server isolates independent CookieJars; non-HttpOnly cookies are mirrored into `document.cookie`.
+6. **Anti-Frame-Busting Defense**: Strips `allow-top-navigation` on iframes and proxies `window.top` / `window.parent` references.
+7. **New Tab / Window Node ID Deep Persistence**: Service Worker injects `window.__P2P_NODE_ID__` into HTML streams, and `patch.js` rewrites dynamic links to `?peer=${nodeId}#${nodeId}`, preventing new window clicks from dropping the node context.
+
+---
+
+### 4. Project Repository Structure Overview
+
+```
+webrtc-gateway/
+├── bin/                            # Pre-compiled multi-platform binaries
+│   ├── agent.exe                   # Windows x64 Agent daemon
+│   ├── agent_linux_amd64           # Linux x64 Agent daemon
+│   ├── signal.exe                  # Windows x64 Integrated server
+│   ├── signal_linux_amd64          # Linux x64 Integrated server
+│   └── mock_service.exe            # Local mock backend for testing
+├── cmd/                            # Go application entrypoints
+│   ├── agent/main.go               # Agent CLI
+│   ├── signal/main.go              # Integrated server CLI (embeds web/dist)
+│   └── mock_service/main.go        # Test mock backend with chunking/WS
+├── pkg/                            # Core protocol libraries
+│   ├── agent/                      # WebRTC peer connection manager
+│   ├── mux/                        # P2PMux stream scheduler and backpressure
+│   ├── protocol/                   # Binary frame encode/decode
+│   ├── proxy/                      # HTTP/WebSocket reverse proxy & CookieJar
+│   └── signaling/                  # Signaling message models
+├── web/                            # Frontend single-page app (native TypeScript)
+│   ├── src/
+│   │   ├── portal/                 # Portal UI, settings modal, WebRTC manager
+│   │   ├── sw/                     # Service Worker stream pipeline
+│   │   ├── patch/                  # DOM/XHR/WebSocket monkey patches
+│   │   ├── protocol/               # TypeScript P2PMux implementation
+│   │   └── index.html              # HTML5 template
+│   ├── dist/                       # Compiled frontend assets
+│   ├── worker.js                   # Cloudflare edge worker script
+│   ├── esbuild.config.mjs          # Fast build script
+│   ├── package.json
+│   └── tsconfig.json
+├── edge/                           # Cloudflare standalone signaling
+│   ├── cloudflare-worker/worker.js
+│   └── wrangler.toml
+├── test/                           # Automated test suites
+│   ├── advanced_e2e_scenarios_test.go # HTTP 206 Partial Content / Range / Gzip / Headers
+│   ├── secret_auth_test.go         # SECRET authentication & 401 instant rejection
+│   ├── tls_server_test.go          # Auto-TLS SAN certificate generation
+│   ├── large_file_e2e_test.go      # 100MB streaming & backpressure
+│   ├── mvp_e2e_test.go             # WebRTC signaling & concurrent streams
+│   ├── phase3_tunnel_test.go       # HTTP/WS full regression
+│   ├── test_subdomain_logic.cjs    # Subdomain resolution unit tests
+│   └── node_id_preservation_test.cjs # New window Node ID persistence & DOM tests
+├── .github/workflows/              # GitHub Actions CI/CD workflows
+│   ├── ci.yml                      # CI build & automated test matrix
+│   ├── release.yml                 # Multi-arch GitHub Release packager
+│   └── docker.yml                  # Multi-arch Docker image GHCR publisher
+├── docker-compose.yml              # Production orchestration template
+├── Dockerfile.agent                # Minimal multi-stage agent image (~20MB)
+├── Dockerfile.server               # Minimal multi-stage server image (~16MB)
+├── go.mod
+├── go.sum
+├── LICENSE
+├── README.md                       # Documentation (Simplified Chinese)
+└── README_en.md                    # Documentation (English)
+```
+
+---
+
+### 5. Local Source Build & Automated Test Suite
+
+#### ① Build Frontend Assets
+```bash
+cd web
+npm install
+npm run build
+cd ..
+```
+
+#### ② Compile Go Binaries
+```bash
+# Build native binaries
+go build -ldflags="-s -w" -o bin/agent.exe ./cmd/agent
+go build -ldflags="-s -w" -o bin/signal.exe ./cmd/signal
+
+# Cross-compile for Linux x64
+GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/agent_linux_amd64 ./cmd/agent
+GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/signal_linux_amd64 ./cmd/signal
+```
+
+#### ③ Run Full Test Suite
+```bash
+# 1. Run all Go protocol, mux, and integration tests
+go test -v ./...
+
+# 2. Run frontend routing and Node ID preservation test suites
+cd web && npm test
+# Or directly from root:
+node test/test_subdomain_logic.cjs
+node test/node_id_preservation_test.cjs
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+Contributions, issues, and feature requests are welcome! If this project helped you, please give it a ⭐️ **Star**!
