@@ -49,9 +49,10 @@ type Frame struct {
 }
 
 var (
-	ErrPayloadTooLarge = errors.New("frame payload exceeds maximum size")
-	ErrInvalidHeader   = errors.New("invalid frame header")
-	ErrBufferTooShort  = errors.New("buffer too short for frame header")
+	ErrPayloadTooLarge     = errors.New("frame payload exceeds maximum size")
+	ErrInvalidHeader       = errors.New("invalid frame header")
+	ErrBufferTooShort      = errors.New("buffer too short for frame header")
+	ErrInvalidFrameLength  = errors.New("frame length mismatch: packet size does not match declared payload length")
 )
 
 // NewFrame creates a new Frame with length automatically set.
@@ -131,6 +132,7 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 }
 
 // DecodeFrameBytes decodes a complete frame from a byte slice (as received from WebRTC DataChannel message).
+// WebRTC DataChannels are message-oriented, so data must contain exactly one full frame.
 func DecodeFrameBytes(data []byte) (*Frame, error) {
 	if len(data) < HeaderSize {
 		return nil, ErrBufferTooShort
@@ -140,8 +142,9 @@ func DecodeFrameBytes(data []byte) (*Frame, error) {
 		return nil, err
 	}
 
-	if uint32(len(data)-HeaderSize) < frame.Length {
-		return nil, io.ErrUnexpectedEOF
+	expectedLen := HeaderSize + int(frame.Length)
+	if len(data) != expectedLen {
+		return nil, fmt.Errorf("%w: packet size %d mismatch header declaration %d", ErrInvalidFrameLength, len(data), expectedLen)
 	}
 
 	frame.Payload = data[HeaderSize : HeaderSize+int(frame.Length)]

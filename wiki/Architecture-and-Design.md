@@ -59,13 +59,17 @@ WebRTC Gateway 采用分层解耦的云原生边缘架构，由三个核心组�
 
 - **Stream ID (uint32, 4 字节)**：流的唯一标识符。浏览器发起奇数流 ID（1, 3, 5...），Agent 发起偶数流 ID（2, 4, 6...），杜绝冲突；
 - **Type (uint8, 1 字节)**：
-  - `0x01 (FrameHeaders)`：流的首包元数据（包含 HTTP 路径、方法、Query、Headers 等 JSON 序列化数据）；
-  - `0x02 (FrameData)`：流的实际载荷数据块（分片传输）；
-  - `0x03 (FrameRst)`：流重置/异常终止；
-  - `0x04 (FramePing)` / `0x05 (FramePong)`：用于端到端延迟测定与保活心跳；
+  - `0x01 (TypeData)`：流的实际载荷数据块（分片流式传输）；
+  - `0x02 (TypeHeaders)`：流的首包元数据（包含 HTTP 路径、方法、Query、Headers 等 JSON 序列化数据）；
+  - `0x03 (TypeRstStream)`：流重置/异常终止，携带错误码；
+  - `0x04 (TypeWindowUpdate)`：流量控制窗口更新（为高并发背压与流控扩展保留）；
+  - `0x05 (TypePing)` / `0x06 (TypePong)`：用于端到端延迟精确测定与保活心跳；
+  - `0x10 (TypeWSConnect)` / `0x11 (TypeWSData)` / `0x12 (TypeWSClose)`：原生 WebSocket 隧道专用握手、双向数据与关闭帧。
 - **Flags (uint8, 1 字节)**：
-  - `0x01 (FlagFIN)`：标记该流的数据发送完毕（半关闭/完全关闭信号）；
-- **Payload Length (uint32, 4 字节)**：载荷字节长度（大端序）。单帧最大载荷严格限制在 **32KB (32768 字节)**，以完美适配 WebRTC 底层 SCTP MTU，杜绝由于超大分包导致的底层缓冲区溢出与丢包。
+  - `0x00 (FlagNone)`：常规数据帧；
+  - `0x01 (FlagFin)`：标记该流的数据发送完毕（半关闭/完全关闭信号）；
+  - `0x02 (FlagAck)`：控制帧确认应答。
+- **Payload Length (uint32, 4 字节)**：载荷字节长度（大端序）。单帧最大载荷上限为 **64KB (MaxPayloadSize = 65536 字节)**，推荐分块流式传输尺寸为 **32KB (RecommendedChunkSize = 32768 字节)**，以完美适配 WebRTC 底层 SCTP MTU，杜绝超大分包导致底层缓冲区溢出与丢包。
 
 ---
 

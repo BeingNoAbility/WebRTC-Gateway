@@ -83,3 +83,19 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 ### ③ 智能受信代理过滤 (`-trusted-proxies`)
 - 默认自动信任标准私网 CIDR（`127.0.0.1/32`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` 等回环与 Docker 网桥）；
 - 当服务端直接裸跑在公网且请求来自非受信 IP 时，强制忽略伪造的 `X-Forwarded-For` 请求头，直接取底层套接字的真实 `RemoteAddr`，彻底封死 IP 伪造漏洞。
+
+---
+
+## 5. 设计哲学与安全边界声明 (Design Philosophy & Security Boundaries)
+
+为了守住产品的核心护城河与轻量极致体验，本项目坚定恪守以下两条设计纪律：
+
+### ① 无状态网络门禁定位 (Stateless Transport Gatekeeper)
+- `-access-secret` 与 HMAC 时效签名本质上是**网络传输层的 P2P 隧道准入门禁（L4/L7 Gatekeeper）**；
+- 它的使命是：以极速纯数学验证（HMAC-SHA256）、零中心化数据库依赖、零 Redis 内存表阻断非授权访客建立 WebRTC 物理隧道；
+- **更细粒度的业务安全职责划分**：细粒度用户账户体系、多租户 RBAC 权限管理、OAuth2/OIDC 单点登录以及单会话即时撤销，属于内网各 Web 应用（如 Nextcloud、Jellyfin、Vaultwarden、Gitea）或上层专职反代（如 Authelia / Keycloak）的职责。网关坚决不做业务层的大一统身份认证中心。
+
+### ② 原生拓扑免疫 SSRF (Native SSRF Immunity by Design)
+- Agent 守护进程采用严格的**静态单向服务绑定**（`-target http://127.0.0.1:8080`、`-dir` 或 `-file`）；
+- 访客端建立 WebRTC 隧道后，其所有 HTTP 请求完全被静态转发至该单向绑定的目标地址，Agent 绝不提供“由访客指定任意目标 IP 或外网 URL 代发”的能力；
+- 因此，本项目在拓扑与架构层面**原生免疫 SSRF（服务端请求伪造）**，无需也绝不引入脆弱复杂的内部 IP/CIDR 黑白名单过滤器。

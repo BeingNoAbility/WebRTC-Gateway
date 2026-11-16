@@ -27,6 +27,7 @@
 | **[⚙️ Agent 配置指南 (Agent Configuration)](Agent-Configuration)** | Agent 与信令服务全量 CLI 命令行参数、环境变量、YAML/JSON 配置文件结构与优先级机制。 | 全体使用者 / NAS 玩家 |
 | **[📂 P2P 文件与目录服务 (File & Dir Server)](File-and-Directory-Server)** | 探索 v1.6.0+ 杀手级特性：纯内存零监听端口的文件分发、私有版 Wormhole / AirDrop 单文件秒传与静态目录在线托管。 | 开发者 / 交付协作人员 |
 | **[🔒 安全与权限控制 (Security & Auth)](Security-and-Authentication)** | 控制面与数据面密钥解耦 (`-signal-secret` vs `-access-secret`)、HMAC-SHA256 无状态时效安全分享、路径穿越沙箱防御。 | 安全合规 / 团队管理员 |
+| **[🌐 浏览器兼容性矩阵 (Browser Compatibility)](Browser-Compatibility)** | Chrome、Edge、Firefox (Tier 1) 及 iOS Safari / WebKit (Tier 2) 跨端支持细则与后台进程休眠自愈机制。 | 前端工程师 / 移动端用户 |
 | **[❓ 故障排查与 FAQ (Troubleshooting & FAQ)](Troubleshooting-and-FAQ)** | 对称型 NAT 穿透诊断、TURN 中继配置、自签 HTTPS 与 Service Worker 安全上下文、移动漫游 ICE Restart 自愈。 | 故障排查 / 遇到问题人员 |
 
 ---

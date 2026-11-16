@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
-	"io"
 	"reflect"
 	"testing"
 )
@@ -106,8 +105,20 @@ func TestFrame_TruncatedBufferError(t *testing.T) {
 	// Truncate to HeaderSize + 20
 	truncated := encoded[:HeaderSize+20]
 	_, err := DecodeFrameBytes(truncated)
-	if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, ErrBufferTooShort) {
-		t.Fatalf("expected ErrBufferTooShort or io.ErrUnexpectedEOF, got %v", err)
+	if !errors.Is(err, ErrInvalidFrameLength) && !errors.Is(err, ErrBufferTooShort) {
+		t.Fatalf("expected ErrInvalidFrameLength or ErrBufferTooShort, got %v", err)
+	}
+}
+
+func TestFrame_ExtraTrailingBytesError(t *testing.T) {
+	// Header declares 10 bytes payload, but buffer provides 29 bytes (19 trailing garbage bytes)
+	frame := NewFrame(1, TypeData, FlagNone, []byte("0123456789"))
+	encoded := frame.Encode()
+	corrupted := append(encoded, []byte("extra_trailing_bytes")...)
+
+	_, err := DecodeFrameBytes(corrupted)
+	if !errors.Is(err, ErrInvalidFrameLength) {
+		t.Fatalf("expected ErrInvalidFrameLength on trailing bytes, got %v", err)
 	}
 }
 

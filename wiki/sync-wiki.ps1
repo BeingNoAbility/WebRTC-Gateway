@@ -45,7 +45,10 @@ try {
         Write-Host "  -> Synced: $($_.Name)" -ForegroundColor Green
     }
     if (Test-Path (Join-Path $ScriptDir "assets")) {
-        Copy-Item -Path (Join-Path $ScriptDir "assets") -Destination (Join-Path $TempDir "assets") -Recurse -Force
+        $destAssets = Join-Path $TempDir "assets"
+        if (-not (Test-Path $destAssets)) { New-Item -ItemType Directory -Path $destAssets | Out-Null }
+        Copy-Item -Path (Join-Path $ScriptDir "assets\*") -Destination $destAssets -Recurse -Force
+        if (Test-Path (Join-Path $destAssets "assets")) { Remove-Item -Path (Join-Path $destAssets "assets") -Recurse -Force }
         Write-Host "  -> Synced: assets/" -ForegroundColor Green
     }
 

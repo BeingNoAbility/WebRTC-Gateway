@@ -240,6 +240,9 @@ The Agent supports both command-line flags and environment variables:
   - Re-establishes broken signaling sockets and renegotiates in-place on the existing `RTCPeerConnection` with `iceRestart: true`;
   - Agent introduces a 5-second grace window, preserving the DataChannel and Mux state without reloading the inner app.
 - **Session Isolation**: Each visitor browser session is allocated isolated channel IDs and CookieJars.
+- **Design Philosophy & Security Boundaries Declaration**:
+  1. **Stateless Transport Gatekeeper**: `-access-secret` and HMAC-SHA256 signatures are transport-level NAT traversal gatekeepers. They are strictly mathematical, zero-state, with zero external database or Redis dependencies. Granular user directories, RBAC permissions, and single-session revocation belong inside the upstream application (e.g. Nextcloud, Jellyfin, Vaultwarden);
+  2. **Native SSRF Immunity by Design**: The Agent daemon statically binds only to its configured target (`-target`, `-dir`, or `-file`). It never proxies arbitrary outbound requests or performs internal port scanning, making it natively immune to SSRF attacks without bloated IP/CIDR filtering rules.
 
 ---
 
@@ -410,13 +413,17 @@ To multiplex hundreds of concurrent HTTP requests, WebSocket tunnels, and large 
 
 - **Stream ID (uint32, 4 bytes)**: Unique stream identifier. Browser initiates odd IDs (1, 3, 5...), Agent initiates even IDs (2, 4, 6...).
 - **Type (uint8, 1 byte)**:
-  - `0x01 (FrameHeaders)`: Stream metadata (HTTP method, URL, headers serialized in JSON).
-  - `0x02 (FrameData)`: Stream payload chunks.
-  - `0x03 (FrameRst)`: Stream reset or abnormal termination.
-  - `0x04 (FramePing)` / `0x05 (FramePong)`: Latency measurement and keep-alive heartbeats.
+  - `0x01 (TypeData)`: Stream payload data chunks (streaming transfer).
+  - `0x02 (TypeHeaders)`: Stream metadata (HTTP method, URL, headers serialized in JSON).
+  - `0x03 (TypeRstStream)`: Stream reset or abnormal termination with error code.
+  - `0x04 (TypeWindowUpdate)`: Flow control window update (reserved for high-concurrency backpressure).
+  - `0x05 (TypePing)` / `0x06 (TypePong)`: Precise RTT latency measurement and keep-alive heartbeats.
+  - `0x10 (TypeWSConnect)` / `0x11 (TypeWSData)` / `0x12 (TypeWSClose)`: Native WebSocket tunneling handshake, bidirectional data, and teardown frames.
 - **Flags (uint8, 1 byte)**:
-  - `0x01 (FlagFIN)`: Indicates completion of data stream.
-- **Payload Length (uint32, 4 bytes)**: Big-endian payload byte length (capped strictly at 32KB to match SCTP MTU).
+  - `0x00 (FlagNone)`: Standard data frame.
+  - `0x01 (FlagFin)`: Indicates end of data stream (half-close / full-close signal).
+  - `0x02 (FlagAck)`: Control frame acknowledgement.
+- **Payload Length (uint32, 4 bytes)**: Big-endian payload byte length. Maximum payload is capped at **64KB (MaxPayloadSize = 65536 bytes)**, with a recommended chunk size of **32KB (RecommendedChunkSize = 32768 bytes)** for optimal SCTP transmission safety and low buffer bloat.
 
 ---
 

@@ -10,6 +10,7 @@
 - **[⚙️ Agent 配置指南 (Agent Configuration)](Agent-Configuration)**
 - **[📂 P2P 文件与目录服务 (File & Dir Server)](File-and-Directory-Server)**
 - **[🔒 安全与权限控制 (Security & Auth)](Security-and-Authentication)**
+- **[🌐 浏览器兼容性矩阵 (Browser Compatibility)](Browser-Compatibility)**
 - **[❓ 故障排查与 FAQ (Troubleshooting & FAQ)](Troubleshooting-and-FAQ)**
 
 ---

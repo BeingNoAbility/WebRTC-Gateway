@@ -66,8 +66,8 @@ export function decodeFrame(data: Uint8Array): DecodedFrame {
   const flags = view.getUint8(5);
   const length = view.getUint32(6, false);
 
-  if (data.byteLength < HeaderSize + length) {
-    throw new Error(`Buffer truncated: expected ${HeaderSize + length}, got ${data.byteLength}`);
+  if (data.byteLength !== HeaderSize + length) {
+    throw new Error(`Buffer size mismatch: expected ${HeaderSize + length}, got ${data.byteLength}`);
   }
 
   // Use .slice() to create an independent Uint8Array with its own ArrayBuffer starting at offset 0

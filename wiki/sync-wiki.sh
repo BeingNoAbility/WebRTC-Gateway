@@ -38,7 +38,8 @@ git clone "${WIKI_REPO_URL}" "${TEMP_DIR}"
 echo "Copying documentation pages..."
 cp -f "${SCRIPT_DIR}"/*.md "${TEMP_DIR}/"
 if [ -d "${SCRIPT_DIR}/assets" ]; then
-    cp -rf "${SCRIPT_DIR}/assets" "${TEMP_DIR}/"
+    mkdir -p "${TEMP_DIR}/assets"
+    cp -rf "${SCRIPT_DIR}/assets"/* "${TEMP_DIR}/assets/"
 fi
 
 cd "${TEMP_DIR}"
