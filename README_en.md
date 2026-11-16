@@ -165,6 +165,10 @@ The Agent supports both command-line flags and environment variables:
 | `-proxy` | `PROXY_URL` | `""` | Optional outbound proxy (`http://`, `https://`, `socks5://`) |
 | `-sni` | `SNI` | `""` | Optional TLS SNI & Host header override (for direct Anycast IP dialing) |
 | `-insecure` | `INSECURE` | `false` | Skip TLS certificate verification for self-signed signaling servers |
+| `-turn-url` | `TURN_URL` | `""` | Optional TURN relay server URL (`turn:relay.domain.com:3478`, bypasses symmetric NAT) |
+| `-turn-user` | `TURN_USER` | `""` | Optional TURN relay authentication username |
+| `-turn-pass` | `TURN_PASS` | `""` | Optional TURN relay authentication credential / password |
+| `-stun-servers` | `STUN_SERVERS` | `""` | Optional custom comma-separated STUN server list |
 
 ---
 

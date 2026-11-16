@@ -93,6 +93,7 @@ func NewHTTPProxy(targetURLString string, cm *SessionCookieManager) (*HTTPProxy,
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  true, // Decompression handled explicitly
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		DialContext:         CreateSafeDialContext(u),
 	}
 
 	return &HTTPProxy{
@@ -153,6 +154,14 @@ func (p *HTTPProxy) resolveTargetURL(reqPath string, headers map[string]string) 
 
 	if destHost != "" {
 		hostOnly := strings.ToLower(strings.Split(destHost, ":")[0])
+
+		// SSRF Defense: If destHost is a raw IP, reject if it is a private/restricted IP (unless it is the target backend itself)
+		if parsedIP := net.ParseIP(hostOnly); parsedIP != nil {
+			if IsRestrictedIP(parsedIP) && !IsTargetHost(hostOnly, "", p.targetURL) {
+				return nil, "", fmt.Errorf("SSRF blocked: proxy access to restricted/private IP %s is forbidden", hostOnly)
+			}
+		}
+
 		brand := strings.Split(p.rootDomain, ".")[0]
 		brandShort := brand
 		if len(brandShort) > 4 {

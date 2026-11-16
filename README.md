@@ -165,6 +165,10 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-proxy` | `PROXY_URL` | `""` | 可选的前置代理（支持 HTTP/HTTPS/SOCKS5，用于连接受限信令） |
 | `-sni` | `SNI` | `""` | 可选的 TLS SNI 与 Host 标头覆盖（用于绕过 DNS 污染直连 Cloudflare Anycast IP） |
 | `-insecure` | `INSECURE` | `false` | 连接自签名 TLS 信令服务器时跳过证书链校验 |
+| `-turn-url` | `TURN_URL` | `""` | 可选的 TURN 中继服务器地址（如 `turn:relay.domain.com:3478`，用于对称型 NAT 降级中继） |
+| `-turn-user` | `TURN_USER` | `""` | 可选的 TURN 中继认证用户名 |
+| `-turn-pass` | `TURN_PASS` | `""` | 可选的 TURN 中继认证密码 |
+| `-stun-servers` | `STUN_SERVERS` | `""` | 可选的自定义 STUN 服务器列表（英文逗号分隔） |
 
 ### 6. 一体化服务端 (Signal Server) 命令行参数全量说明
 
@@ -441,6 +445,10 @@ services:
 | `SECRET` | 空 | `-secret` | 可选的安全预共享鉴权密钥 |
 | `PROXY_URL` | 空 | `-proxy` | 可选的出站代理（支持 `socks5://`、`http://`） |
 | `SNI` | 空 | `-sni` | 可选的 TLS SNI 与 Host 标头覆盖（用于绕过 DNS 污染直连 Anycast IP） |
+| `TURN_URL` | 空 | `-turn-url` | 可选的 TURN 中继地址（突破对称型 NAT 限制） |
+| `TURN_USER` | 空 | `-turn-user` | 可选的 TURN 认证用户名 |
+| `TURN_PASS` | 空 | `-turn-pass` | 可选的 TURN 认证密码 |
+| `STUN_SERVERS` | 空 | `-stun-servers` | 可选的自定义 STUN 服务器列表（逗号分隔） |
 
 ---
 

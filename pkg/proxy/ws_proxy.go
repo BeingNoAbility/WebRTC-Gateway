@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -59,6 +60,7 @@ func NewWSProxy(targetBaseURL string, cm *SessionCookieManager) (*WSProxy, error
 			Proxy:            http.ProxyFromEnvironment,
 			HandshakeTimeout: 10 * time.Second,
 			TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
+			NetDialContext:   CreateSafeDialContext(u),
 		},
 	}, nil
 }
@@ -104,6 +106,14 @@ func (wp *WSProxy) resolveTargetWSURL(reqPath string, headers map[string]string)
 
 	if destHost != "" {
 		hostOnly := strings.ToLower(strings.Split(destHost, ":")[0])
+
+		// SSRF Defense: If destHost is a raw IP, reject if it is a private/restricted IP (unless it is the target backend itself)
+		if parsedIP := net.ParseIP(hostOnly); parsedIP != nil {
+			if IsRestrictedIP(parsedIP) && !IsTargetHost(hostOnly, "", wp.targetBase) {
+				return nil, "", fmt.Errorf("SSRF blocked: proxy access to restricted/private IP %s is forbidden", hostOnly)
+			}
+		}
+
 		brand := strings.Split(wp.rootDomain, ".")[0]
 		brandShort := brand
 		if len(brandShort) > 4 {

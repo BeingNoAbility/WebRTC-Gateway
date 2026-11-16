@@ -65,9 +65,11 @@ func New(nodeID, signalURL, secret, target string) *Agent {
 		wsProxy:       wp,
 		webrtcConfig: webrtc.Configuration{
 			ICEServers: []webrtc.ICEServer{
-				{URLs: []string{"stun:stun.l.google.com:19302"}},
-				{URLs: []string{"stun:stun1.l.google.com:19302"}},
+				{URLs: []string{"stun:stun.qq.com:18302"}},
+				{URLs: []string{"stun:stun.miwifi.com:3478"}},
+				{URLs: []string{"stun:stun.bilibili.com:3478"}},
 				{URLs: []string{"stun:stun.cloudflare.com:3478"}},
+				{URLs: []string{"stun:stun.l.google.com:19302"}},
 			},
 		},
 		activeConns: make(map[string]*webrtc.PeerConnection),
@@ -83,6 +85,55 @@ func (a *Agent) SetProxy(proxyURL string) {
 	if a.wsProxy != nil {
 		a.wsProxy.SetProxy(proxyURL)
 	}
+}
+
+// SetSTUN configures custom STUN servers for WebRTC ICE candidate discovery.
+func (a *Agent) SetSTUN(stunServers []string) {
+	if len(stunServers) == 0 {
+		return
+	}
+	var servers []webrtc.ICEServer
+	for _, s := range stunServers {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if !strings.HasPrefix(s, "stun:") {
+			s = "stun:" + s
+		}
+		servers = append(servers, webrtc.ICEServer{URLs: []string{s}})
+	}
+	// Preserve any configured TURN servers
+	for _, s := range a.webrtcConfig.ICEServers {
+		for _, u := range s.URLs {
+			if strings.HasPrefix(u, "turn:") || strings.HasPrefix(u, "turns:") {
+				servers = append(servers, s)
+				break
+			}
+		}
+	}
+	a.webrtcConfig.ICEServers = servers
+}
+
+// SetTURN configures a TURN relay server (UDP/TCP/TLS) to bypass symmetric NAT.
+func (a *Agent) SetTURN(turnURL, turnUser, turnPass string) {
+	turnURL = strings.TrimSpace(turnURL)
+	if turnURL == "" {
+		return
+	}
+	if !strings.HasPrefix(turnURL, "turn:") && !strings.HasPrefix(turnURL, "turns:") {
+		turnURL = "turn:" + turnURL
+	}
+	server := webrtc.ICEServer{
+		URLs: []string{turnURL},
+	}
+	if turnUser != "" {
+		server.Username = turnUser
+		server.Credential = turnPass
+		server.CredentialType = webrtc.ICECredentialTypePassword
+	}
+	a.webrtcConfig.ICEServers = append(a.webrtcConfig.ICEServers, server)
+	log.Printf("[Agent] Configured TURN relay: %s (user: %s)", turnURL, turnUser)
 }
 
 // SetInsecureTLS enables or disables skipping TLS certificate verification (useful for self-signed certificates).
@@ -228,7 +279,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 				})
 				continue
 			}
-			go a.handleOffer(msg.SessionID, msg.SDP)
+			go a.handleOffer(msg.SessionID, msg.SDP, msg.ClientToken)
 
 		case signaling.TypeCandidate:
 			a.handleRemoteCandidate(msg.SessionID, msg.Candidate)
@@ -239,7 +290,12 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
-func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription) {
+func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription, clientToken string) {
+	cookieSession := sessionID
+	if clientToken != "" {
+		cookieSession = clientToken
+	}
+
 	pc, err := webrtc.NewPeerConnection(a.webrtcConfig)
 	if err != nil {
 		log.Printf("[Agent] Failed to create PeerConnection: %v", err)
@@ -265,7 +321,7 @@ func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription) {
 			a.connMu.Lock()
 			delete(a.activeConns, sessionID)
 			a.connMu.Unlock()
-			a.cookieManager.RemoveSession(sessionID)
+			a.cookieManager.RemoveSession(cookieSession)
 			_ = pc.Close()
 		}
 	})
@@ -276,7 +332,7 @@ func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription) {
 			a.connMu.Lock()
 			delete(a.activeConns, sessionID)
 			a.connMu.Unlock()
-			a.cookieManager.RemoveSession(sessionID)
+			a.cookieManager.RemoveSession(cookieSession)
 			_ = pc.Close()
 		}
 	})
@@ -292,7 +348,7 @@ func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription) {
 		}
 
 		dc.OnOpen(func() {
-			log.Printf("[Agent] [Session %s] DataChannel p2pmux OPENED!", sessionID)
+			log.Printf("[Agent] [Session %s] DataChannel p2pmux OPENED! (cookieSession: %s)", sessionID, cookieSession)
 			m := mux.NewMux(dc, false)
 
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
@@ -307,7 +363,7 @@ func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription) {
 			})
 
 			// Accept incoming streams and route to Reverse Proxy
-			go a.streamAcceptLoop(sessionID, m)
+			go a.streamAcceptLoop(cookieSession, m)
 		})
 	})
 

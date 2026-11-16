@@ -9,6 +9,8 @@ class PortalApp {
   private peerId: string;
   private signalUrl: string;
   private secret: string = '';
+  private clientToken: string = '';
+  private initialSubpath: string = '/';
   private ws: WebSocket | null = null;
   private pc: RTCPeerConnection | null = null;
   private dc: RTCDataChannel | null = null;
@@ -36,15 +38,65 @@ class PortalApp {
     this.peerId = config.peerId;
     this.signalUrl = config.signalUrl;
     this.secret = config.secret;
+    this.initialSubpath = config.path || '/';
+
+    // Long-lived client token for persisting HttpOnly sessions across page reloads (F5)
+    let token = '';
+    try {
+      token = sessionStorage.getItem('p2p_client_token') || '';
+      if (!token) {
+        token = 'cl_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36));
+        sessionStorage.setItem('p2p_client_token', token);
+      }
+    } catch {
+      token = 'cl_' + Math.random().toString(36).substring(2);
+    }
+    this.clientToken = token;
 
     if (this.peerVal) this.peerVal.textContent = this.peerId;
     if (this.signalVal) this.signalVal.textContent = this.signalUrl;
+
+    // Listen for route synchronization from inner iframe SPA
+    if (typeof window !== 'undefined') {
+      window.addEventListener('message', (e) => {
+        if (e.data && e.data.type === 'P2P_ROUTE_SYNC') {
+          const rawPath = e.data.path;
+          if (
+            typeof rawPath === 'string' &&
+            rawPath.startsWith('/') &&
+            !rawPath.startsWith('//') &&
+            !rawPath.toLowerCase().includes('javascript:')
+          ) {
+            this.syncRouteToHash(rawPath);
+          }
+        }
+      });
+    }
 
     this.bindEvents();
     this.initServiceWorker();
     this.startSignaling();
     this.listenChildMessages();
     this.createSettingsModal();
+  }
+
+  // Synchronize internal iframe route changes to outer URL Hash (e.g. #myhome?path=/settings)
+  private syncRouteToHash(subPath: string) {
+    if (!this.peerId) return;
+    try {
+      const hashParams = new URLSearchParams();
+      if (this.secret) {
+        hashParams.set('secret', this.secret);
+      }
+      if (subPath && subPath !== '/') {
+        hashParams.set('path', subPath);
+      }
+      const qs = hashParams.toString();
+      const newHash = '#' + this.peerId + (qs ? '?' + qs : '');
+      if (window.location.hash !== newHash) {
+        window.history.replaceState(null, '', newHash);
+      }
+    } catch {}
   }
 
   // Extracts explicit Node ID from subdomain with ".p2p." delimiter (e.g. bili.p2p.example.com)
@@ -117,15 +169,36 @@ class PortalApp {
   }
 
   // Resolves configuration with priority: Query -> Hash (#nodeId) -> Explicit .p2p. Subdomain -> Stored Peer -> Subdomain -> Built-in Defaults
-  private resolveInitialConfig(): { peerId: string; signalUrl: string; secret: string } {
+  private resolveInitialConfig(): { peerId: string; signalUrl: string; secret: string; path: string } {
     const params = new URLSearchParams(window.location.search);
 
     // 1. Peer ID and Secret resolution:
     // Priority 1: Query parameter ?peer= or ?node= (explicit in virtualized link / window.open)
     let peerId = params.get('peer') || params.get('node');
-    let secret = params.get('secret') || params.get('token') || '';
+    let secret = '';
+    let initialPath = '/';
 
-    // Priority 2: URL hash (#nodeId or #nodeId?secret=xxx)
+    // Parse path from query if present and safe
+    const queryPath = params.get('path');
+    if (queryPath && queryPath.startsWith('/') && !queryPath.startsWith('//') && !queryPath.toLowerCase().includes('javascript:')) {
+      initialPath = queryPath;
+    }
+
+    // Security Hardening: Deprecate ?secret= in query string.
+    // If legacy query has secret/token, migrate to Hash and strip from search immediately.
+    const querySecret = params.get('secret') || params.get('token');
+    if (querySecret) {
+      secret = querySecret;
+      try {
+        params.delete('secret');
+        params.delete('token');
+        const cleanSearch = params.toString() ? '?' + params.toString() : '';
+        const newUrl = window.location.pathname + cleanSearch + window.location.hash;
+        window.history.replaceState(null, '', newUrl);
+      } catch {}
+    }
+
+    // Priority 2: URL hash (#nodeId or #nodeId?secret=xxx&path=/subpath)
     if (!peerId && window.location.hash) {
       const rawHash = window.location.hash.replace(/^#\/?/, '').trim();
       if (rawHash) {
@@ -135,6 +208,11 @@ class PortalApp {
           const [k, v] = parts[i].split('=');
           if ((k === 'secret' || k === 'token') && v) {
             secret = decodeURIComponent(v);
+          } else if (k === 'path' && v) {
+            const dec = decodeURIComponent(v);
+            if (dec.startsWith('/') && !dec.startsWith('//') && !dec.toLowerCase().includes('javascript:')) {
+              initialPath = dec;
+            }
           }
         }
       }
@@ -200,7 +278,7 @@ class PortalApp {
       }
     } catch {}
 
-    return { peerId, signalUrl, secret };
+    return { peerId, signalUrl, secret, path: initialPath };
   }
 
   private log(msg: string) {
@@ -413,13 +491,40 @@ class PortalApp {
   }
 
   private async initWebRTC() {
-    const config: RTCConfiguration = {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun.cloudflare.com:3478' },
-      ],
-    };
+    const iceServers: RTCIceServer[] = [
+      { urls: 'stun:stun.qq.com:18302' },
+      { urls: 'stun:stun.miwifi.com:3478' },
+      { urls: 'stun:stun.bilibili.com:3478' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      { urls: 'stun:stun.l.google.com:19302' },
+    ];
+
+    try {
+      const customStun = localStorage.getItem('p2p_stun_servers');
+      if (customStun) {
+        customStun.split(',').forEach((s) => {
+          s = s.trim();
+          if (s) iceServers.unshift({ urls: s.startsWith('stun:') ? s : 'stun:' + s });
+        });
+      }
+
+      const turnUrl = localStorage.getItem('p2p_turn_url');
+      const turnUser = localStorage.getItem('p2p_turn_user');
+      const turnPass = localStorage.getItem('p2p_turn_pass');
+      if (turnUrl) {
+        const server: RTCIceServer = {
+          urls: turnUrl.startsWith('turn:') || turnUrl.startsWith('turns:') ? turnUrl : 'turn:' + turnUrl,
+        };
+        if (turnUser) {
+          server.username = turnUser;
+          server.credential = turnPass || '';
+        }
+        iceServers.push(server);
+        this.log(`Configured TURN relay: ${server.urls}`);
+      }
+    } catch {}
+
+    const config: RTCConfiguration = { iceServers };
 
     this.pc = new RTCPeerConnection(config);
     this.updateConnState('connecting');
@@ -461,6 +566,7 @@ class PortalApp {
         node_id: this.peerId,
         sdp: offer,
         secret: this.secret,
+        client_token: this.clientToken,
       })
     );
   }
@@ -521,7 +627,7 @@ class PortalApp {
     const shouldMountFrame = params.get('mode') !== 'debug';
     if (!shouldMountFrame) return;
 
-    const startPath = params.get('path') || '/';
+    const startPath = this.initialSubpath || params.get('path') || '/';
     if (this.appFrame) {
       this.appFrame.src = startPath;
       this.createFloatingPill();
@@ -741,6 +847,15 @@ class PortalApp {
           <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">若目标节点开启了 <code>-secret</code> 保护，请输入匹配的口令；留空表示公开访问。</div>
           <input id="inputSecret" type="password" value="${this.secret}" placeholder="Optional Secret Token" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;" />
         </div>
+        <div style="margin-bottom: 20px;">
+          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">TURN 中继穿透 (Symmetric NAT Relay - 可选)</label>
+          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">在严格对称型 NAT（企业网/校园网/移动网络）打洞失败时无缝降级走中继。</div>
+          <input id="inputTurnUrl" type="text" placeholder="turn:turn.domain.com:3478" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-family: monospace; margin-bottom: 6px;" />
+          <div style="display: flex; gap: 8px;">
+            <input id="inputTurnUser" type="text" placeholder="Username" style="flex: 1; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-family: monospace;" />
+            <input id="inputTurnPass" type="password" placeholder="Password" style="flex: 1; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-family: monospace;" />
+          </div>
+        </div>
         <div style="display: flex; gap: 10px; justify-content: flex-end;">
           <button id="btnToggleDebugView" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 14px; border-radius: 6px; font-size: 13px; cursor: pointer;">Toggle Debug View</button>
           <button id="btnSaveReconnect" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;">Save & Connect</button>
@@ -793,6 +908,10 @@ class PortalApp {
       const inputNode = document.getElementById('inputNodeId') as HTMLInputElement;
       const inputSignal = document.getElementById('inputSignalUrl') as HTMLInputElement;
       const inputSecret = document.getElementById('inputSecret') as HTMLInputElement;
+      const inputTurnUrl = document.getElementById('inputTurnUrl') as HTMLInputElement;
+      const inputTurnUser = document.getElementById('inputTurnUser') as HTMLInputElement;
+      const inputTurnPass = document.getElementById('inputTurnPass') as HTMLInputElement;
+
       const newNodeId = inputNode?.value.trim() || DEFAULT_NODE_ID;
       const newSignalUrl = inputSignal?.value.trim() || DEFAULT_SIGNAL_URL;
       const newSecret = inputSecret ? inputSecret.value.trim() : '';
@@ -810,6 +929,16 @@ class PortalApp {
         } else {
           sessionStorage.removeItem('p2p_secret');
           localStorage.removeItem('p2p_secret_' + newNodeId);
+        }
+
+        if (inputTurnUrl && inputTurnUrl.value.trim()) {
+          localStorage.setItem('p2p_turn_url', inputTurnUrl.value.trim());
+          localStorage.setItem('p2p_turn_user', inputTurnUser?.value.trim() || '');
+          localStorage.setItem('p2p_turn_pass', inputTurnPass?.value.trim() || '');
+        } else {
+          localStorage.removeItem('p2p_turn_url');
+          localStorage.removeItem('p2p_turn_user');
+          localStorage.removeItem('p2p_turn_pass');
         }
       } catch {}
 
@@ -835,6 +964,13 @@ class PortalApp {
       if (inputSignal) inputSignal.value = this.signalUrl;
       const inputSecret = document.getElementById('inputSecret') as HTMLInputElement;
       if (inputSecret) inputSecret.value = this.secret;
+
+      const inputTurnUrl = document.getElementById('inputTurnUrl') as HTMLInputElement;
+      if (inputTurnUrl) inputTurnUrl.value = localStorage.getItem('p2p_turn_url') || '';
+      const inputTurnUser = document.getElementById('inputTurnUser') as HTMLInputElement;
+      if (inputTurnUser) inputTurnUser.value = localStorage.getItem('p2p_turn_user') || '';
+      const inputTurnPass = document.getElementById('inputTurnPass') as HTMLInputElement;
+      if (inputTurnPass) inputTurnPass.value = localStorage.getItem('p2p_turn_pass') || '';
     }
   }
 

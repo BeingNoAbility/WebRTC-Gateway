@@ -15,6 +15,8 @@ export class SignalingRoom extends DurableObject {
     this.agents = new Map();
     // agentNodeIds: WebSocket -> node_id (string)
     this.agentNodeIds = new Map();
+    // nodeSecrets: node_id (string) -> registered secret (anti-hijack protection)
+    this.nodeSecrets = new Map();
 
     // clients: WebSocket -> { sessionId: string, targetNodeId: string }
     this.clients = new Map();
@@ -47,7 +49,25 @@ export class SignalingRoom extends DurableObject {
           case 'register': {
             role = 'agent';
             const nodeId = msg.node_id;
+            const secret = msg.secret || '';
             if (!nodeId) return;
+
+            // Anti-hijack protection: verify node secret if already bound
+            const boundSecret = this.nodeSecrets.get(nodeId);
+            if (boundSecret && boundSecret !== secret) {
+              try {
+                ws.send(JSON.stringify({
+                  type: 'error',
+                  error: `Unauthorized: node_id "${nodeId}" is protected by a different secret`,
+                }));
+                ws.close(4003, 'Unauthorized');
+              } catch {}
+              return;
+            }
+
+            if (secret) {
+              this.nodeSecrets.set(nodeId, secret);
+            }
 
             // If an old agent connection existed for this nodeId, close it cleanly
             const oldWs = this.agents.get(nodeId);
@@ -73,6 +93,7 @@ export class SignalingRoom extends DurableObject {
                       node_id: nodeId,
                       session_id: clientInfo.sessionId,
                       status: 'online',
+                      requires_secret: !!secret,
                     })
                   );
                 } catch {}
@@ -88,12 +109,14 @@ export class SignalingRoom extends DurableObject {
             this.clientBySession.set(sessionId, ws);
 
             const isOnline = this.agents.has(targetNodeId);
+            const requiresSecret = !!this.nodeSecrets.get(targetNodeId);
             ws.send(
               JSON.stringify({
                 type: 'peer_status',
                 node_id: targetNodeId,
                 session_id: sessionId,
                 status: isOnline ? 'online' : 'offline',
+                requires_secret: requiresSecret,
               })
             );
             break;

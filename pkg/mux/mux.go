@@ -42,7 +42,8 @@ type Mux struct {
 	acceptCh chan *Stream
 
 	writeMu  sync.Mutex
-	bufCond  *sync.Cond
+	bpMu     sync.Mutex
+	bpCond   *sync.Cond
 	closed   bool
 	closedCh chan struct{}
 
@@ -69,15 +70,17 @@ func NewMux(transport Transport, isClient bool) *Mux {
 		m.nextStreamID = 2
 	}
 
-	m.bufCond = sync.NewCond(&m.writeMu)
+	m.bpCond = sync.NewCond(&m.bpMu)
 
 	// Configure transport backpressure low threshold
 	transport.SetBufferedAmountLowThreshold(DefaultBufferedLowWaterMark)
 	transport.OnBufferedAmountLow(func() {
-		m.writeMu.Lock()
-		m.bufCond.Broadcast()
-		m.writeMu.Unlock()
+		m.bpMu.Lock()
+		m.bpCond.Broadcast()
+		m.bpMu.Unlock()
 	})
+
+	go m.reaperLoop()
 
 	return m
 }
@@ -222,23 +225,79 @@ func (m *Mux) Ping(ctx context.Context) (time.Duration, error) {
 	}
 }
 
+// DefaultStreamIdleTimeout defines how long an inactive non-WebSocket stream may linger before cleanup.
+const DefaultStreamIdleTimeout = 5 * time.Minute
+
+func (m *Mux) reaperLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.closedCh:
+			return
+		case <-ticker.C:
+			m.reapIdleStreams()
+		}
+	}
+}
+
+func (m *Mux) reapIdleStreams() {
+	now := time.Now()
+	var toReap []*Stream
+
+	m.mu.RLock()
+	for _, s := range m.streams {
+		// Active WebSocket streams can be quiet; do not prematurely reap them
+		if s.InitialType() == protocol.TypeWSConnect || s.InitialType() == protocol.TypeWSData {
+			continue
+		}
+		if now.Sub(s.LastActive()) > DefaultStreamIdleTimeout {
+			toReap = append(toReap, s)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, s := range toReap {
+		_ = s.Reset()
+	}
+}
+
 // writeFrame writes an encoded frame to the underlying transport with backpressure flow control.
+// High-priority control frames (PING, PONG, RST, HEADERS, stream 0) bypass data buffer backpressure,
+// preventing Head-of-Line (HoL) blocking when large data streams saturate the buffer.
 func (m *Mux) writeFrame(f *protocol.Frame) error {
 	encoded := f.Encode()
+
+	isHighPriority := f.StreamID == 0 ||
+		f.Type == protocol.TypePing ||
+		f.Type == protocol.TypePong ||
+		f.Type == protocol.TypeRstStream ||
+		f.Type == protocol.TypeHeaders
+
+	if !isHighPriority {
+		m.bpMu.Lock()
+		for m.transport.BufferedAmount() > DefaultBufferedHighWaterMark {
+			m.bpCond.Wait()
+			m.mu.RLock()
+			closed := m.closed
+			m.mu.RUnlock()
+			if closed {
+				m.bpMu.Unlock()
+				return ErrMuxClosed
+			}
+		}
+		m.bpMu.Unlock()
+	}
 
 	m.writeMu.Lock()
 	defer m.writeMu.Unlock()
 
-	if m.closed {
+	m.mu.RLock()
+	closed := m.closed
+	m.mu.RUnlock()
+	if closed {
 		return ErrMuxClosed
-	}
-
-	// Backpressure: pause if transport buffer exceeds threshold
-	for m.transport.BufferedAmount() > DefaultBufferedHighWaterMark {
-		m.bufCond.Wait()
-		if m.closed {
-			return ErrMuxClosed
-		}
 	}
 
 	return m.transport.Send(encoded)
@@ -269,8 +328,11 @@ func (m *Mux) Close() error {
 			s.markResetNoRemove()
 		}
 
+		m.bpMu.Lock()
+		m.bpCond.Broadcast()
+		m.bpMu.Unlock()
+
 		m.writeMu.Lock()
-		m.bufCond.Broadcast()
 		m.writeMu.Unlock()
 	})
 	return nil

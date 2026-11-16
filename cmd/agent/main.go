@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"webrtc-gateway/pkg/agent"
@@ -28,6 +29,10 @@ func main() {
 	defaultProxy := os.Getenv("PROXY_URL")
 	defaultSNI := os.Getenv("SNI")
 	defaultInsecure := os.Getenv("INSECURE") == "true" || os.Getenv("INSECURE") == "1"
+	defaultTurnURL := os.Getenv("TURN_URL")
+	defaultTurnUser := os.Getenv("TURN_USER")
+	defaultTurnPass := os.Getenv("TURN_PASS")
+	defaultStunServers := os.Getenv("STUN_SERVERS")
 
 	nodeID := flag.String("node-id", defaultNodeID, "Unique node ID for this agent (env: NODE_ID)")
 	signalURL := flag.String("signal", defaultSignal, "Signaling server WebSocket URL (env: SIGNAL_URL)")
@@ -36,6 +41,10 @@ func main() {
 	proxyURL := flag.String("proxy", defaultProxy, "Optional HTTP/HTTPS/SOCKS5 proxy for signaling (env: PROXY_URL)")
 	sni := flag.String("sni", defaultSNI, "Optional TLS SNI and Host header for signaling (useful when dialing Cloudflare IP directly, env: SNI)")
 	insecure := flag.Bool("insecure", defaultInsecure, "Skip TLS verification for self-signed signaling servers (env: INSECURE)")
+	turnURL := flag.String("turn-url", defaultTurnURL, "Optional TURN relay server URL (e.g. turn:relay.example.com:3478, env: TURN_URL)")
+	turnUser := flag.String("turn-user", defaultTurnUser, "Optional TURN relay username (env: TURN_USER)")
+	turnPass := flag.String("turn-pass", defaultTurnPass, "Optional TURN relay password / credential (env: TURN_PASS)")
+	stunServers := flag.String("stun-servers", defaultStunServers, "Optional comma-separated custom STUN servers (env: STUN_SERVERS)")
 	flag.Parse()
 
 	log.Printf("==================================================")
@@ -61,6 +70,12 @@ func main() {
 	}
 	if *insecure {
 		ag.SetInsecureTLS(true)
+	}
+	if *stunServers != "" {
+		ag.SetSTUN(strings.Split(*stunServers, ","))
+	}
+	if *turnURL != "" {
+		ag.SetTURN(*turnURL, *turnUser, *turnPass)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

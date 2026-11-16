@@ -426,3 +426,88 @@ func TestMux_BackpressureWaitAndResume(t *testing.T) {
 		t.Fatalf("Timeout: write did not unblock after low water mark trigger")
 	}
 }
+
+// 7. Test that control and headers frames bypass data buffer backpressure (no HoL blocking)
+func TestMux_ControlBypassesBackpressure(t *testing.T) {
+	t1, t2 := newMockPair()
+	defer t1.Close()
+	defer t2.Close()
+
+	clientMux := NewMux(t1, true)
+	agentMux := NewMux(t2, false)
+
+	t1.SetMessageHandler(func(data []byte) { _ = clientMux.HandleIncomingMessage(data) })
+	t2.SetMessageHandler(func(data []byte) { _ = agentMux.HandleIncomingMessage(data) })
+
+	defer clientMux.Close()
+	defer agentMux.Close()
+
+	// Simulate high buffered amount (> 256KB)
+	t1.mu.Lock()
+	t1.bufferedAmount = DefaultBufferedHighWaterMark + 2048
+	t1.mu.Unlock()
+
+	// Stream 1: Data frame should block
+	s1, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+
+	dataDone := make(chan struct{})
+	go func() {
+		_, _ = s1.Write([]byte("blocked data payload"))
+		close(dataDone)
+	}()
+
+	// Confirm data write is blocked
+	select {
+	case <-dataDone:
+		t.Fatalf("Data write should have been blocked!")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: blocked
+	}
+
+	// Stream 2: Send HEADERS frame (must NOT block!)
+	s2, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream 2 failed: %v", err)
+	}
+
+	headerDone := make(chan error, 1)
+	go func() {
+		err := s2.WriteHeaders([]byte(`{"test":"fast_header"}`))
+		headerDone <- err
+	}()
+
+	select {
+	case err := <-headerDone:
+		if err != nil {
+			t.Errorf("WriteHeaders failed: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("WriteHeaders was blocked by backpressure! Head-of-Line blocking detected.")
+	}
+
+	// Ping (must NOT block!)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err = clientMux.Ping(ctx)
+	if err != nil {
+		t.Errorf("Ping failed or blocked: %v", err)
+	}
+
+	// Now drain buffer so data writer finishes cleanly
+	t1.mu.Lock()
+	t1.bufferedAmount = DefaultBufferedLowWaterMark - 10
+	onLow := t1.onLow
+	t1.mu.Unlock()
+	if onLow != nil {
+		onLow()
+	}
+
+	select {
+	case <-dataDone:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("Timeout waiting for data writer to complete after drain")
+	}
+}

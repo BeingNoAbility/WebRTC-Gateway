@@ -168,7 +168,7 @@
         try {
           const sp = new URLSearchParams(window.location.search);
           nodeId = sp.get('peer') || sp.get('node') || '';
-          if (!secret) secret = sp.get('secret') || sp.get('token') || '';
+          // Security Hardening: secrets are never read from query string, only from hash or storage
           if (!nodeId && window.location.hash) {
             const rawHash = window.location.hash.replace(/^#\/?/, '').trim();
             const parts = rawHash.split(/[?&]/);
@@ -347,7 +347,26 @@
     }, true);
 
     // Virtualize History pushState & replaceState (prevents SecurityError on cross-origin SPA routing)
+    // and synchronize active sub-route to top-level Portal URL Hash
     try {
+      const notifyRouteSync = (subUrl?: string | URL | null) => {
+        try {
+          const target = realPortalWindow || (typeof window !== 'undefined' && window.parent && window.parent !== window ? window.parent : null);
+          if (target && target.postMessage) {
+            let currentPath = '';
+            if (typeof subUrl === 'string' && subUrl.startsWith('/')) {
+              currentPath = subUrl;
+            } else {
+              currentPath = window.location.pathname + window.location.search + window.location.hash;
+            }
+            target.postMessage({
+              type: 'P2P_ROUTE_SYNC',
+              path: currentPath,
+            }, '*');
+          }
+        } catch {}
+      };
+
       if (typeof history !== 'undefined') {
         const origPushState = history.pushState;
         const origReplaceState = history.replaceState;
@@ -357,7 +376,9 @@
             const rewritten = rewriteBackendUrl(url);
             finalUrl = (typeof rewritten === 'string' && rewritten.startsWith('/')) ? rewritten : url;
           }
-          return origPushState.call(history, state, unused, finalUrl);
+          const res = origPushState.call(history, state, unused, finalUrl);
+          notifyRouteSync(finalUrl);
+          return res;
         };
         history.replaceState = function (state: any, unused: string, url?: string | URL | null) {
           let finalUrl = url;
@@ -365,8 +386,15 @@
             const rewritten = rewriteBackendUrl(url);
             finalUrl = (typeof rewritten === 'string' && rewritten.startsWith('/')) ? rewritten : url;
           }
-          return origReplaceState.call(history, state, unused, finalUrl);
+          const res = origReplaceState.call(history, state, unused, finalUrl);
+          notifyRouteSync(finalUrl);
+          return res;
         };
+      }
+
+      if (typeof window !== 'undefined') {
+        window.addEventListener('popstate', () => notifyRouteSync());
+        window.addEventListener('hashchange', () => notifyRouteSync());
       }
     } catch {}
 

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 	"webrtc-gateway/pkg/protocol"
 )
 
@@ -38,6 +40,16 @@ type Stream struct {
 	writeClosed bool
 	isReset     bool
 	err         error
+	lastActive  atomic.Int64
+}
+
+func (s *Stream) touch() {
+	s.lastActive.Store(time.Now().UnixNano())
+}
+
+// LastActive returns the last time data or headers were read or written on this stream.
+func (s *Stream) LastActive() time.Time {
+	return time.Unix(0, s.lastActive.Load())
 }
 
 func newStream(id uint32, m *Mux) *Stream {
@@ -50,6 +62,7 @@ func newStream(id uint32, m *Mux) *Stream {
 		inbound:   make([][]byte, 0, 16),
 		headersCh: make(chan []byte, 1),
 	}
+	s.touch()
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
@@ -82,6 +95,7 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 			if s.inboundBytes < 0 {
 				s.inboundBytes = 0
 			}
+			s.touch()
 			return n, nil
 		}
 
@@ -94,6 +108,7 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 			if s.inboundBytes < 0 {
 				s.inboundBytes = 0
 			}
+			s.touch()
 			return n, nil
 		}
 
@@ -120,6 +135,7 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 		return 0, ErrStreamClosed
 	}
 	s.mu.Unlock()
+	s.touch()
 
 	total := len(p)
 	sent := 0
@@ -150,6 +166,7 @@ func (s *Stream) WriteHeaders(payload []byte) error {
 		return ErrStreamClosed
 	}
 	s.mu.Unlock()
+	s.touch()
 
 	frame := protocol.NewFrame(s.id, protocol.TypeHeaders, protocol.FlagNone, payload)
 	return s.mux.writeFrame(frame)
@@ -236,6 +253,7 @@ func (s *Stream) Reset() error {
 func (s *Stream) pushInboundData(payload []byte, fin bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.touch()
 
 	if s.readClosed || s.isReset {
 		return
@@ -270,6 +288,7 @@ func (s *Stream) pushInboundData(payload []byte, fin bool) {
 
 // pushInboundHeaders delivers received HEADERS frame payload.
 func (s *Stream) pushInboundHeaders(payload []byte) {
+	s.touch()
 	s.headersOnce.Do(func() {
 		cp := make([]byte, len(payload))
 		copy(cp, payload)

@@ -6,53 +6,113 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
+
+type sessionEntry struct {
+	jar        http.CookieJar
+	lastActive time.Time
+}
 
 // SessionCookieManager maintains isolated CookieJar instances for each WebRTC peer session.
 type SessionCookieManager struct {
-	mu   sync.RWMutex
-	jars map[string]http.CookieJar
+	mu          sync.RWMutex
+	entries     map[string]*sessionEntry
+	idleTTL     time.Duration
+	stopJanitor chan struct{}
 }
 
-// NewSessionCookieManager creates a new SessionCookieManager.
+// DefaultSessionCookieTTL is the idle timeout before an inactive client session's cookies are purged.
+const DefaultSessionCookieTTL = 2 * time.Hour
+
+// NewSessionCookieManager creates a new SessionCookieManager with default 2-hour idle TTL.
 func NewSessionCookieManager() *SessionCookieManager {
-	return &SessionCookieManager{
-		jars: make(map[string]http.CookieJar),
+	return NewSessionCookieManagerWithTTL(DefaultSessionCookieTTL)
+}
+
+// NewSessionCookieManagerWithTTL creates a new SessionCookieManager with a custom idle expiration TTL.
+func NewSessionCookieManagerWithTTL(idleTTL time.Duration) *SessionCookieManager {
+	m := &SessionCookieManager{
+		entries:     make(map[string]*sessionEntry),
+		idleTTL:     idleTTL,
+		stopJanitor: make(chan struct{}),
+	}
+	go m.janitorLoop()
+	return m
+}
+
+func (m *SessionCookieManager) janitorLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopJanitor:
+			return
+		case <-ticker.C:
+			m.reapExpiredSessions()
+		}
 	}
 }
 
-// GetJar retrieves or creates a CookieJar for the specified sessionID.
-func (m *SessionCookieManager) GetJar(sessionID string) http.CookieJar {
-	m.mu.RLock()
-	jar, exists := m.jars[sessionID]
-	m.mu.RUnlock()
-
-	if exists {
-		return jar
-	}
-
+func (m *SessionCookieManager) reapExpiredSessions() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Double check
-	if jar, exists = m.jars[sessionID]; exists {
-		return jar
+	now := time.Now()
+	for id, entry := range m.entries {
+		if now.Sub(entry.lastActive) > m.idleTTL {
+			delete(m.entries, id)
+		}
+	}
+}
+
+// Close stops the background expiration janitor.
+func (m *SessionCookieManager) Close() {
+	select {
+	case <-m.stopJanitor:
+	default:
+		close(m.stopJanitor)
+	}
+}
+
+// GetJar retrieves or creates a CookieJar for the specified sessionID or client token.
+func (m *SessionCookieManager) GetJar(sessionID string) http.CookieJar {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if entry, exists := m.entries[sessionID]; exists {
+		entry.lastActive = time.Now()
+		return entry.jar
 	}
 
 	newJar, err := cookiejar.New(nil)
 	if err != nil {
-		// Fallback empty
 		return nil
 	}
-	m.jars[sessionID] = newJar
+	m.entries[sessionID] = &sessionEntry{
+		jar:        newJar,
+		lastActive: time.Now(),
+	}
 	return newJar
 }
 
 // RemoveSession cleans up cookies when a session disconnects.
+// Persistent client sessions (prefixed with "cl_") are retained across F5 reloads
+// and are only cleaned up after the idle TTL expires.
 func (m *SessionCookieManager) RemoveSession(sessionID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.jars, sessionID)
+
+	if strings.HasPrefix(sessionID, "cl_") {
+		// Retain across page refreshes; update lastActive
+		if entry, exists := m.entries[sessionID]; exists {
+			entry.lastActive = time.Now()
+		}
+		return
+	}
+
+	delete(m.entries, sessionID)
 }
 
 // ExtractNonHttpOnlyCookies extracts Set-Cookie lines that do not have HttpOnly flag.
