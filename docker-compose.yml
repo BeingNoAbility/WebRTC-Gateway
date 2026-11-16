@@ -160,6 +160,21 @@ services:
       # ------------------------------------------------------------------------
       # - SNI=p2p.yourdomain.com
 
+      # ------------------------------------------------------------------------
+      # TURN 中继中转服务器配置 (TURN_URL / TURN_USER / TURN_PASS) - 可选
+      # 在严格对称型 NAT（企业网/校园网/移动 4G/5G）打洞失败时无缝降级走中继。
+      # 示例：turn:relay.example.com:3478 或 turns:relay.example.com:5349?transport=tcp
+      # ------------------------------------------------------------------------
+      # - TURN_URL=turn:relay.example.com:3478
+      # - TURN_USER=turn_user
+      # - TURN_PASS=turn_password
+
+      # ------------------------------------------------------------------------
+      # 自定义 STUN 候选服务器列表 (STUN_SERVERS) - 可选
+      # 多个 STUN 地址用逗号分隔；默认已内置腾讯、小米、B站、Cloudflare 与 Google STUN。
+      # ------------------------------------------------------------------------
+      # - STUN_SERVERS=stun.qq.com:18302,stun.cloudflare.com:3478
+
     volumes:
       # [推荐] 与宿主机同步时区
       - /etc/localtime:/etc/localtime:ro

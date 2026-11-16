@@ -331,6 +331,9 @@ services:
       - NODE_ID=my-nas
       - SIGNAL_URL=wss://p2p.yourdomain.com/ws
       - TARGET_URL=http://127.0.0.1:8096  # 指向本地 Jellyfin / Alist / 私有云
+      # - TURN_URL=turn:relay.domain.com:3478  # 可选：对称型 NAT 下启用 TURN 中继
+      # - TURN_USER=turn_user
+      # - TURN_PASS=turn_pass
     volumes:
       - /etc/localtime:/etc/localtime:ro
 ```

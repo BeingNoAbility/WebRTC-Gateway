@@ -26,5 +26,5 @@
 ### 📦 资产下载与快速验证
 - 预编译二进制跨平台支持：Linux (amd64 / arm64)、Windows (amd64 / arm64)、macOS Darwin (amd64 / Apple Silicon arm64)。
 - 多架构 Docker 镜像已同步发布至 GitHub Container Registry (`ghcr.io`)：
-  - 服务端：`ghcr.io/<owner>/webrtc-p2p-server:v1.2.0` (`latest`)
-  - 穿透端：`ghcr.io/<owner>/webrtc-p2p-agent:v1.2.0` (`latest`)
+  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.2.0` (`latest`)
+  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.2.0` (`latest`)
