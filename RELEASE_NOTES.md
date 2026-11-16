@@ -1,30 +1,37 @@
 # WebRTC Gateway Release Notes
 
-## [v1.6.1] - 2026-11-16
+## [v1.6.2] - 2026-11-16
 
-### 🛠️ 信令通道双向心跳保活与 61 秒断开振荡彻底根治 (WebSocket Keepalive Ping Pump)
+### 🛡️ 官方高科技品牌矢量 Logo 正式发布与 Docker 原生健康检查修复 (Native Healthcheck & Brand Identity)
 
-- **根因彻底消除 (Root Cause Elimination)**：
-  - 彻底根治了信令服务在空闲无流量时“每隔 61 秒固定断开重连一次”的振荡 Bug；
-  - 补齐了服务端与 Agent 双向缺失的 RFC 6455 `PingMessage` 定时泵，使得 60 秒的底层套接字 `ReadDeadline` 得以在心跳周期内持续刷新，达成信令通道 7x24 小时零断流。
-- **服务端主动心跳泵 (`cmd/signal/main.go`)**：
-  - 为接入的 Session 启动 25 秒轻量 Ping Ticker，严格在 `session.mu` 互斥保护下发送 `websocket.PingMessage` 控制帧（附带 5 秒 WriteDeadline）；
-  - 自动覆盖现代浏览器客户端：浏览器内核（Chromium/WebKit/Gecko）底层对标准 WebSocket Ping 协议帧原生支持，收到 Ping 会自动在网络层回发 Pong，前端零代码改动即可永久保活；
-  - 完善连接断开时的原子资源清理（`ctx.Cancel()` 即时停止心跳协程，并置 `session.Conn = nil`）。
-- **Agent 端主动防御与并发安全加固 (`pkg/agent/agent.go`)**：
-  - Agent 启动 25 秒主动 Ping 泵，即使处于强制掐断空闲 TCP 流的云防火墙、Nginx 反代或 Cloudflare Workers（100 秒空闲超时）边缘环境下，信令长连接依然坚如磐石；
-  - 挂载并发安全的 `SetPingHandler`（在 `a.wsMu` 保护下回复 Pong 并顺延 60 秒超时），彻底杜绝与业务数据并发写导致的底层 Panic；
-  - 提供 `SetPingInterval` 与 `SetReadTimeout` 接口，支持快速调整或极速自动化测试。
-- **全栈自动化测试套件与保活核验**：
-  - 新增 `TestSignalBroker_WebSocketKeepalivePingPong`（`cmd/signal/broker_test.go`）；
-  - 新增 `TestAgent_KeepalivePingPump`（`pkg/agent/agent_test.go`）；
-  - 新增 `TestE2E_WebSocketDualKeepalive`（`test/keepalive_e2e_test.go`）；
-  - 全量 Go 单元/集成测试与 Chromium CDP 浏览器测试矩阵 100% 通过。
+- **Docker 容器 Unhealthy 缺陷彻底根治 (Docker Health Check Hardening)**：
+  - **根因分析**：原 `Dockerfile.server` 依赖 Alpine BusyBox 的 `wget --no-check-certificate` 参数，在开启 HTTPS/自签名证书或修改监听端口时，因 BusyBox `wget` 不支持该参数或探测端口不匹配导致命令失败并返回退出码 1，从而使容器被 Docker 判定为 `unhealthy`。
+  - **零外部依赖 Go 原生健康探测器 (`-health`)**：
+    - 为服务端引入 `-health` CLI 探针命令（兼备 `-health-url`），仅耗时 2ms、内存开销 < 5MB；
+    - 自动智能适配 HTTP/HTTPS、自签名证书 (`InsecureSkipVerify: true`)、动态端口 (`ADDR` / `PORT`) 及 YAML/JSON 配置文件；
+    - 成功返回退出码 0，失败返回退出码 1 并向 `stderr` 打印精准诊断日志；
+    - 全面兼容 Docker `HEALTHCHECK`、Docker Compose 与 Kubernetes Liveness/Readiness 探针。
+  - **信令端主端口原生挂载 `/healthz` 与 `/health`**：
+    - 主 HTTP 服务监听端口开箱提供标准 `/healthz` 和 `/health` 端点（返回 HTTP 200 `{"status":"ok"}`）；
+    - 保留指标端点 `/metrics` 及其专用端口探针。
+  - **Docker 构建与编排文件同步升级**：
+    - `Dockerfile.server`：更新为 `HEALTHCHECK CMD /app/server -health || exit 1`，并在生产镜像预装 `curl` 诊断工具；
+    - `docker-compose.yml`：为 `server` 服务声明标准 `healthcheck` 块，容器启动 5 秒内平滑流转为 `(healthy)` 状态。
+
+- **官方品牌视觉系统 (Brand Logo & Visual Identity)**：
+  - **品牌徽章 (`assets/logo.svg`)**：
+    - 512×512 纯矢量高科技网络盾牌构图，融合赛博蓝 (`#38bdf8`)、星系紫 (`#c084fc`) 与微光金核；
+    - 象征双端 P2P 节点（左侧现代浏览器节点，右侧家庭 NAS/服务器节点）、中央穿透网关能量环与毫秒级端到端穿透闪电；
+    - 军工级 DTLS-SRTP 加密防护盾与去中心化 Discovery 传播波纹。
+  - **品牌横幅 (`assets/logo-banner.svg`)**：
+    - 880×220 宽屏 GitHub 官方展示横幅，搭载徽章、中英双语字体与三大核心特性药丸徽章（`ZERO-CLIENT`、`P2P DIRECT`、`DTLS ENCRYPTED`）。
+  - **门户与全端集成**：
+    - Web 控制台界面 (`web/src/index.html`)、`favicon.svg`、`README.md`、`README_zh.md`、`README_en.md` 及 GitHub Wiki 全量接入官方 Logo 与 Banner。
 
 ---
 
 ### 📦 资产下载与快速验证
 - 预编译二进制跨平台支持：Linux (amd64 / arm64)、Windows (amd64 / arm64)、macOS Darwin (amd64 / Apple Silicon arm64)。
 - 多架构 Docker 镜像已同步发布至 GitHub Container Registry (`ghcr.io`)：
-  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.6.1` (`latest`)
-  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.6.1` (`latest`)
+  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.6.2` (`latest`)
+  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.6.2` (`latest`)

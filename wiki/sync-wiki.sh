@@ -37,6 +37,9 @@ git clone "${WIKI_REPO_URL}" "${TEMP_DIR}"
 
 echo "Copying documentation pages..."
 cp -f "${SCRIPT_DIR}"/*.md "${TEMP_DIR}/"
+if [ -d "${SCRIPT_DIR}/assets" ]; then
+    cp -rf "${SCRIPT_DIR}/assets" "${TEMP_DIR}/"
+fi
 
 cd "${TEMP_DIR}"
 git config user.name "Wiki Bot"

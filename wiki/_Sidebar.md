@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/BeingNoAbility/WebRTC-Gateway/main/assets/logo.svg" alt="Logo" width="80">
+</p>
+
 ### 📖 Wiki 导航 / Navigation
 
 - **[🏠 首页 (Home)](Home)**

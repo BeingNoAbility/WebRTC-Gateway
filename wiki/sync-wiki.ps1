@@ -44,6 +44,10 @@ try {
         Copy-Item -Path $_.FullName -Destination $TempDir -Force
         Write-Host "  -> Synced: $($_.Name)" -ForegroundColor Green
     }
+    if (Test-Path (Join-Path $ScriptDir "assets")) {
+        Copy-Item -Path (Join-Path $ScriptDir "assets") -Destination (Join-Path $TempDir "assets") -Recurse -Force
+        Write-Host "  -> Synced: assets/" -ForegroundColor Green
+    }
 
     Push-Location $TempDir
     git config user.name "Wiki Bot"

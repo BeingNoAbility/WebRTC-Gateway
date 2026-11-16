@@ -534,6 +534,68 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
+// runHealthCheck performs a lightweight HTTP/HTTPS probe against the local signal server.
+// Returns 0 if healthy, 1 if unhealthy.
+func runHealthCheck(addr string, preferTLS bool, customURL string) int {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   3 * time.Second,
+	}
+
+	urls := make([]string, 0, 2)
+	if customURL != "" {
+		urls = append(urls, customURL)
+	} else {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			if strings.HasPrefix(addr, ":") {
+				host = "127.0.0.1"
+				port = strings.TrimPrefix(addr, ":")
+			} else {
+				host = "127.0.0.1"
+				port = addr
+			}
+		}
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			host = "127.0.0.1"
+		}
+		httpURL := fmt.Sprintf("http://%s:%s/healthz", host, port)
+		httpsURL := fmt.Sprintf("https://%s:%s/healthz", host, port)
+		if preferTLS {
+			urls = append(urls, httpsURL, httpURL)
+		} else {
+			urls = append(urls, httpURL, httpsURL)
+		}
+	}
+
+	var lastErr error
+	for _, targetURL := range urls {
+		req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("User-Agent", "WebRTC-Gateway-HealthCheck/1.0")
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			fmt.Printf("Health check OK: HTTP %d from %s\n", resp.StatusCode, targetURL)
+			return 0
+		}
+		lastErr = fmt.Errorf("unexpected HTTP status %d from %s", resp.StatusCode, targetURL)
+	}
+
+	fmt.Fprintf(os.Stderr, "Health check FAILED: %v\n", lastErr)
+	return 1
+}
+
 func main() {
 	// 1. Defaults (Tier 1: Defaults)
 	cfgAddr := ":8888"
@@ -636,8 +698,14 @@ func main() {
 	maxIPConns := flag.Int("max-ip-conns", cfgMaxIPConns, "Maximum concurrent WebSocket connections per client IP (env: MAX_IP_CONNS)")
 	trustedProxies := flag.String("trusted-proxies", cfgTrustedProxies, "Comma-separated trusted proxy CIDRs/IPs (default: loopback & RFC1918 private CIDRs; 'none' to disable, env: TRUSTED_PROXIES)")
 	metricsAddr := flag.String("metrics-addr", cfgMetricsAddr, "Optional dedicated address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default /metrics)")
+	healthCheck := flag.Bool("health", false, "Run local health check probe and exit with code 0 (healthy) or 1 (unhealthy)")
+	healthURL := flag.String("health-url", "", "Custom URL for health check probe (default: probe -addr / ADDR on /healthz)")
 	_ = configFlag
 	flag.Parse()
+
+	if *healthCheck {
+		os.Exit(runHealthCheck(*addr, *tlsAuto || (*tlsCert != "" && *tlsKey != ""), *healthURL))
+	}
 
 	finalSecret := *signalSecret
 	if *serverSecretAlias != "" {
@@ -656,6 +724,18 @@ func main() {
 	limiter := NewIPRateLimiter(*maxIPConns, trustedPrefixes)
 
 	mux := http.NewServeMux()
+
+	// Health check endpoints for Docker / Kubernetes / load balancers
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
 
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

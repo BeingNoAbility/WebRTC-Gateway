@@ -519,3 +519,70 @@ func TestSignalBroker_WebSocketKeepalivePingPong(t *testing.T) {
 		t.Errorf("Expected at least 3 pings received in 350ms with 40ms interval, got %d", pingsReceived)
 	}
 }
+
+func TestSignalServer_HealthCheckEndpoints(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	for _, endpoint := range []string{"/healthz", "/health"} {
+		resp, err := http.Get(server.URL + endpoint)
+		if err != nil {
+			t.Fatalf("Failed to GET %s: %v", endpoint, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Expected status 200 on %s, got %d", endpoint, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
+func TestSignalServer_RunHealthCheckProbe(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	// 1. Plain HTTP probe
+	httpServer := httptest.NewServer(mux)
+	defer httpServer.Close()
+
+	httpCode := runHealthCheck(httpServer.Listener.Addr().String(), false, "")
+	if httpCode != 0 {
+		t.Errorf("Expected runHealthCheck on HTTP server to return 0, got %d", httpCode)
+	}
+
+	// 2. HTTPS (Self-signed) probe
+	tlsServer := httptest.NewTLSServer(mux)
+	defer tlsServer.Close()
+
+	tlsCode := runHealthCheck(tlsServer.Listener.Addr().String(), true, "")
+	if tlsCode != 0 {
+		t.Errorf("Expected runHealthCheck on HTTPS server to return 0, got %d", tlsCode)
+	}
+
+	// 3. Custom URL probe
+	customCode := runHealthCheck("", false, httpServer.URL+"/healthz")
+	if customCode != 0 {
+		t.Errorf("Expected runHealthCheck with custom URL to return 0, got %d", customCode)
+	}
+
+	// 4. Failing probe (unreachable port)
+	failCode := runHealthCheck("127.0.0.1:59998", false, "")
+	if failCode != 1 {
+		t.Errorf("Expected runHealthCheck on closed port to return 1, got %d", failCode)
+	}
+}

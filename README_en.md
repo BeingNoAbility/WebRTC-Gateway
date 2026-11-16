@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo-banner.svg" alt="Zero-Client WebRTC P2P Gateway Banner" width="820">
+</p>
+
 # Zero-Client P2P WebRTC Intranet Penetration Gateway
 ### End-to-End P2P WebRTC Reverse Proxy Gateway with Zero Client Dependencies in Visitor Browsers
 
@@ -205,6 +209,8 @@ The Agent supports both command-line flags and environment variables:
 | `-max-ip-conns` | `MAX_IP_CONNS` | `64` | Maximum concurrent WebSocket connections per IP address |
 | `-trusted-proxies` | `TRUSTED_PROXIES` | `""` (private CIDRs) | Comma-separated trusted proxy CIDRs/IPs (set `none` to disable proxy headers) |
 | `-metrics-addr` | `METRICS_ADDR` | `""` | Optional dedicated Prometheus `/metrics` address (default served on `/metrics`) |
+| `-health` | - | `false` | Run local health check probe against signal server (auto-detects HTTP/HTTPS/port), exits 0 on success, 1 on failure (for Docker/K8s HEALTHCHECK) |
+| `-health-url` | - | `""` | Custom URL for health check probe (default probes `-addr` / `ADDR` on `/healthz`) |
 
 ---
 

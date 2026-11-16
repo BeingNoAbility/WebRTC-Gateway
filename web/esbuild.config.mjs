@@ -7,9 +7,12 @@ if (!fs.existsSync(outdir)) {
   fs.mkdirSync(outdir, { recursive: true });
 }
 
-// Copy index.html
+// Copy static assets
 if (fs.existsSync('src/index.html')) {
   fs.copyFileSync('src/index.html', path.join(outdir, 'index.html'));
+}
+if (fs.existsSync('src/favicon.svg')) {
+  fs.copyFileSync('src/favicon.svg', path.join(outdir, 'favicon.svg'));
 }
 
 async function build() {

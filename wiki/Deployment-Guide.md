@@ -119,6 +119,10 @@ docker compose logs -f
 docker compose down
 ```
 
+> [!TIP]
+> **容器健康检查机制 (v1.6.2+)**：
+> 服务端镜像内置了毫秒级原生健康探测器（`CMD /app/server -health`），自动适配 HTTP/HTTPS 及自定义端口，支持自签名证书并即刻反馈健康状态（状态流转为 `healthy`），彻底避免 Alpine Busybox wget 参数兼容陷阱。
+
 ### 3. 经典 NAS / 私有服务器纯 Agent 模式编排
 在家庭 NAS、树莓派或内网服务器上，通常**只需运行 Agent 容器**连接公网信令：
 ```yaml

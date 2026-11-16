@@ -64,6 +64,8 @@ Agent 支持三种核心运行模式，三者在业务上严格三选一（互�
 | `-max-ip-conns` | `MAX_IP_CONNS` | `64` | 单个 IP 允许的最大并发 WebSocket 握手连接数（防 DoS 耗尽套接字） |
 | `-trusted-proxies` | `TRUSTED_PROXIES` | `""` (默认私网) | 受信代理 CIDR 列表（默认信任回环及 RFC1918 私网；填 `none` 禁用代理头信任） |
 | `-metrics-addr` | `METRICS_ADDR` | `""` | 可选的专用 Prometheus 监控导出地址（如 `:9090`，默认直接复用主服务 `/metrics`） |
+| `-health` | - | `false` | 执行本地健康检查探测（自动适配 HTTP/HTTPS/端口），成功退出码 0，失败退出码 1（专用于 Docker/K8s HEALTHCHECK） |
+| `-health-url` | - | `""` | 自定义健康检查探测 URL（默认探测 `-addr` / `ADDR` 的 `/healthz` 端点） |
 
 ---
 

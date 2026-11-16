@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/BeingNoAbility/WebRTC-Gateway/main/assets/logo-banner.svg" alt="Zero-Client WebRTC P2P Gateway Banner" width="100%">
+</p>
+
 # Welcome to the WebRTC Gateway Wiki
 
 欢迎查阅 **Zero-Client P2P WebRTC Intranet Penetration Gateway**（浏览器零客户端依赖的 P2P WebRTC 端到端内网穿透网关）官方技术文档库与知识中心！

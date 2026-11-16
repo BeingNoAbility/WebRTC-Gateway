@@ -26,6 +26,12 @@ services:
     image: ghcr.io/beingnoability/webrtc-p2p-server:latest
     container_name: webrtc-p2p-server
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/server", "-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
     ports:
       # [端口映射]
       # 默认 HTTP 门户与 WebSocket 信令端口
