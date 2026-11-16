@@ -86,7 +86,26 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 
 ---
 
-## 5. 设计哲学与安全边界声明 (Design Philosophy & Security Boundaries)
+## 5. 权威真实客户端 IP 穿透与 WAF 协同 (Authoritative Client IP & WAF Integration)
+
+自 **v1.8.0** 起，网关全面支持生产级真实客户端 IP 透传与防伪体系，彻底告别穿透场景下目标后端将所有流量误识别为 `127.0.0.1` 的痛点：
+
+### ① 权威源头注入与防伪 (Anti-Spoofing Anchor)
+- **信令端物理覆盖**：客户端在发起 WebRTC 握手时，信令服务器权威提取物理套接字 IP（或 Cloudflare / 受信反代源 IP），在转发 Offer 时**强行覆盖 `msg.ClientIP = session.RemoteIP`**，恶意客户端在 JSON 信令中自报的任何伪造 IP 被直接抹除；
+- **边缘信令对齐**：Cloudflare Workers 边缘信令通过 Durable Object 同步提取 `cf-connecting-ip` 注入 `msg.client_ip`，双信令形态无缝平替；
+- **Agent 代理层强制覆写**：Agent 在反向代理 HTTP 与 WebSocket 请求时，在解析完客户端请求头之后，执行 `req.Header.Set("X-Forwarded-For", clientIP)` 与 `req.Header.Set("X-Real-IP", clientIP)`，彻底覆盖客户端在 DataChannel 中夹带的伪造头。
+
+### ② WAF 与安全组件协同
+- **精准单 IP 封禁与黑白名单**：雷池 SafeLine、Nginx WAF、ModSecurity 可直接拦截恶意公网 IP，不会导致 `127.0.0.1` 封禁全员误杀；
+- **单 IP 频率限制 (Rate Limiting)**：单 IP 刷接口触发 429 仅针对该黑客 IP，正常访客完全不受影响；
+- **日志审计与 GeoIP 地理溯源**：Nginx / WAF 访问日志中完整保留真实访客公网 IP 与地理位置证据链。
+
+### ③ 移动端漫游原地热重连 (In-place ICE Restart Roaming Update)
+- 访客在手机 Wi-Fi 与 5G 移动蜂窝网络之间漫游切换时，原地 ICE Restart 保持 DataChannel 连接不中断，Agent 同步动态更新绑定的公网出口 IP，后续流经隧道的新请求立即自动按新 IP 执行 WAF 审计与防护规则。
+
+---
+
+## 6. 设计哲学与安全边界声明 (Design Philosophy & Security Boundaries)
 
 为了守住产品的核心护城河与轻量极致体验，本项目坚定恪守以下两条设计纪律：
 

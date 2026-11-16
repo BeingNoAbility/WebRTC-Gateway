@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.8.0] - 2026-11-17
+
+### Added
+- **Authoritative Client IP Propagation to Backend / WAF (Anti-Spoofing)**:
+  - Agent reverse proxies (HTTP and WebSocket) inject real client IP into `X-Forwarded-For` and `X-Real-IP` request headers, enabling upstream WAFs (SafeLine, Cloudflare WAF, ModSecurity, Nginx WAF) and backend logs to accurately recognize individual visitor public IPs for rate limiting, blacklisting, and GeoIP audit.
+  - Multi-tier anti-spoofing defense: signaling server forcefully stamps `msg.ClientIP = session.RemoteIP` on Offer, Cloudflare Workers parity with `cf-connecting-ip`, and proxy `.Set()` completely overwrites any client-supplied spoofed headers.
+  - In-place ICE Restart mobile roaming IP update: dynamically refreshes session client IP when visitors roam between Wi-Fi and cellular without dropping connection.
+  - Graceful fallback: legacy signaling servers safely default to `127.0.0.1`.
+  - Memory leak protection: strict session IP lifecycle eviction upon teardown and agent termination.
+
+---
+
+## [v1.7.4] - 2026-11-16
+
+### Added
+- **P2P File Hub Action Sheet**:
+  - Unified action sheet with Play Online, P2P Download and Cancel control.
+  - Cancel control with immediate stream reset to save network bandwidth.
+
+---
+
+## [v1.7.3] - 2026-11-16
+
+### Fixed
+- **Zero-Network Fetch Download**:
+  - Dual-mode disk writing and real-time progress HUD for file downloads.
+
+---
+
 ## [v1.7.2] - 2026-11-16
 
 ### Fixed
