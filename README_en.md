@@ -165,7 +165,9 @@ The Agent supports both command-line flags and environment variables:
 | :--- | :--- | :--- | :--- |
 | `-node-id` | `NODE_ID` | `homeserver` | Unique node identifier in the signaling network |
 | `-signal` | `SIGNAL_URL` | `ws://127.0.0.1:8888/ws` | Signaling server WebSocket URL (`ws://` or `wss://`) |
-| `-target` | `TARGET_URL` | `http://127.0.0.1:8080` | Local or LAN destination Web service URL |
+| `-target` | `TARGET_URL` | `http://127.0.0.1:8080` (default) | Destination Web app URL to reverse proxy (Mode A, mutually exclusive with `-dir`/`-file`) |
+| `-dir` | `DIR_PATH` | `""` | Local directory path to serve as static website / file index (Mode B, mutually exclusive) |
+| `-file` | `FILE_PATH` | `""` | Local file path for direct zero-relay P2P file sharing (Mode C, mutually exclusive) |
 | `-config` | `CONFIG_FILE` / `CONFIG` | `""` | Optional YAML / JSON configuration file path (auto-detects `./agent.yaml`, `./agent.yml`, `./agent.json`) |
 | `-signal-secret` | `SIGNAL_SECRET` | `""` | Signaling cluster admission secret (Control Plane, shared with server, never exposed to visitors) |
 | `-access-secret` | `ACCESS_SECRET` | `""` | Visitor access password (Data Plane, leave empty for public access without password prompt) |
@@ -219,6 +221,12 @@ The Agent supports both command-line flags and environment variables:
   - Pure mathematical validation: `sign = HMAC-SHA256(nodeId + ":" + exp, access_secret)`;
   - When a visitor opens `#nodeId?exp=xxx&sign=yyy`, the Agent validates freshness and HMAC locally in constant time;
   - Web console provides 1-click generation for 1h, 6h, 24h, 7d, 30d durations; CLI supports `./agent -access-secret xxx -sign-link 24h`.
+- **Pure In-Memory Zero-Port P2P File & Directory Server (v1.6.0+)**:
+  - **Pure Outbound Architecture**: Directly adapts WebRTC DataChannel streams to standard HTTP responses in memory without binding any listening TCP sockets on the host.
+  - **Single File Direct Share (Private AirDrop / Wormhole)**: `./agent -file /path/to/archive.zip -access-secret pass -sign-link 24h` gives recipients direct high-speed P2P browser downloads with zero intermediate cloud relays or size limits.
+  - **Static Web & Directory Hosting**: `./agent -dir /path/to/dist` serves static SPA/docs (`index.html`) or generates clean file listings.
+  - **Native HTTP 206 Partial Content**: Full `Range` request support for seeking video/audio and multi-stream download acceleration. Previewable media uses `inline` while archives use `attachment`.
+  - **Strict Sandbox & Path Traversal Defense**: Lexical containment via `filepath.Rel` and symlink escape verification via `filepath.EvalSymlinks`.
 - **Connection Resilience & Mobile Roaming Self-Healing (WebRTC ICE Restart)**:
   - When mobile devices switch between Wi-Fi and 5G cellular or roaming APs, a two-stage pipeline triggers automatically;
   - Re-establishes broken signaling sockets and renegotiates in-place on the existing `RTCPeerConnection` with `iceRestart: true`;

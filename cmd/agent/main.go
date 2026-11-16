@@ -38,7 +38,9 @@ func main() {
 	cfgSignalURL := "ws://127.0.0.1:8888/ws"
 	cfgSignalSecret := ""
 	cfgAccessSecret := ""
-	cfgTarget := "http://127.0.0.1:8080"
+	cfgTarget := ""
+	cfgDir := ""
+	cfgFile := ""
 	cfgProxy := ""
 	cfgSNI := ""
 	cfgInsecure := false
@@ -76,6 +78,12 @@ func main() {
 		}
 		if fileCfg.TargetURL != "" {
 			cfgTarget = fileCfg.TargetURL
+		}
+		if fileCfg.Dir != "" {
+			cfgDir = fileCfg.Dir
+		}
+		if fileCfg.File != "" {
+			cfgFile = fileCfg.File
 		}
 		if fileCfg.ProxyURL != "" {
 			cfgProxy = fileCfg.ProxyURL
@@ -125,6 +133,12 @@ func main() {
 	if env := os.Getenv("TARGET_URL"); env != "" {
 		cfgTarget = env
 	}
+	if env := os.Getenv("DIR_PATH"); env != "" {
+		cfgDir = env
+	}
+	if env := os.Getenv("FILE_PATH"); env != "" {
+		cfgFile = env
+	}
 	if env := os.Getenv("PROXY_URL"); env != "" {
 		cfgProxy = env
 	}
@@ -163,7 +177,9 @@ func main() {
 	signalURL := flag.String("signal", cfgSignalURL, "Signaling server WebSocket URL (env: SIGNAL_URL)")
 	signalSecret := flag.String("signal-secret", cfgSignalSecret, "Cluster secret token for signaling server registration & anti-hijacking (env: SIGNAL_SECRET)")
 	accessSecret := flag.String("access-secret", cfgAccessSecret, "Visitor password token for proxy access; empty for public access (env: ACCESS_SECRET)")
-	target := flag.String("target", cfgTarget, "Local destination Web application URL (env: TARGET_URL)")
+	target := flag.String("target", cfgTarget, "Local destination Web application URL to reverse proxy (env: TARGET_URL)")
+	dirPath := flag.String("dir", cfgDir, "Directory path to serve as static files / directory index (env: DIR_PATH)")
+	filePath := flag.String("file", cfgFile, "Single file path to serve directly for P2P download or stream (env: FILE_PATH)")
 	configFlag := flag.String("config", "", "Path to configuration file (.yaml, .yml, or .json, env: CONFIG_FILE)")
 	proxyURL := flag.String("proxy", cfgProxy, "Optional HTTP/HTTPS/SOCKS5 proxy for signaling (env: PROXY_URL)")
 	sni := flag.String("sni", cfgSNI, "Optional TLS SNI and Host header for signaling (env: SNI)")
@@ -178,6 +194,25 @@ func main() {
 	portalURL := flag.String("portal-url", cfgPortalURL, "Base URL of the Web Portal for -sign-link generation")
 	_ = configFlag
 	flag.Parse()
+
+	// Mutual Exclusivity Check between -target, -dir, and -file
+	modesCount := 0
+	if *target != "" {
+		modesCount++
+	}
+	if *dirPath != "" {
+		modesCount++
+	}
+	if *filePath != "" {
+		modesCount++
+	}
+
+	if modesCount > 1 {
+		log.Fatalf("FATAL ERROR: Conflicting modes: cannot specify more than one of -target, -dir, and -file.")
+	}
+	if modesCount == 0 {
+		*target = "http://127.0.0.1:8080"
+	}
 
 	// If -sign-link was requested, generate the temporary link and exit
 	if *shareDuration > 0 {
@@ -194,6 +229,13 @@ func main() {
 		log.Printf("==================================================")
 		log.Printf("  Temporary Stateless Signed Share Link")
 		log.Printf("  Node ID:    %s", *nodeID)
+		if *filePath != "" {
+			log.Printf("  Mode:       Single File (%s)", *filePath)
+		} else if *dirPath != "" {
+			log.Printf("  Mode:       Directory Server (%s)", *dirPath)
+		} else {
+			log.Printf("  Mode:       Reverse Proxy (%s)", *target)
+		}
 		log.Printf("  Expires:    %s (in %v)", time.Unix(exp, 0).Format("2006-01-02 15:04:05 MST"), *shareDuration)
 		log.Printf("  Link:       %s", link)
 		log.Printf("==================================================")
@@ -201,9 +243,26 @@ func main() {
 		os.Exit(0)
 	}
 
+	ag := agent.New(*nodeID, *signalURL, *signalSecret, *accessSecret, *target)
+	if *dirPath != "" {
+		if err := ag.SetDirectory(*dirPath); err != nil {
+			log.Fatalf("FATAL ERROR: Failed to initialize directory server: %v", err)
+		}
+	} else if *filePath != "" {
+		if err := ag.SetSingleFile(*filePath); err != nil {
+			log.Fatalf("FATAL ERROR: Failed to initialize single file server: %v", err)
+		}
+	}
+
 	log.Printf("==================================================")
 	log.Printf("  Zero-Client P2P WebRTC Gateway Agent (Go Daemon)")
-	log.Printf("  Node ID: %s | Target: %s", *nodeID, *target)
+	if *filePath != "" {
+		log.Printf("  Node ID: %s | Mode: Single File (%s, %d bytes)", *nodeID, ag.FileProxy().FileName(), ag.FileProxy().FileSize())
+	} else if *dirPath != "" {
+		log.Printf("  Node ID: %s | Mode: Directory Server (%s)", *nodeID, ag.FileProxy().TargetPath())
+	} else {
+		log.Printf("  Node ID: %s | Mode: Reverse Proxy (Target: %s)", *nodeID, *target)
+	}
 	log.Printf("  Cluster Auth: %v | Visitor Auth: %v", *signalSecret != "", *accessSecret != "")
 	if *sni != "" {
 		log.Printf("  TLS SNI / Host: %s", *sni)
@@ -215,8 +274,6 @@ func main() {
 		log.Printf("  TLS Verify: Disabled (-insecure)")
 	}
 	log.Printf("==================================================")
-
-	ag := agent.New(*nodeID, *signalURL, *signalSecret, *accessSecret, *target)
 	if *sni != "" {
 		ag.SetSNI(*sni)
 	}

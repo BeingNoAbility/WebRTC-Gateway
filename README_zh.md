@@ -165,7 +165,9 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | :--- | :--- | :--- | :--- |
 | `-node-id` | `NODE_ID` | `homeserver` | 该 Agent 在信令网络中的唯一节点标识（字符串） |
 | `-signal` | `SIGNAL_URL` | `ws://127.0.0.1:8888/ws` | 信令服务器的 WebSocket 地址（支持 ws:// 或 wss://） |
-| `-target` | `TARGET_URL` | `http://127.0.0.1:8080` | 本地或局域网需透传的目标 Web 服务地址 |
+| `-target` | `TARGET_URL` | `http://127.0.0.1:8080` (缺省) | 本地或局域网反代的目标 Web 服务地址（模式 A，与 `-dir`、`-file` 互斥） |
+| `-dir` | `DIR_PATH` | `""` | 托管为静态网站或目录浏览的本地文件夹路径（模式 B，与 `-target`、`-file` 互斥） |
+| `-file` | `FILE_PATH` | `""` | 直接作为单文件分发服务的本地文件路径（模式 C，与 `-target`、`-dir` 互斥，P2P 极速闪传） |
 | `-config` | `CONFIG_FILE` / `CONFIG` | `""` | 可选的 YAML / JSON 配置文件路径（默认自动探测 `./agent.yaml`、`./agent.yml`、`./agent.json`） |
 | `-signal-secret` | `SIGNAL_SECRET` | `""` | 信令集群准入密钥（控制面，必须与信令端配置一致，防节点冒领，绝不透露给访客） |
 | `-access-secret` | `ACCESS_SECRET` | `""` | 访客访问口令（数据面，留空表示公开免密直连；配置后访客需输入口令或持有 HMAC 签名链接） |
@@ -218,6 +220,12 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
   - 纯数学签名验证：`sign = HMAC-SHA256(nodeId + ":" + exp, access_secret)`；
   - 访客在浏览器打开 `#nodeId?exp=xxx&sign=yyy` 时，Agent 本地以毫秒级验证时效与签名，到期后数学上天然失效；
   - Web 控制台支持一键选择 1 小时、6 小时、24 小时、7 天、30 天生成专属分享链接并一键复制；CLI 亦支持 `./agent -access-secret xxx -sign-link 24h` 极速生成。
+- **纯内存零监听 P2P 文件与目录服务器 (v1.6.0+)**：
+  - **纯出站零端口哲学**：直接在内存中将 WebRTC DataChannel 流适配为标准 HTTP 响应，不在宿主机开启任何本地 TCP 监听端口，避免端口暴露与冲突；
+  - **单文件秒传 (私有版 Wormhole / 跨公网 AirDrop)**：`./agent -file /path/to/archive.zip -access-secret pass -sign-link 24h`，访客在浏览器打开即可直接触发原生浏览器高速 P2P 下载，不限文件大小、不走中心服务器中转流量；
+  - **静态网站与目录托管**：`./agent -dir /path/to/dist`，自动索引 `index.html` 或呈现只读文件树列表；
+  - **原生 HTTP 206 断点续传与媒体拖拽**：原生支持 `Range` 请求头，音视频/图片/PDF 自动采用 `inline` 供浏览器即时播放与拖拽，压缩包/镜像自动采用 `attachment` 触发下载；
+  - **严格沙箱安全防护**：基于 `filepath.Rel` 与 `filepath.EvalSymlinks` 严密防御 `../` 路径穿越与符号链接逃逸攻击。
 - **连接韧性与移动漫游自愈 (WebRTC ICE Restart)**：
   - 当手机或笔记本在 Wi-Fi 和蜂窝移动网络之间漫游切换时，系统启动两阶段自愈流水线；
   - 自动快速重建断开的信令套接字，并在原 PeerConnection 上发起带有 `iceRestart: true` 的重协商；
@@ -494,7 +502,9 @@ docker run --rm -e ACCESS_SECRET=your_visitor_password \
 | :--- | :--- | :--- | :--- |
 | `NODE_ID` | `homeserver` | `-node-id` | 当前节点的唯一标识符（外部通过 `#nodeId` 访问） |
 | `SIGNAL_URL` | `ws://127.0.0.1:8888/ws` | `-signal` | 信令服务器 WebSocket 端点（支持 `ws://` 与 `wss://`） |
-| `TARGET_URL` | `http://127.0.0.1:8080` | `-target` | 需要穿透暴露的目标 Web 服务地址 |
+| `TARGET_URL` | `http://127.0.0.1:8080` (缺省) | `-target` | 需要反代的目标 Web 服务地址（模式 A，与 `DIR_PATH`/`FILE_PATH` 互斥） |
+| `DIR_PATH` | 空 | `-dir` | 托管为静态网站或目录浏览的本地文件夹路径（模式 B） |
+| `FILE_PATH` | 空 | `-file` | 直接作为单文件分发服务的本地文件路径（模式 C，极速 P2P 闪传） |
 | `CONFIG_FILE` / `CONFIG` | 空 | `-config` | YAML / JSON 配置文件路径 |
 | `SIGNAL_SECRET` | 空 | `-signal-secret` | 信令集群准入密钥（控制面，必须与信令端匹配，防节点冒领） |
 | `ACCESS_SECRET` | 空 | `-access-secret` | 访客访问口令（数据面，留空免密直连，配置后访客需输入密码） |

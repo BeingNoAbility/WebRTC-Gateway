@@ -142,17 +142,14 @@ services:
       - SIGNAL_URL=ws://127.0.0.1:8888/ws
 
       # ------------------------------------------------------------------------
-      # 目标内网 Web 服务地址 (TARGET_URL)
-      # Agent 将把访客通过 P2P 隧道发来的所有 HTTP / WebSocket 请求透明反代到该目标。
-      # 支持 HTTP/HTTPS、任意内网 IP 与端口、子路径。
-      # 常见示例：
-      #   - Jellyfin / Emby:      http://127.0.0.1:8096
-      #   - Alist / OpenList:     http://127.0.0.1:5244
-      #   - Vaultwarden:          http://127.0.0.1:8080
-      #   - Immich:               http://127.0.0.1:2283
-      #   - Portainer:            https://127.0.0.1:9443
+      # 工作模式配置 (TARGET_URL / DIR_PATH / FILE_PATH 三选一互斥，v1.6.0+)
+      # 模式 A: 反向代理 (TARGET_URL) - 将 P2P 隧道流量反代到本地 Web 服务
+      # 模式 B: 目录托管 (DIR_PATH)   - 托管静态网站、前端产物或作为只读文件列表
+      # 模式 C: 单文件分享 (FILE_PATH) - 极速 P2P 点对点大文件直传 (私有版 Wormhole)
       # ------------------------------------------------------------------------
       - TARGET_URL=http://127.0.0.1:8080
+      # - DIR_PATH=/app/data/dist
+      # - FILE_PATH=/app/data/large_archive.zip
 
       # ------------------------------------------------------------------------
       # 跳过 TLS 证书校验 (INSECURE)

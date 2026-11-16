@@ -37,7 +37,9 @@ COPY --from=agent-builder /build/agent /app/agent
 # Default environment variables for agent
 ENV NODE_ID=homeserver \
     SIGNAL_URL=ws://127.0.0.1:8888/ws \
-    TARGET_URL=http://127.0.0.1:8080 \
+    TARGET_URL="" \
+    DIR_PATH="" \
+    FILE_PATH="" \
     SIGNAL_SECRET="" \
     ACCESS_SECRET="" \
     CONFIG_FILE="" \

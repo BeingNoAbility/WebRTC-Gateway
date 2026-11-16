@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,7 +49,14 @@ func TestPhase4Large100MBStreamingAndBackpressure(t *testing.T) {
 	}
 	defer clientWS.Close()
 
-	_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: agentNodeID})
+	var clientWSMu sync.Mutex
+	safeWriteWS := func(m *signaling.Message) error {
+		clientWSMu.Lock()
+		defer clientWSMu.Unlock()
+		return clientWS.WriteJSON(m)
+	}
+
+	_ = safeWriteWS(&signaling.Message{Type: signaling.TypeJoin, NodeID: agentNodeID})
 	var statusMsg signaling.Message
 	_ = clientWS.ReadJSON(&statusMsg)
 
@@ -68,7 +76,7 @@ func TestPhase4Large100MBStreamingAndBackpressure(t *testing.T) {
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
 			cand := c.ToJSON()
-			_ = clientWS.WriteJSON(&signaling.Message{
+			_ = safeWriteWS(&signaling.Message{
 				Type:      signaling.TypeCandidate,
 				NodeID:    agentNodeID,
 				Candidate: &cand,
@@ -78,7 +86,7 @@ func TestPhase4Large100MBStreamingAndBackpressure(t *testing.T) {
 
 	offer, _ := clientPC.CreateOffer(nil)
 	_ = clientPC.SetLocalDescription(offer)
-	_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeOffer, NodeID: agentNodeID, SDP: &offer})
+	_ = safeWriteWS(&signaling.Message{Type: signaling.TypeOffer, NodeID: agentNodeID, SDP: &offer})
 
 	dcOpenCh := make(chan struct{})
 	dc.OnOpen(func() { close(dcOpenCh) })

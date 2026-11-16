@@ -157,8 +157,15 @@ func TestPhase2E2EWebRTCP2PMux(t *testing.T) {
 	}
 	defer clientWS.Close()
 
+	var clientWSMu sync.Mutex
+	safeWriteWS := func(m *signaling.Message) error {
+		clientWSMu.Lock()
+		defer clientWSMu.Unlock()
+		return clientWS.WriteJSON(m)
+	}
+
 	// Send Join
-	if err := clientWS.WriteJSON(&signaling.Message{
+	if err := safeWriteWS(&signaling.Message{
 		Type:   signaling.TypeJoin,
 		NodeID: agentNodeID,
 	}); err != nil {
@@ -194,7 +201,7 @@ func TestPhase2E2EWebRTCP2PMux(t *testing.T) {
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
 			cand := c.ToJSON()
-			_ = clientWS.WriteJSON(&signaling.Message{
+			_ = safeWriteWS(&signaling.Message{
 				Type:      signaling.TypeCandidate,
 				NodeID:    agentNodeID,
 				Candidate: &cand,
@@ -211,7 +218,7 @@ func TestPhase2E2EWebRTCP2PMux(t *testing.T) {
 	}
 
 	// Send Offer
-	if err := clientWS.WriteJSON(&signaling.Message{
+	if err := safeWriteWS(&signaling.Message{
 		Type:   signaling.TypeOffer,
 		NodeID: agentNodeID,
 		SDP:    &offer,

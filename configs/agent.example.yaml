@@ -21,8 +21,17 @@ signal_secret: "cluster-secret-key-123"
 # - Non-empty: Visitors must provide this password (or valid HMAC-SHA256 signature link) to enter.
 access_secret: ""
 
-# Target internal backend address (HTTP/HTTPS) to proxy
+# Operating Mode: Exactly one of 'target', 'dir', or 'file' can be active (mutually exclusive)
+# ------------------------------------------------------------------------------
+# Mode A: Reverse Proxy to local HTTP/HTTPS backend (Default: http://127.0.0.1:8080)
 target: "http://127.0.0.1:8080"
+
+# Mode B: Static directory server / directory browsing (serves index.html or folder file list)
+# dir: "/var/www/html"
+
+# Mode C: Single file direct sharing (high-speed P2P download or media stream)
+# file: "/path/to/archive.zip"
+# ------------------------------------------------------------------------------
 
 # Optional forward proxy for outgoing connections (e.g. socks5://127.0.0.1:1080, http://proxy:8080)
 proxy: ""

@@ -1,37 +1,34 @@
 # WebRTC Gateway Release Notes
 
-## [v1.5.0] - 2026-11-16
+## [v1.6.0] - 2026-11-16
 
-### 🔑 密钥职责解耦体系 (Secret Decoupling: Control Plane vs Data Plane)
-- **信令集群准入密钥 (`-signal-secret` / `SIGNAL_SECRET`)**：
-  - 仅用于 Agent ↔ 信令服务器的节点注册准入与防冒领 (`Node Hijack Protection`)；
-  - 核心防护：信令端收到 Offer 时绝不再将此密钥透露给访客浏览器，彻底避免因分享内网站点导致集群注册凭据泄露。
-  - 兼容性：信令服务端保留 `-secret` 作为别名以平滑过渡。
-- **访客访问口令门禁 (`-access-secret` / `ACCESS_SECRET`)**：
-  - 仅用于访客浏览器 ↔ Agent 内网服务的访问权限；
-  - **公开免密模式（默认）**：若未配置 `-access-secret`，访客浏览器直接打洞进入，不再弹出密码输入框。即使信令集群配置了严格的 `-signal-secret`，亦可顺畅发布开源演示站或公开博客！
-  - **受保护模式**：配置后访客在浏览器打开时 Web 门户将自动感知并弹出高保真暗黑密码输入弹窗（或通过 URL 参数 `#nodeId?secret=xxx` 传递）；
-  - **时效签名免密**：与 `-sign-link` 无缝绑定，生成纯数学 HMAC-SHA256 签名临时安全分享链接。
-- **旧版 `-secret` 快速失败 (Fail-Fast)**：
-  - Agent 彻底废弃模糊的 `-secret` 与 `SECRET` 环境变量，若启动时传入将直接报错退出并给出清晰的迁移提示，从根源杜绝安全配置歧义。
+### 🚀 纯内存零监听 P2P 文件与目录服务器 (Zero-Listener P2P File & Directory Server)
+- **单文件秒传 (私有版 Wormhole / 跨公网 AirDrop)**：
+  - 新增 `-file <path>` 命令行参数、`FILE_PATH` 环境变量与配置项 `file`；
+  - 发送方只需一条命令：`./agent -file ./Ubuntu-24.04.iso -access-secret pass -sign-link 24h`；
+  - 接收方在任意设备浏览器点开链接即刻跑满带宽直连下载，无需安装任何客户端软件、不限文件大小、不走中心云端中转流量、24 小时后数学上自然失效！
+- **纯出站零端口架构 (Pure Outbound In-Memory Adapter)**：
+  - 编写轻量 `streamResponseWriter` 内存适配器，直接将 WebRTC DataChannel 的 `mux.Stream` 接入 Go 标准库 `net/http.ServeFile`，在宿主机上不开启任何本地 TCP 监听端口，恪守 Agent 纯出站安全哲学。
+- **智能 Content-Disposition 响应策略**：
+  - 音视频/图片/PDF/文本等媒体格式默认下发 `inline; filename="..."`，支持浏览器原生在线播放与预览；
+  - 压缩包、系统镜像及二进制可执行文件（.zip, .iso, .tar, .exe, .bin 等）默认下发 `attachment; filename="..."`，直接唤起浏览器原生下载弹窗。
+- **原生 HTTP 206 断点续传与媒体拖拽**：
+  - 完备支持 `Range` 与 `Content-Range` 报文，支持浏览器视频播放器随意拖拽进度条 Seek，支持多线程分段加速下载。
+- **静态网站与目录托管 (`-dir` / `DIR_PATH`)**：
+  - 新增 `-dir <path>` 模式，自动呈现 `index.html` 静态页面（适合前端 SPA/文档产物临时托管）或生成轻量只读文件列表。
+- **严格沙箱安全与路径穿越防逃逸**：
+  - 基于 `filepath.Rel` 与 `filepath.EvalSymlinks` 彻底阻断 `../` 路径穿越与符号链接逃逸攻击，严防越权读取宿主机敏感文件。
+- **工作模式严格三选一互斥**：
+  - 在 CLI 与配置文件解析层严格执行 `-target`（反向代理）、`-dir`（目录托管）、`-file`（单文件直传）互斥校验，缺省时安全回退至 `http://127.0.0.1:8080`，保证 100% 向后兼容。
 
-### ⚙️ 统一 YAML / JSON 配置文件支持 (`-config`)
-- **双格式支持 (选项 B 架构)**：
-  - 基于工业级标准 `gopkg.in/yaml.v3`，原生支持带注释的 YAML 语法，并 100% 兼容标准 JSON；
-  - 提供开箱即用模板：`configs/agent.example.yaml` 与 `configs/server.example.yaml`。
-- **四级优先级分层引擎**：
-  - 优先级严格遵循：`默认内置值 < 配置文件 < 环境变量 < 命令行参数`。
-- **零配置候选自动探测**：
-  - 缺省未指定 `-config` 时，自动在当前目录及二进制所在目录探测 `./agent.yaml`、`./agent.yml`、`./agent.json`（服务端探测 `./server.yaml` 等），文件不存在时静默跳过，体验零心智负担。
-- **显式指定快速失败**：
-  - 显式通过 `-config <path>` 或 `CONFIG_FILE` 指定时，若文件不存在或语法损坏立即报错退出，绝不盲目回退默认配置。
-- **友好类型解析**：
-  - 支持类似 `stun_servers` 既可配置为 YAML 列表（`["stun:..."]`），也可写为逗号分隔字符串（`"stun:...,stun:..."`）。
+### 🛠️ 稳定性与单测加固 (E2E Concurrency Hardening)
+- **信令 WebSocket 并发写保护**：
+  - 在全量端到端测试套件中为 `clientWS.WriteJSON` 补齐 `sync.Mutex` 保护，彻底消除了由于 Pion 内部独立 goroutine 异步发射 ICE Candidate 导致 Gorilla WebSocket 偶发并发写 panic 的时序竞争。
 
 ---
 
 ### 📦 资产下载与快速验证
 - 预编译二进制跨平台支持：Linux (amd64 / arm64)、Windows (amd64 / arm64)、macOS Darwin (amd64 / Apple Silicon arm64)。
 - 多架构 Docker 镜像已同步发布至 GitHub Container Registry (`ghcr.io`)：
-  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.5.0` (`latest`)
-  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.5.0` (`latest`)
+  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.6.0` (`latest`)
+  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.6.0` (`latest`)

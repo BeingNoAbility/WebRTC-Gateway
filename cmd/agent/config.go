@@ -66,6 +66,8 @@ type AgentConfigFile struct {
 	SignalSecret string        `json:"signal_secret" yaml:"signal_secret"`
 	AccessSecret string        `json:"access_secret" yaml:"access_secret"`
 	TargetURL    string        `json:"target" yaml:"target"`
+	Dir          string        `json:"dir" yaml:"dir"`
+	File         string        `json:"file" yaml:"file"`
 	ProxyURL     string        `json:"proxy" yaml:"proxy"`
 	SNI          string        `json:"sni" yaml:"sni"`
 	Insecure     *bool         `json:"insecure" yaml:"insecure"`

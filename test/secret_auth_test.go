@@ -281,7 +281,14 @@ func TestSecretAuth_CorrectSecret_Success(t *testing.T) {
 	}
 	defer clientWS.Close()
 
-	_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID, Secret: secretToken})
+	var clientWSMu sync.Mutex
+	safeWriteClientWS := func(m *signaling.Message) error {
+		clientWSMu.Lock()
+		defer clientWSMu.Unlock()
+		return clientWS.WriteJSON(m)
+	}
+
+	_ = safeWriteClientWS(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID, Secret: secretToken})
 	var statusMsg signaling.Message
 	_ = clientWS.ReadJSON(&statusMsg)
 	if !statusMsg.RequiresSecret {
@@ -310,7 +317,7 @@ func TestSecretAuth_CorrectSecret_Success(t *testing.T) {
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
 			cand := c.ToJSON()
-			_ = clientWS.WriteJSON(&signaling.Message{
+			_ = safeWriteClientWS(&signaling.Message{
 				Type:      signaling.TypeCandidate,
 				NodeID:    nodeID,
 				Candidate: &cand,
@@ -325,7 +332,7 @@ func TestSecretAuth_CorrectSecret_Success(t *testing.T) {
 	_ = clientPC.SetLocalDescription(offer)
 
 	// Send offer WITH matching secret
-	_ = clientWS.WriteJSON(&signaling.Message{
+	_ = safeWriteClientWS(&signaling.Message{
 		Type:   signaling.TypeOffer,
 		NodeID: nodeID,
 		SDP:    &offer,
@@ -756,6 +763,13 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 	clientWS, _, _ := websocket.DefaultDialer.Dial(wsURL, nil)
 	defer clientWS.Close()
 
+	var clientWSMu sync.Mutex
+	safeWriteClientWS := func(msg *signaling.Message) error {
+		clientWSMu.Lock()
+		defer clientWSMu.Unlock()
+		return clientWS.WriteJSON(msg)
+	}
+
 	ansCh := make(chan signaling.Message, 5)
 	go func() {
 		for {
@@ -769,7 +783,7 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 		}
 	}()
 
-	_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
+	_ = safeWriteClientWS(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
 
 	clientPC, err := webrtc.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
@@ -793,7 +807,7 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
 			cand := c.ToJSON()
-			_ = clientWS.WriteJSON(&signaling.Message{
+			_ = safeWriteClientWS(&signaling.Message{
 				Type:      signaling.TypeCandidate,
 				NodeID:    nodeID,
 				Candidate: &cand,
@@ -808,7 +822,7 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 	_ = clientPC.SetLocalDescription(offer)
 
 	// Send offer WITH Exp and Sign (No raw secret!)
-	_ = clientWS.WriteJSON(&signaling.Message{
+	_ = safeWriteClientWS(&signaling.Message{
 		Type:   signaling.TypeOffer,
 		NodeID: nodeID,
 		SDP:    &offer,
@@ -871,7 +885,7 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 	}
 	_ = clientPC.SetLocalDescription(iceRestartOffer)
 
-	_ = clientWS.WriteJSON(&signaling.Message{
+	_ = safeWriteClientWS(&signaling.Message{
 		Type:       signaling.TypeOffer,
 		NodeID:     nodeID,
 		SDP:        &iceRestartOffer,

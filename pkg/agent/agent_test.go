@@ -5,12 +5,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"webrtc-gateway/pkg/proxy"
 	"webrtc-gateway/pkg/signaling"
 )
 
@@ -253,5 +256,42 @@ func TestAgent_ConcurrentStreamsCapacity(t *testing.T) {
 	}
 	if !strings.Contains(metrics, `webrtc_gateway_active_streams{node_id="test-capacity-node"} 2`) {
 		t.Errorf("Prometheus metrics missing active_streams 2:\n%s", metrics)
+	}
+}
+
+func TestAgent_FileAndDirectoryMode(t *testing.T) {
+	tempDir := t.TempDir()
+	sampleFile := filepath.Join(tempDir, "shared_document.pdf")
+	_ = os.WriteFile(sampleFile, []byte("%PDF-1.4 sample pdf content"), 0644)
+
+	// 1. Single file mode
+	agFile := New("test-file-node", "ws://127.0.0.1:8888/ws", "sig-secret", "visitor-secret", "")
+	defer agFile.Close()
+
+	if err := agFile.SetSingleFile(sampleFile); err != nil {
+		t.Fatalf("SetSingleFile failed: %v", err)
+	}
+	if agFile.FileProxy() == nil {
+		t.Fatalf("Expected FileProxy to be initialized")
+	}
+	if agFile.FileProxy().Mode() != proxy.FileModeSingleFile {
+		t.Errorf("Expected FileModeSingleFile, got %v", agFile.FileProxy().Mode())
+	}
+	if agFile.FileProxy().FileName() != "shared_document.pdf" {
+		t.Errorf("Expected FileName shared_document.pdf, got %q", agFile.FileProxy().FileName())
+	}
+
+	// 2. Directory mode
+	agDir := New("test-dir-node", "ws://127.0.0.1:8888/ws", "sig-secret", "", "")
+	defer agDir.Close()
+
+	if err := agDir.SetDirectory(tempDir); err != nil {
+		t.Fatalf("SetDirectory failed: %v", err)
+	}
+	if agDir.FileProxy() == nil {
+		t.Fatalf("Expected FileProxy to be initialized")
+	}
+	if agDir.FileProxy().Mode() != proxy.FileModeDirectory {
+		t.Errorf("Expected FileModeDirectory, got %v", agDir.FileProxy().Mode())
 	}
 }

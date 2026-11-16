@@ -52,7 +52,14 @@ func setupE2EEnvironment(t *testing.T, handler http.Handler) (
 		t.Fatalf("Client dial signal error: %v", err)
 	}
 
-	_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
+	var clientWSMu sync.Mutex
+	safeWriteWS := func(m *signaling.Message) error {
+		clientWSMu.Lock()
+		defer clientWSMu.Unlock()
+		return clientWS.WriteJSON(m)
+	}
+
+	_ = safeWriteWS(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
 	var statusMsg signaling.Message
 	_ = clientWS.ReadJSON(&statusMsg)
 
@@ -71,7 +78,7 @@ func setupE2EEnvironment(t *testing.T, handler http.Handler) (
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
 			cand := c.ToJSON()
-			_ = clientWS.WriteJSON(&signaling.Message{
+			_ = safeWriteWS(&signaling.Message{
 				Type:      signaling.TypeCandidate,
 				NodeID:    nodeID,
 				Candidate: &cand,
@@ -81,7 +88,7 @@ func setupE2EEnvironment(t *testing.T, handler http.Handler) (
 
 	offer, _ := clientPC.CreateOffer(nil)
 	_ = clientPC.SetLocalDescription(offer)
-	_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeOffer, NodeID: nodeID, SDP: &offer})
+	_ = safeWriteWS(&signaling.Message{Type: signaling.TypeOffer, NodeID: nodeID, SDP: &offer})
 
 	dcOpenCh := make(chan struct{})
 	dc.OnOpen(func() { close(dcOpenCh) })
@@ -623,7 +630,14 @@ func TestE2E_DataChannel_ReconnectionResilience(t *testing.T) {
 		}
 		defer clientWS.Close()
 
-		_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
+		var clientWSMu sync.Mutex
+		safeWriteWS := func(m *signaling.Message) error {
+			clientWSMu.Lock()
+			defer clientWSMu.Unlock()
+			return clientWS.WriteJSON(m)
+		}
+
+		_ = safeWriteWS(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
 		var statusMsg signaling.Message
 		_ = clientWS.ReadJSON(&statusMsg)
 
@@ -643,7 +657,7 @@ func TestE2E_DataChannel_ReconnectionResilience(t *testing.T) {
 		clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 			if c != nil {
 				cand := c.ToJSON()
-				_ = clientWS.WriteJSON(&signaling.Message{
+				_ = safeWriteWS(&signaling.Message{
 					Type:      signaling.TypeCandidate,
 					NodeID:    nodeID,
 					Candidate: &cand,
@@ -653,7 +667,7 @@ func TestE2E_DataChannel_ReconnectionResilience(t *testing.T) {
 
 		offer, _ := clientPC.CreateOffer(nil)
 		_ = clientPC.SetLocalDescription(offer)
-		_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeOffer, NodeID: nodeID, SDP: &offer})
+		_ = safeWriteWS(&signaling.Message{Type: signaling.TypeOffer, NodeID: nodeID, SDP: &offer})
 
 		dcOpenCh := make(chan struct{})
 		dc.OnOpen(func() { close(dcOpenCh) })

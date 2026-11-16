@@ -43,6 +43,7 @@ type Agent struct {
 	cookieManager *proxy.SessionCookieManager
 	httpProxy     *proxy.HTTPProxy
 	wsProxy       *proxy.WSProxy
+	fileProxy     *proxy.FileProxy
 
 	webrtcConfig     webrtc.Configuration
 	activeConns      map[string]*webrtc.PeerConnection
@@ -72,14 +73,18 @@ func (c *countedTransport) Send(b []byte) error {
 
 func New(nodeID, signalURL, signalSecret, accessSecret, target string) *Agent {
 	cm := proxy.NewSessionCookieManager()
-	hp, err := proxy.NewHTTPProxy(target, cm)
-	if err != nil {
-		log.Fatalf("[Agent] Failed to init HTTPProxy: %v", err)
-	}
-
-	wp, err := proxy.NewWSProxy(target, cm)
-	if err != nil {
-		log.Fatalf("[Agent] Failed to init WSProxy: %v", err)
+	var hp *proxy.HTTPProxy
+	var wp *proxy.WSProxy
+	if target != "" {
+		var err error
+		hp, err = proxy.NewHTTPProxy(target, cm)
+		if err != nil {
+			log.Fatalf("[Agent] Failed to init HTTPProxy: %v", err)
+		}
+		wp, err = proxy.NewWSProxy(target, cm)
+		if err != nil {
+			log.Fatalf("[Agent] Failed to init WSProxy: %v", err)
+		}
 	}
 
 	return &Agent{
@@ -164,6 +169,31 @@ func (a *Agent) SetTURN(turnURL, turnUser, turnPass string) {
 	}
 	a.webrtcConfig.ICEServers = append(a.webrtcConfig.ICEServers, server)
 	log.Printf("[Agent] Configured TURN relay: %s (user: %s)", turnURL, turnUser)
+}
+
+// SetSingleFile configures the agent to serve a single file directly in memory over WebRTC DataChannels.
+func (a *Agent) SetSingleFile(filePath string) error {
+	fp, err := proxy.NewSingleFileProxy(filePath)
+	if err != nil {
+		return err
+	}
+	a.fileProxy = fp
+	return nil
+}
+
+// SetDirectory configures the agent to serve a local directory tree directly in memory over WebRTC DataChannels.
+func (a *Agent) SetDirectory(dirPath string) error {
+	fp, err := proxy.NewDirProxy(dirPath)
+	if err != nil {
+		return err
+	}
+	a.fileProxy = fp
+	return nil
+}
+
+// FileProxy returns the active FileProxy if running in file/directory serving mode.
+func (a *Agent) FileProxy() *proxy.FileProxy {
+	return a.fileProxy
 }
 
 // SetMaxConcurrentStreams sets the maximum number of concurrent multiplexed streams (default 512).
@@ -743,6 +773,16 @@ func (a *Agent) streamAcceptLoop(sessionID string, m *mux.Mux) {
 
 			// Restore headers for the proxy handler
 			s.PushInternalHeaders(headersPayload)
+
+			if a.fileProxy != nil {
+				if isWebSocket {
+					log.Printf("[Agent] [Session %s] WebSocket not supported in file server mode, resetting stream %d", sessionID, s.ID())
+					_ = s.Reset()
+					return
+				}
+				a.fileProxy.HandleStream(sessionID, s)
+				return
+			}
 
 			if isWebSocket {
 				log.Printf("[Agent] [Session %s] Routing Stream %d to WebSocket Proxy", sessionID, s.ID())

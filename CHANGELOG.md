@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.6.0] - 2026-11-16
+
+### Added
+- **P2P Zero-Listener Single File & Directory Server (`-file` / `-dir`)**:
+  - **Single File Direct Sharing (`-file` / `FILE_PATH` / `file`)**: Unlocks private, zero-relay, cross-WAN AirDrop / Wormhole direct transfer. Visitors download directly in their browser at line-rate P2P speed without cloud relays or file size limits.
+  - **Pure In-Memory Architecture**: Custom `streamResponseWriter` adapts WebRTC DataChannel streams (`mux.Stream`) to Go's standard `http.ResponseWriter` in memory, strictly preserving the Agent's zero-listening-port "Pure Outbound" security philosophy.
+  - **Native HTTP 206 Range Streaming**: Full support for `Range` and `Content-Range` headers via `net/http.ServeFile`, enabling smooth seeking for video/audio streaming and multi-part downloads.
+  - **Smart Content-Disposition**:
+    - Previewable media (MP4, WebM, MP3, PNG, JPG, PDF, TXT, etc.) defaults to `inline` for in-browser playback;
+    - Binary archives (ZIP, ISO, TAR, EXE, BIN, etc.) defaults to `attachment` to immediately trigger native browser download prompts.
+  - **Static Web & Directory Hosting (`-dir` / `DIR_PATH` / `dir`)**: Host static SPAs/documentation trees (`index.html`) or render clean read-only directory file listings.
+  - **Strict Sandbox & Path Traversal Hardening**: Enforces lexical containment via `filepath.Rel` and symlink escape verification via `filepath.EvalSymlinks`, strictly blocking any `../` path traversal or symlink escape attempts.
+  - **Three-Way Mutual Exclusivity**: Enforces strict exclusivity between `-target`, `-dir`, and `-file` with Fail-Fast validation, defaulting safely to `http://127.0.0.1:8080` if none are specified.
+  - **Seamless Stateless Sharing**: Fully integrated with HMAC-SHA256 `-sign-link` temporary links for secure, expiring P2P file downloads.
+
+### Fixed
+- **WebSocket Thread-Safety in E2E Test Suites**:
+  - Wrapped `clientWS.WriteJSON` calls in `test/secret_auth_test.go`, `test/mvp_e2e_test.go`, `test/large_file_e2e_test.go`, and `test/advanced_e2e_scenarios_test.go` with `sync.Mutex`, eliminating sporadic concurrent write panics caused by asynchronous ICE candidate emission during heavy test concurrency.
+
+---
+
 ## [v1.5.0] - 2026-11-16
 
 ### Added

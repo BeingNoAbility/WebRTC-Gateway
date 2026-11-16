@@ -123,3 +123,43 @@ func TestAgent_FailFastDeprecatedSecret(t *testing.T) {
 		t.Errorf("Expected deprecation message in output, got:\n%s", string(out))
 	}
 }
+
+func TestAgentConfig_DirAndFileParsing(t *testing.T) {
+	yamlContent := `
+node_id: "file-server-node"
+signal: "wss://signal.example.com/ws"
+dir: "/data/www"
+file: "/data/archive.zip"
+`
+	tmpYAML, err := os.CreateTemp("", "agent-file-*.yaml")
+	if err != nil {
+		t.Fatalf("Failed to create temp yaml: %v", err)
+	}
+	defer os.Remove(tmpYAML.Name())
+	_, _ = tmpYAML.WriteString(yamlContent)
+	_ = tmpYAML.Close()
+
+	cfg, err := LoadAgentConfigFile(tmpYAML.Name())
+	if err != nil {
+		t.Fatalf("Failed to load agent config YAML: %v", err)
+	}
+
+	if cfg.Dir != "/data/www" {
+		t.Errorf("Expected dir /data/www, got %q", cfg.Dir)
+	}
+	if cfg.File != "/data/archive.zip" {
+		t.Errorf("Expected file /data/archive.zip, got %q", cfg.File)
+	}
+}
+
+func TestAgent_ConflictingModesFailFast(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "-target", "http://127.0.0.1:8080", "-file", "/some/file.zip")
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("Expected command to fail on conflicting -target and -file, but it succeeded: %s", string(out))
+	}
+	if !strings.Contains(string(out), "Conflicting modes: cannot specify more than one") {
+		t.Errorf("Expected conflicting modes error message, got:\n%s", string(out))
+	}
+}
