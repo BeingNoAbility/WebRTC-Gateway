@@ -17,58 +17,178 @@ import (
 )
 
 func main() {
-	defaultNodeID := "homeserver"
-	if env := os.Getenv("NODE_ID"); env != "" {
-		defaultNodeID = env
+	// 0. Fail-fast deprecation check for legacy -secret flag and SECRET env
+	for _, arg := range os.Args[1:] {
+		if arg == "-secret" || strings.HasPrefix(arg, "-secret=") || arg == "--secret" || strings.HasPrefix(arg, "--secret=") {
+			fmt.Fprintln(os.Stderr, "Error: flag -secret has been deprecated and removed.")
+			fmt.Fprintln(os.Stderr, "  - Use -signal-secret (SIGNAL_SECRET) for cluster node registration and anti-hijacking.")
+			fmt.Fprintln(os.Stderr, "  - Use -access-secret (ACCESS_SECRET) for visitor password protection.")
+			os.Exit(1)
+		}
 	}
-	defaultSignal := "ws://127.0.0.1:8888/ws"
-	if env := os.Getenv("SIGNAL_URL"); env != "" {
-		defaultSignal = env
+	if os.Getenv("SECRET") != "" {
+		fmt.Fprintln(os.Stderr, "Error: environment variable SECRET has been deprecated and removed.")
+		fmt.Fprintln(os.Stderr, "  - Use SIGNAL_SECRET for cluster node registration and anti-hijacking.")
+		fmt.Fprintln(os.Stderr, "  - Use ACCESS_SECRET for visitor password protection.")
+		os.Exit(1)
 	}
-	defaultTarget := "http://127.0.0.1:8080"
-	if env := os.Getenv("TARGET_URL"); env != "" {
-		defaultTarget = env
-	}
-	defaultSecret := os.Getenv("SECRET")
-	defaultProxy := os.Getenv("PROXY_URL")
-	defaultSNI := os.Getenv("SNI")
-	defaultInsecure := os.Getenv("INSECURE") == "true" || os.Getenv("INSECURE") == "1"
-	defaultTurnURL := os.Getenv("TURN_URL")
-	defaultTurnUser := os.Getenv("TURN_USER")
-	defaultTurnPass := os.Getenv("TURN_PASS")
-	defaultStunServers := os.Getenv("STUN_SERVERS")
-	defaultMetricsAddr := os.Getenv("METRICS_ADDR")
-	defaultMaxStreams := 512
-	if env := os.Getenv("MAX_STREAMS"); env != "" {
-		if v, err := strconv.Atoi(env); err == nil && v > 0 {
-			defaultMaxStreams = v
+
+	// 1. Defaults (Tier 1: Defaults)
+	cfgNodeID := "homeserver"
+	cfgSignalURL := "ws://127.0.0.1:8888/ws"
+	cfgSignalSecret := ""
+	cfgAccessSecret := ""
+	cfgTarget := "http://127.0.0.1:8080"
+	cfgProxy := ""
+	cfgSNI := ""
+	cfgInsecure := false
+	cfgTurnURL := ""
+	cfgTurnUser := ""
+	cfgTurnPass := ""
+	cfgStunServers := ""
+	cfgMaxStreams := 512
+	cfgMetricsAddr := ""
+	cfgPortalURL := "https://your-portal-domain.com"
+
+	// 2. Load Config File (Tier 2: Config File)
+	configPath, explicitConfig := FindConfigFile(os.Args[1:], []string{"agent.yaml", "agent.yml", "agent.json"})
+	if configPath != "" {
+		fileCfg, err := LoadAgentConfigFile(configPath)
+		if err != nil {
+			if explicitConfig {
+				log.Fatalf("[Error] Failed to load configuration file %q: %v", configPath, err)
+			} else {
+				log.Fatalf("[Error] Failed to parse auto-detected configuration file %q: %v", configPath, err)
+			}
+		}
+		log.Printf("[Config] Loaded configuration from %s", configPath)
+		if fileCfg.NodeID != "" {
+			cfgNodeID = fileCfg.NodeID
+		}
+		if fileCfg.SignalURL != "" {
+			cfgSignalURL = fileCfg.SignalURL
+		}
+		if fileCfg.SignalSecret != "" {
+			cfgSignalSecret = fileCfg.SignalSecret
+		}
+		if fileCfg.AccessSecret != "" {
+			cfgAccessSecret = fileCfg.AccessSecret
+		}
+		if fileCfg.TargetURL != "" {
+			cfgTarget = fileCfg.TargetURL
+		}
+		if fileCfg.ProxyURL != "" {
+			cfgProxy = fileCfg.ProxyURL
+		}
+		if fileCfg.SNI != "" {
+			cfgSNI = fileCfg.SNI
+		}
+		if fileCfg.Insecure != nil {
+			cfgInsecure = *fileCfg.Insecure
+		}
+		if fileCfg.TurnURL != "" {
+			cfgTurnURL = fileCfg.TurnURL
+		}
+		if fileCfg.TurnUser != "" {
+			cfgTurnUser = fileCfg.TurnUser
+		}
+		if fileCfg.TurnPass != "" {
+			cfgTurnPass = fileCfg.TurnPass
+		}
+		if len(fileCfg.StunServers) > 0 {
+			cfgStunServers = fileCfg.StunServers.String()
+		}
+		if fileCfg.MaxStreams > 0 {
+			cfgMaxStreams = fileCfg.MaxStreams
+		}
+		if fileCfg.MetricsAddr != "" {
+			cfgMetricsAddr = fileCfg.MetricsAddr
+		}
+		if fileCfg.PortalURL != "" {
+			cfgPortalURL = fileCfg.PortalURL
 		}
 	}
 
-	nodeID := flag.String("node-id", defaultNodeID, "Unique node ID for this agent (env: NODE_ID)")
-	signalURL := flag.String("signal", defaultSignal, "Signaling server WebSocket URL (env: SIGNAL_URL)")
-	secret := flag.String("secret", defaultSecret, "Optional secret token for authentication (env: SECRET)")
-	target := flag.String("target", defaultTarget, "Local destination Web application URL (env: TARGET_URL)")
-	proxyURL := flag.String("proxy", defaultProxy, "Optional HTTP/HTTPS/SOCKS5 proxy for signaling (env: PROXY_URL)")
-	sni := flag.String("sni", defaultSNI, "Optional TLS SNI and Host header for signaling (useful when dialing Cloudflare IP directly, env: SNI)")
-	insecure := flag.Bool("insecure", defaultInsecure, "Skip TLS verification for self-signed signaling servers (env: INSECURE)")
-	turnURL := flag.String("turn-url", defaultTurnURL, "Optional TURN relay server URL (e.g. turn:relay.example.com:3478, env: TURN_URL)")
-	turnUser := flag.String("turn-user", defaultTurnUser, "Optional TURN relay username (env: TURN_USER)")
-	turnPass := flag.String("turn-pass", defaultTurnPass, "Optional TURN relay password / credential (env: TURN_PASS)")
-	stunServers := flag.String("stun-servers", defaultStunServers, "Optional comma-separated custom STUN servers (env: STUN_SERVERS)")
-	maxStreams := flag.Int("max-streams", defaultMaxStreams, "Maximum concurrent multiplexed streams before capacity backpressure rejection (env: MAX_STREAMS)")
-	metricsAddr := flag.String("metrics-addr", defaultMetricsAddr, "Optional address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default disabled)")
+	// 3. Override with Environment Variables (Tier 3: ENV)
+	if env := os.Getenv("NODE_ID"); env != "" {
+		cfgNodeID = env
+	}
+	if env := os.Getenv("SIGNAL_URL"); env != "" {
+		cfgSignalURL = env
+	}
+	if env := os.Getenv("SIGNAL_SECRET"); env != "" {
+		cfgSignalSecret = env
+	}
+	if env := os.Getenv("ACCESS_SECRET"); env != "" {
+		cfgAccessSecret = env
+	}
+	if env := os.Getenv("TARGET_URL"); env != "" {
+		cfgTarget = env
+	}
+	if env := os.Getenv("PROXY_URL"); env != "" {
+		cfgProxy = env
+	}
+	if env := os.Getenv("SNI"); env != "" {
+		cfgSNI = env
+	}
+	if env := os.Getenv("INSECURE"); env == "true" || env == "1" {
+		cfgInsecure = true
+	}
+	if env := os.Getenv("TURN_URL"); env != "" {
+		cfgTurnURL = env
+	}
+	if env := os.Getenv("TURN_USER"); env != "" {
+		cfgTurnUser = env
+	}
+	if env := os.Getenv("TURN_PASS"); env != "" {
+		cfgTurnPass = env
+	}
+	if env := os.Getenv("STUN_SERVERS"); env != "" {
+		cfgStunServers = env
+	}
+	if env := os.Getenv("MAX_STREAMS"); env != "" {
+		if v, err := strconv.Atoi(env); err == nil && v > 0 {
+			cfgMaxStreams = v
+		}
+	}
+	if env := os.Getenv("METRICS_ADDR"); env != "" {
+		cfgMetricsAddr = env
+	}
+	if env := os.Getenv("PORTAL_URL"); env != "" {
+		cfgPortalURL = env
+	}
+
+	// 4. CLI Flags (Tier 4: CLI Flags - Highest Priority)
+	nodeID := flag.String("node-id", cfgNodeID, "Unique node ID for this agent (env: NODE_ID)")
+	signalURL := flag.String("signal", cfgSignalURL, "Signaling server WebSocket URL (env: SIGNAL_URL)")
+	signalSecret := flag.String("signal-secret", cfgSignalSecret, "Cluster secret token for signaling server registration & anti-hijacking (env: SIGNAL_SECRET)")
+	accessSecret := flag.String("access-secret", cfgAccessSecret, "Visitor password token for proxy access; empty for public access (env: ACCESS_SECRET)")
+	target := flag.String("target", cfgTarget, "Local destination Web application URL (env: TARGET_URL)")
+	configFlag := flag.String("config", "", "Path to configuration file (.yaml, .yml, or .json, env: CONFIG_FILE)")
+	proxyURL := flag.String("proxy", cfgProxy, "Optional HTTP/HTTPS/SOCKS5 proxy for signaling (env: PROXY_URL)")
+	sni := flag.String("sni", cfgSNI, "Optional TLS SNI and Host header for signaling (env: SNI)")
+	insecure := flag.Bool("insecure", cfgInsecure, "Skip TLS verification for self-signed signaling servers (env: INSECURE)")
+	turnURL := flag.String("turn-url", cfgTurnURL, "Optional TURN relay server URL (e.g. turn:relay.example.com:3478, env: TURN_URL)")
+	turnUser := flag.String("turn-user", cfgTurnUser, "Optional TURN relay username (env: TURN_USER)")
+	turnPass := flag.String("turn-pass", cfgTurnPass, "Optional TURN relay password / credential (env: TURN_PASS)")
+	stunServers := flag.String("stun-servers", cfgStunServers, "Optional comma-separated custom STUN servers (env: STUN_SERVERS)")
+	maxStreams := flag.Int("max-streams", cfgMaxStreams, "Maximum concurrent multiplexed streams before capacity backpressure rejection (env: MAX_STREAMS)")
+	metricsAddr := flag.String("metrics-addr", cfgMetricsAddr, "Optional address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default disabled)")
 	shareDuration := flag.Duration("sign-link", 0, "Generate a temporary signed share link with the given expiration duration (e.g. 1h, 24h, 7d) and exit")
-	portalURL := flag.String("portal-url", "https://your-portal-domain.com", "Base URL of the Web Portal for -sign-link generation")
+	portalURL := flag.String("portal-url", cfgPortalURL, "Base URL of the Web Portal for -sign-link generation")
+	_ = configFlag
 	flag.Parse()
 
 	// If -sign-link was requested, generate the temporary link and exit
 	if *shareDuration > 0 {
-		if *secret == "" {
-			log.Fatalf("[Error] -secret is required to generate signed share links.")
+		if *accessSecret == "" {
+			fmt.Fprintln(os.Stderr, "Notice: Node is configured for public access (-access-secret is empty).")
+			fmt.Fprintln(os.Stderr, "Visitors can access directly without a signed link:")
+			fmt.Printf("%s/#%s\n", strings.TrimRight(*portalURL, "/"), *nodeID)
+			os.Exit(0)
 		}
 		exp := time.Now().Add(*shareDuration).Unix()
-		sign := agent.GenerateShareSignature(*nodeID, exp, *secret)
+		sign := agent.GenerateShareSignature(*nodeID, exp, *accessSecret)
 		base := strings.TrimRight(*portalURL, "/")
 		link := fmt.Sprintf("%s/#%s?exp=%d&sign=%s", base, *nodeID, exp, sign)
 		log.Printf("==================================================")
@@ -84,6 +204,7 @@ func main() {
 	log.Printf("==================================================")
 	log.Printf("  Zero-Client P2P WebRTC Gateway Agent (Go Daemon)")
 	log.Printf("  Node ID: %s | Target: %s", *nodeID, *target)
+	log.Printf("  Cluster Auth: %v | Visitor Auth: %v", *signalSecret != "", *accessSecret != "")
 	if *sni != "" {
 		log.Printf("  TLS SNI / Host: %s", *sni)
 	}
@@ -95,7 +216,7 @@ func main() {
 	}
 	log.Printf("==================================================")
 
-	ag := agent.New(*nodeID, *signalURL, *secret, *target)
+	ag := agent.New(*nodeID, *signalURL, *signalSecret, *accessSecret, *target)
 	if *sni != "" {
 		ag.SetSNI(*sni)
 	}

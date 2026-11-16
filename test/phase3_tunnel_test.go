@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,7 +116,7 @@ func TestPhase3FullHTTPAndWSTunnel(t *testing.T) {
 
 	// Step 3: Start Agent Daemon targeting Mock Backend
 	agentNodeID := "nas-node-1"
-	ag := agent.New(agentNodeID, wsSignalURL, "", backend.URL)
+	ag := agent.New(agentNodeID, wsSignalURL, "", "", backend.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -133,7 +134,14 @@ func TestPhase3FullHTTPAndWSTunnel(t *testing.T) {
 	}
 	defer clientWS.Close()
 
-	_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: agentNodeID})
+	var wsMu sync.Mutex
+	safeWriteJSON := func(v interface{}) error {
+		wsMu.Lock()
+		defer wsMu.Unlock()
+		return clientWS.WriteJSON(v)
+	}
+
+	_ = safeWriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: agentNodeID})
 	var statusMsg signaling.Message
 	_ = clientWS.ReadJSON(&statusMsg)
 
@@ -153,7 +161,7 @@ func TestPhase3FullHTTPAndWSTunnel(t *testing.T) {
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
 			cand := c.ToJSON()
-			_ = clientWS.WriteJSON(&signaling.Message{
+			_ = safeWriteJSON(&signaling.Message{
 				Type:      signaling.TypeCandidate,
 				NodeID:    agentNodeID,
 				Candidate: &cand,
@@ -163,7 +171,7 @@ func TestPhase3FullHTTPAndWSTunnel(t *testing.T) {
 
 	offer, _ := clientPC.CreateOffer(nil)
 	_ = clientPC.SetLocalDescription(offer)
-	_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeOffer, NodeID: agentNodeID, SDP: &offer})
+	_ = safeWriteJSON(&signaling.Message{Type: signaling.TypeOffer, NodeID: agentNodeID, SDP: &offer})
 
 	dcOpenCh := make(chan struct{})
 	dc.OnOpen(func() { close(dcOpenCh) })

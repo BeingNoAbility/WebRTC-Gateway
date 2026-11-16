@@ -39,7 +39,7 @@ func setupE2EEnvironment(t *testing.T, handler http.Handler) (
 	wsSignalURL := "ws" + strings.TrimPrefix(signalServer.URL, "http")
 
 	nodeID := fmt.Sprintf("e2e-node-%d", time.Now().UnixNano())
-	ag = agent.New(nodeID, wsSignalURL, "", backend.URL)
+	ag = agent.New(nodeID, wsSignalURL, "", "", backend.URL)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = ag.Start(ctx) }()
@@ -606,7 +606,7 @@ func TestE2E_DataChannel_ReconnectionResilience(t *testing.T) {
 	wsSignalURL := "ws" + strings.TrimPrefix(signalServer.URL, "http")
 
 	nodeID := fmt.Sprintf("reconn-node-%d", time.Now().UnixNano())
-	ag := agent.New(nodeID, wsSignalURL, "", backend.URL)
+	ag := agent.New(nodeID, wsSignalURL, "", "", backend.URL)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

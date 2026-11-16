@@ -139,7 +139,7 @@ func TestPhase2E2EWebRTCP2PMux(t *testing.T) {
 
 	// 2. Start Agent in background
 	agentNodeID := "test-agent-node"
-	agentInstance := agent.New(agentNodeID, wsURL, "", "http://127.0.0.1:8080")
+	agentInstance := agent.New(agentNodeID, wsURL, "", "", "http://127.0.0.1:8080")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

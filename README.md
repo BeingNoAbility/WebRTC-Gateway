@@ -166,28 +166,35 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-node-id` | `NODE_ID` | `homeserver` | 该 Agent 在信令网络中的唯一节点标识（字符串） |
 | `-signal` | `SIGNAL_URL` | `ws://127.0.0.1:8888/ws` | 信令服务器的 WebSocket 地址（支持 ws:// 或 wss://） |
 | `-target` | `TARGET_URL` | `http://127.0.0.1:8080` | 本地或局域网需透传的目标 Web 服务地址 |
-| `-secret` | `SECRET` | `""` | 可选的安全接入口令，校验握手合法性 |
+| `-config` | `CONFIG_FILE` / `CONFIG` | `""` | 可选的 YAML / JSON 配置文件路径（默认自动探测 `./agent.yaml`、`./agent.yml`、`./agent.json`） |
+| `-signal-secret` | `SIGNAL_SECRET` | `""` | 信令集群准入密钥（控制面，必须与信令端配置一致，防节点冒领，绝不透露给访客） |
+| `-access-secret` | `ACCESS_SECRET` | `""` | 访客访问口令（数据面，留空表示公开免密直连；配置后访客需输入口令或持有 HMAC 签名链接） |
 | `-proxy` | `PROXY_URL` | `""` | 可选的前置代理（支持 HTTP/HTTPS/SOCKS5，用于连接受限信令） |
 | `-sni` | `SNI` | `""` | 可选的 TLS SNI 与 Host 标头覆盖（用于绕过 DNS 污染直连 Cloudflare Anycast IP） |
 | `-insecure` | `INSECURE` | `false` | 连接自签名 TLS 信令服务器时跳过证书链校验 |
 | `-turn-url` | `TURN_URL` | `""` | 可选的 TURN 中继服务器地址（如 `turn:relay.domain.com:3478`，用于对称型 NAT 降级中继） |
 | `-turn-user` | `TURN_USER` | `""` | 可选的 TURN 中继认证用户名 |
 | `-turn-pass` | `TURN_PASS` | `""` | 可选的 TURN 中继认证密码 |
-| `-stun-servers` | `STUN_SERVERS` | `""` | 可选的自定义 STUN 服务器列表（英文逗号分隔） |
+| `-stun-servers` | `STUN_SERVERS` | `""` | 可选的自定义 STUN 服务器列表（支持逗号分隔字符串或配置文件列表） |
 | `-max-streams` | `MAX_STREAMS` | `512` | 最大并发逻辑流上限，超出时平滑回复 503 保护宿主机内存 |
 | `-metrics-addr` | `METRICS_ADDR` | `""` | 可选的 Prometheus 监控导出地址（如 `:9090`，默认不开放任何端口，保持纯出站安全） |
-| `-sign-link` | - | `0` | 生成指定有效期的无状态安全分享链接（如 `1h`、`24h`、`7d`）并退出 |
+| `-sign-link` | - | `0` | 基于 `-access-secret` 生成指定有效期的无状态安全分享链接（如 `1h`、`24h`、`7d`）并退出 |
 | `-portal-url` | - | `https://your-portal-domain.com` | 为 `-sign-link` 指定 Web 门户的基准访问地址 |
+
+> [!NOTE]
+> **关于 `-secret` / `SECRET` 的升级说明 (v1.5.0+)**：
+> 旧版模糊命名的 `-secret` 与 `SECRET` 现已彻底解耦并废弃。若在 Agent 启动时传入，程序将直接退出并提示改用 `-signal-secret`（集群注册）或 `-access-secret`（访客口令）。
 
 ### 6. 一体化服务端 (Signal Server) 命令行参数全量说明
 
 | 命令行参数 (CLI) | 环境变量 (ENV) | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `-addr` | `ADDR` / `PORT` | `:8888` | 服务端 HTTP/HTTPS 与 WebSocket 监听端口及地址 |
+| `-config` | `CONFIG_FILE` / `CONFIG` | `""` | 可选的 YAML / JSON 配置文件路径（默认自动探测 `./server.yaml`、`./server.yml`、`./server.json`） |
+| `-signal-secret` | `SIGNAL_SECRET` / `SECRET` | `""` | 可选的服务端全局集群准入密钥，仅允许匹配口令的 Agent 注册（兼容别名 `-secret`） |
 | `-tls-cert` | `TLS_CERT` | `""` | 加载的 TLS 证书 PEM 文件路径（如 fullchain.pem，开启原生 HTTPS） |
 | `-tls-key` | `TLS_KEY` | `""` | 加载的 TLS 私钥 PEM 文件路径（如 privkey.pem，开启原生 HTTPS） |
 | `-tls-auto` | `TLS_AUTO` | `false` | 一键内存自动签发包含当前局域网所有真实 IP 的 ECDSA SAN 证书 |
-| `-secret` | `SECRET` | `""` | 可选的服务端全局预共享密钥，仅允许匹配口令的 Agent 注册 |
 | `-static` | `STATIC_DIR` | `./web/dist` | 静态网页资产目录（默认优先使用二进制内置嵌入的 DistFS） |
 | `-max-ip-conns` | `MAX_IP_CONNS` | `64` | 单个 IP 允许的最大并发 WebSocket 握手连接数（防 DoS 耗尽套接字） |
 | `-trusted-proxies` | `TRUSTED_PROXIES` | `""` (默认私网) | 受信代理 CIDR 列表（默认信任回环及 RFC1918 私网；填 `none` 禁用代理头信任） |
@@ -198,21 +205,19 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 ### 7. 安全性与访问控制
 
 - **端到端完全加密**：所有流经 WebRTC DataChannel 的流量均经过 DTLS 1.2 / 1.3 协商与 AES-GCM 强加密。即便公网信令服务端被恶意监听，攻击者也绝对无法解密传输中的任何数据。
-- **双重口令防御体系 (Secret Token)**：
-  1. **访客访问口令门禁 (Visitor Access Control)**：
-     - Agent 启动时添加 `-secret your_strong_token`（或环境变量 `SECRET`）；
-     - 访客在浏览器打开时，可通过 URL 直接传递：`https://p2p.yourdomain.com/#myhome?secret=your_strong_token`；
-     - 若未提供口令，Web 门户将自动感知并弹出**高保真暗黑密码输入弹窗**（支持“记住口令”与随时修改）；
-     - Agent 收到 WebRTC 握手 Offer 时进行毫秒级口令比对，不匹配直接拒绝并阻断握手，绝不泄露内网服务。
-  2. **信令端节点防冒领 (Node Hijack Protection)**：
-     - Agent 首次在信令服务上注册 `node_id` 时自动绑定密钥；
-     - 任何其他非法 Agent 尝试抢注或顶替该 `node_id` 时，若未提供匹配的口令将被信令服务器直接拒之门外；
-     - 支持服务端配置 `-secret` 全局集群准入密钥。
+- **控制面与数据面双重密钥解耦体系 (Dual-Secret Decoupling, v1.5.0+)**：
+  1. **信令集群准入密钥 (Control Plane: `-signal-secret` / `SIGNAL_SECRET`)**：
+     - 信令端与各 Agent 共享，仅用于 Agent 注册时的集群准入与节点防冒领 (`Node Hijack Protection`)；
+     - 任何其他非法 Agent 尝试抢注已注册的 `node_id` 或接入集群时，若未提供匹配的密钥将被信令服务器直接拒绝；
+     - **绝不暴露给访客浏览器**，访客亦无需知晓此密钥。
+  2. **访客访问口令门禁 (Data Plane: `-access-secret` / `ACCESS_SECRET`)**：
+     - **公开免密模式（默认）**：若留空，该节点即为公开站点，访客浏览器直接打洞进入，不弹出密码框，即使信令端启用了集群密钥也不影响访客；
+     - **独立口令模式**：若配置，访客在浏览器打开时 Web 门户将自动感知并弹出**高保真暗黑密码输入弹窗**（或通过 URL 参数 `#nodeId?secret=xxx` 传递）；Agent 收到 WebRTC 握手 Offer 时进行毫秒级口令比对，不匹配直接阻断握手，绝不泄露内网服务。
 - **无状态时效分享链接 (Stateless HMAC-SHA256 Sharing)**：
   - 无需数据库、无需 Redis、无需服务器记录撤销表；
-  - 纯数学签名验证：`sign = HMAC-SHA256(nodeId + ":" + exp, master_secret)`；
+  - 纯数学签名验证：`sign = HMAC-SHA256(nodeId + ":" + exp, access_secret)`；
   - 访客在浏览器打开 `#nodeId?exp=xxx&sign=yyy` 时，Agent 本地以毫秒级验证时效与签名，到期后数学上天然失效；
-  - Web 控制台支持一键选择 1 小时、6 小时、24 小时、7 天、30 天生成专属分享链接并一键复制；CLI 亦支持 `./agent -secret xxx -sign-link 24h` 极速生成。
+  - Web 控制台支持一键选择 1 小时、6 小时、24 小时、7 天、30 天生成专属分享链接并一键复制；CLI 亦支持 `./agent -access-secret xxx -sign-link 24h` 极速生成。
 - **连接韧性与移动漫游自愈 (WebRTC ICE Restart)**：
   - 当手机或笔记本在 Wi-Fi 和蜂窝移动网络之间漫游切换时，系统启动两阶段自愈流水线；
   - 自动快速重建断开的信令套接字，并在原 PeerConnection 上发起带有 `iceRestart: true` 的重协商；
@@ -461,7 +466,7 @@ services:
 docker compose run --rm agent -sign-link 24h -portal-url https://p2p.yourdomain.com
 
 # 方式 B：通过独立 docker run 容器生成
-docker run --rm -e SECRET=your_master_secret \
+docker run --rm -e ACCESS_SECRET=your_visitor_password \
   ghcr.io/beingnoability/webrtc-p2p-agent:latest \
   -node-id homeserver -sign-link 24h -portal-url https://p2p.yourdomain.com
 ```
@@ -474,12 +479,14 @@ docker run --rm -e SECRET=your_master_secret \
 | 环境变量 | 默认值 | 对应命令行参数 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `ADDR` / `PORT` | `:8888` | `-addr` | HTTP/WS 或 HTTPS/WSS 监听地址（例如 `:8888`、`:443`） |
+| `CONFIG_FILE` / `CONFIG` | 空 | `-config` | YAML / JSON 配置文件路径 |
+| `SIGNAL_SECRET` / `SECRET` | 空 | `-signal-secret` | 可选的服务端全局准入预共享密钥，仅允许匹配口令的 Agent 注册 |
 | `TLS_AUTO` | `false` | `-tls-auto` | 是否在内存中自动签发覆盖本机所有局域网真实 IP 的 ECDSA SAN 证书 |
-| `SECRET` | 空 | `-secret` | 可选的服务端全局准入预共享密钥，仅允许匹配口令的 Agent 注册 |
 | `TLS_CERT` | 空 | `-tls-cert` | 容器内的 SSL/TLS 证书文件 PEM 路径（需挂载外部证书） |
 | `TLS_KEY` | 空 | `-tls-key` | 容器内的 SSL/TLS 私钥文件 PEM 路径 |
 | `STATIC_DIR` | 空 (内置) | `-static` | 自定义前端静态资源文件目录路径（若挂载外部 `dist`） |
 | `MAX_IP_CONNS` | `64` | `-max-ip-conns` | 单 IP 最大并发连接数限制（防 DoS 耗尽套接字） |
+| `TRUSTED_PROXIES` | 空 (默认私网) | `-trusted-proxies` | 受信反向代理 CIDR 列表（填 `none` 可禁用代理头信任） |
 | `METRICS_ADDR` | 空 | `-metrics-addr` | 可选的专用 Prometheus 监控导出地址（默认直接通过主端口 `/metrics` 导出） |
 
 ##### Agent 客户端环境变量 (`webrtc-p2p-agent`)
@@ -488,8 +495,10 @@ docker run --rm -e SECRET=your_master_secret \
 | `NODE_ID` | `homeserver` | `-node-id` | 当前节点的唯一标识符（外部通过 `#nodeId` 访问） |
 | `SIGNAL_URL` | `ws://127.0.0.1:8888/ws` | `-signal` | 信令服务器 WebSocket 端点（支持 `ws://` 与 `wss://`） |
 | `TARGET_URL` | `http://127.0.0.1:8080` | `-target` | 需要穿透暴露的目标 Web 服务地址 |
+| `CONFIG_FILE` / `CONFIG` | 空 | `-config` | YAML / JSON 配置文件路径 |
+| `SIGNAL_SECRET` | 空 | `-signal-secret` | 信令集群准入密钥（控制面，必须与信令端匹配，防节点冒领） |
+| `ACCESS_SECRET` | 空 | `-access-secret` | 访客访问口令（数据面，留空免密直连，配置后访客需输入密码） |
 | `INSECURE` | `false` | `-insecure` | 是否跳过自签 TLS 信令服务器的证书安全验证 |
-| `SECRET` | 空 | `-secret` | 可选的安全预共享鉴权密钥 |
 | `PROXY_URL` | 空 | `-proxy` | 可选的出站代理（支持 `socks5://`、`http://`） |
 | `SNI` | 空 | `-sni` | 可选的 TLS SNI 与 Host 标头覆盖（用于绕过 DNS 污染直连 Anycast IP） |
 | `TURN_URL` | 空 | `-turn-url` | 可选的 TURN 中继地址（突破对称型 NAT 限制） |

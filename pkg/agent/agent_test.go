@@ -19,8 +19,8 @@ var upgrader = websocket.Upgrader{
 }
 
 func TestAgent_ConfigAndLifecycle(t *testing.T) {
-	ag := New("test-agent-node", "ws://127.0.0.1:8888/ws", "pass123", "http://127.0.0.1:8080")
-	if ag.NodeID != "test-agent-node" || ag.Secret != "pass123" || ag.Target != "http://127.0.0.1:8080" {
+	ag := New("test-agent-node", "ws://127.0.0.1:8888/ws", "sig-pass", "access-pass", "http://127.0.0.1:8080")
+	if ag.NodeID != "test-agent-node" || ag.SignalSecret != "sig-pass" || ag.AccessSecret != "access-pass" || ag.Target != "http://127.0.0.1:8080" {
 		t.Fatalf("Agent initialization fields mismatch")
 	}
 
@@ -70,7 +70,7 @@ func TestAgent_RegistrationAndReconnection(t *testing.T) {
 	u, _ := url.Parse(server.URL)
 	wsURL := "ws://" + u.Host + "/ws"
 
-	ag := New("agent-mock-node", wsURL, "secret-tok", "http://127.0.0.1:8080")
+	ag := New("agent-mock-node", wsURL, "secret-tok", "", "http://127.0.0.1:8080")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -134,7 +134,7 @@ func TestAgent_RejectUnauthorizedOffer(t *testing.T) {
 	u, _ := url.Parse(server.URL)
 	wsURL := "ws://" + u.Host + "/ws"
 
-	ag := New("protected-node", wsURL, "SUPER_SECRET_KEY", "http://127.0.0.1:8080")
+	ag := New("protected-node", wsURL, "", "SUPER_SECRET_KEY", "http://127.0.0.1:8080")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -159,7 +159,7 @@ func TestAgent_RejectUnauthorizedOffer(t *testing.T) {
 func TestAgent_HMACShareSignature(t *testing.T) {
 	nodeID := "test-home"
 	secret := "my-secret-key-123"
-	ag := New(nodeID, "ws://127.0.0.1:8888/ws", secret, "http://127.0.0.1:8080")
+	ag := New(nodeID, "ws://127.0.0.1:8888/ws", "", secret, "http://127.0.0.1:8080")
 	defer ag.Close()
 
 	// 1. Direct secret token verification
@@ -204,7 +204,7 @@ func TestAgent_HMACShareSignature(t *testing.T) {
 }
 
 func TestAgent_TeardownGraceWindow(t *testing.T) {
-	ag := New("test-grace", "ws://127.0.0.1:8888/ws", "", "http://127.0.0.1:8080")
+	ag := New("test-grace", "ws://127.0.0.1:8888/ws", "", "", "http://127.0.0.1:8080")
 	defer ag.Close()
 
 	sessionID := "test-session-123"
@@ -232,7 +232,7 @@ func TestAgent_TeardownGraceWindow(t *testing.T) {
 }
 
 func TestAgent_ConcurrentStreamsCapacity(t *testing.T) {
-	ag := New("test-capacity-node", "ws://127.0.0.1:8888/ws", "", "http://127.0.0.1:8080")
+	ag := New("test-capacity-node", "ws://127.0.0.1:8888/ws", "", "", "http://127.0.0.1:8080")
 	defer ag.Close()
 
 	ag.SetMaxConcurrentStreams(2)

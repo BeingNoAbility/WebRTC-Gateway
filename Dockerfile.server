@@ -53,13 +53,15 @@ COPY --from=server-builder /build/server /app/server
 
 # Default environment variables
 ENV ADDR=:8888 \
+    SIGNAL_SECRET="" \
     TLS_AUTO=false \
     TLS_CERT="" \
     TLS_KEY="" \
     STATIC_DIR="" \
     MAX_IP_CONNS=64 \
     TRUSTED_PROXIES="" \
-    METRICS_ADDR=""
+    METRICS_ADDR="" \
+    CONFIG_FILE=""
 
 EXPOSE 8888 443
 

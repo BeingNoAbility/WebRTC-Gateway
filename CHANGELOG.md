@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.5.0] - 2026-11-16
+
+### Added
+- **Unified YAML / JSON Configuration File Support (`-config`)**:
+  - Both `agent` and `server` binaries support structured configuration files via `gopkg.in/yaml.v3`. Supports YAML with comments and standard JSON syntax.
+  - **Four-Tier Precedence Hierarchy**: `Defaults < Configuration File < Environment Variables < CLI Flags`.
+  - **Zero-Config Auto-Detection**: Automatically searches for `./agent.yaml`, `./agent.yml`, `./agent.json` (or `server.yaml`, `server.yml`, `server.json`) in current and binary directories; continues silently if none are present.
+  - **Fail-Fast Explicit Mode**: If `-config` or `CONFIG_FILE` is explicitly provided but the file is missing or contains syntax errors, startup terminates immediately with informative error messages.
+  - **Flexible Type Ingestion**: Enhanced fields such as `stun_servers` to accept both YAML lists (`["stun:..."]`) and comma-separated strings (`"stun:...,stun:..."`).
+  - Added template examples: `configs/agent.example.yaml` and `configs/server.example.yaml`.
+
+### Changed & Security
+- **Secret Architecture Decoupling (Control Plane vs Data Plane)**:
+  - **Signaling Cluster Secret (`-signal-secret` / `SIGNAL_SECRET`)**: Dedicated to Agent-to-Server registration and node anti-hijacking. Never exposed to visitor browsers or frontend WebSockets. (Server accepts `-secret` / `SECRET` as an alias for backward compatibility).
+  - **Visitor Access Password (`-access-secret` / `ACCESS_SECRET`)**: Dedicated to visitor browser client authorization.
+  - **True Public Node Mode**: When `-access-secret` is omitted, the node operates in public access mode. Visitor browsers connect directly via WebRTC DataChannel without entering any password, even if the signaling server enforces a cluster master secret.
+  - **Fail-Fast Deprecation on Agent**: The ambiguous legacy `-secret` flag and `SECRET` environment variable are completely deprecated on the Agent daemon, terminating startup with explicit upgrade instructions to eliminate security misconfiguration risks.
+  - **Temporary Link Signing Alignment**: Agent `-sign-link` generates HMAC-SHA256 signatures derived from `-access-secret`, and alerts immediately if invoked on a public node without an access secret configured.
+  - **Edge Worker Signaling Room Alignment**: Updated Cloudflare Worker signaling room implementation to support `require_visitor_auth` decoupling.
+
+---
+
 ## [v1.4.1] - 2026-11-16
 
 ### Security

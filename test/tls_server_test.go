@@ -65,7 +65,7 @@ func TestTLSSignalingAndAgentConnect(t *testing.T) {
 	}
 
 	// 2. Verify agent with InsecureTLS=true connects over WSS successfully
-	ag := agent.New("tls-test-node", wssURL, "", "http://127.0.0.1:8080")
+	ag := agent.New("tls-test-node", wssURL, "", "", "http://127.0.0.1:8080")
 	ag.SetInsecureTLS(true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

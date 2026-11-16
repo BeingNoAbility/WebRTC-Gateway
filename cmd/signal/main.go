@@ -58,27 +58,29 @@ func (s *Session) Send(msg *signaling.Message) error {
 }
 
 type SignalBroker struct {
-	mu           sync.RWMutex
-	serverSecret string              // Global server secret (if set via -secret / SECRET)
-	agents       map[string]*Session // node_id -> Session
-	nodeSecrets  map[string]string   // node_id -> registered secret (anti-hijack)
-	clients      map[string]*Session // session_id -> Session
+	mu              sync.RWMutex
+	serverSecret    string              // Global server secret (if set via -signal-secret / -secret / SIGNAL_SECRET)
+	agents          map[string]*Session // node_id -> Session
+	nodeSecrets     map[string]string   // node_id -> registered secret (anti-hijack)
+	nodeVisitorAuth map[string]bool     // node_id -> whether visitors require authentication
+	clients         map[string]*Session // session_id -> Session
 }
 
 func NewSignalBroker(serverSecret string) *SignalBroker {
 	return &SignalBroker{
-		serverSecret: serverSecret,
-		agents:       make(map[string]*Session),
-		nodeSecrets:  make(map[string]string),
-		clients:      make(map[string]*Session),
+		serverSecret:    serverSecret,
+		agents:          make(map[string]*Session),
+		nodeSecrets:     make(map[string]string),
+		nodeVisitorAuth: make(map[string]bool),
+		clients:         make(map[string]*Session),
 	}
 }
 
-func (b *SignalBroker) RegisterAgent(nodeID, secret string, s *Session) error {
+func (b *SignalBroker) RegisterAgent(nodeID, secret string, requireVisitorAuth *bool, s *Session) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// 1. Verify global server secret if server was started with -secret
+	// 1. Verify global server secret if server was started with -signal-secret / -secret
 	if b.serverSecret != "" && subtle.ConstantTimeCompare([]byte(secret), []byte(b.serverSecret)) != 1 {
 		return fmt.Errorf("unauthorized: server secret mismatch")
 	}
@@ -100,8 +102,20 @@ func (b *SignalBroker) RegisterAgent(nodeID, secret string, s *Session) error {
 	if secret != "" {
 		b.nodeSecrets[nodeID] = secret
 	}
-	log.Printf("[Broker] Agent registered: node_id=%s (auth: %v)", nodeID, secret != "")
+	if requireVisitorAuth != nil {
+		b.nodeVisitorAuth[nodeID] = *requireVisitorAuth
+	} else {
+		// Fallback for legacy agents: if secret is provided, assume visitor auth is required
+		b.nodeVisitorAuth[nodeID] = (secret != "")
+	}
+	log.Printf("[Broker] Agent registered: node_id=%s (cluster auth: %v, visitor auth: %v)", nodeID, secret != "", b.nodeVisitorAuth[nodeID])
 	return nil
+}
+
+func (b *SignalBroker) RequiresVisitorAuth(nodeID string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.nodeVisitorAuth[nodeID]
 }
 
 func (b *SignalBroker) HasSecret(nodeID string) bool {
@@ -117,6 +131,7 @@ func (b *SignalBroker) RemoveAgent(nodeID string, s *Session) {
 
 	if curr, exists := b.agents[nodeID]; exists && curr == s {
 		delete(b.agents, nodeID)
+		delete(b.nodeVisitorAuth, nodeID)
 		log.Printf("[Broker] Agent disconnected: node_id=%s", nodeID)
 	}
 }
@@ -151,7 +166,7 @@ func (b *SignalBroker) NotifyWaitingClients(nodeID string) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	hasSecret := b.nodeSecrets[nodeID] != ""
+	reqAuth := b.nodeVisitorAuth[nodeID]
 	for _, client := range b.clients {
 		if client.NodeID == nodeID {
 			_ = client.Send(&signaling.Message{
@@ -159,7 +174,7 @@ func (b *SignalBroker) NotifyWaitingClients(nodeID string) {
 				NodeID:         nodeID,
 				SessionID:      client.ID,
 				Status:         "online",
-				RequiresSecret: hasSecret,
+				RequiresSecret: reqAuth,
 			})
 		}
 	}
@@ -498,38 +513,114 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 }
 
 func main() {
-	defaultAddr := ":8888"
-	if env := os.Getenv("ADDR"); env != "" {
-		defaultAddr = env
-	} else if env := os.Getenv("PORT"); env != "" {
-		defaultAddr = ":" + env
-	}
-	defaultStatic := os.Getenv("STATIC_DIR")
-	if defaultStatic == "" {
-		defaultStatic = "./web/dist"
-	}
-	defaultTLSCert := os.Getenv("TLS_CERT")
-	defaultTLSKey := os.Getenv("TLS_KEY")
-	defaultTLSAuto := os.Getenv("TLS_AUTO") == "true" || os.Getenv("TLS_AUTO") == "1"
-	defaultSecret := os.Getenv("SECRET")
-	defaultTrustedProxies := os.Getenv("TRUSTED_PROXIES")
-	defaultMaxIPConns := 64
-	if env := os.Getenv("MAX_IP_CONNS"); env != "" {
-		if v, err := strconv.Atoi(env); err == nil && v > 0 {
-			defaultMaxIPConns = v
+	// 1. Defaults (Tier 1: Defaults)
+	cfgAddr := ":8888"
+	cfgStatic := "./web/dist"
+	cfgTLSCert := ""
+	cfgTLSKey := ""
+	cfgTLSAuto := false
+	cfgSignalSecret := ""
+	cfgMaxIPConns := 64
+	cfgTrustedProxies := ""
+	cfgMetricsAddr := ""
+
+	// 2. Load Config File (Tier 2: Config File)
+	configPath, explicitConfig := FindServerConfigFile(os.Args[1:], []string{"server.yaml", "server.yml", "server.json"})
+	if configPath != "" {
+		fileCfg, err := LoadServerConfigFile(configPath)
+		if err != nil {
+			if explicitConfig {
+				log.Fatalf("[Error] Failed to load configuration file %q: %v", configPath, err)
+			} else {
+				log.Fatalf("[Error] Failed to parse auto-detected configuration file %q: %v", configPath, err)
+			}
+		}
+		log.Printf("[Config] Loaded configuration from %s", configPath)
+		if fileCfg.Addr != "" {
+			cfgAddr = fileCfg.Addr
+		}
+		if fileCfg.SignalSecret != "" {
+			cfgSignalSecret = fileCfg.SignalSecret
+		} else if fileCfg.Secret != "" {
+			cfgSignalSecret = fileCfg.Secret
+		}
+		if fileCfg.StaticDir != "" {
+			cfgStatic = fileCfg.StaticDir
+		}
+		if fileCfg.TLSCert != "" {
+			cfgTLSCert = fileCfg.TLSCert
+		}
+		if fileCfg.TLSKey != "" {
+			cfgTLSKey = fileCfg.TLSKey
+		}
+		if fileCfg.TLSAuto != nil {
+			cfgTLSAuto = *fileCfg.TLSAuto
+		}
+		if fileCfg.MaxIPConns > 0 {
+			cfgMaxIPConns = fileCfg.MaxIPConns
+		}
+		if fileCfg.TrustedProxies != "" {
+			cfgTrustedProxies = fileCfg.TrustedProxies
+		}
+		if fileCfg.MetricsAddr != "" {
+			cfgMetricsAddr = fileCfg.MetricsAddr
 		}
 	}
 
-	addr := flag.String("addr", defaultAddr, "Signaling HTTP/WS listening address (env: ADDR or PORT)")
-	staticDir := flag.String("static", defaultStatic, "Path to web portal static assets (env: STATIC_DIR)")
-	tlsCert := flag.String("tls-cert", defaultTLSCert, "Path to TLS certificate PEM file (e.g. cert.pem or fullchain.pem, env: TLS_CERT)")
-	tlsKey := flag.String("tls-key", defaultTLSKey, "Path to TLS private key PEM file (e.g. key.pem or privkey.pem, env: TLS_KEY)")
-	tlsAuto := flag.Bool("tls-auto", defaultTLSAuto, "Automatically generate in-memory self-signed TLS cert for HTTPS (env: TLS_AUTO)")
-	serverSecret := flag.String("secret", defaultSecret, "Optional server-wide pre-shared secret for agent registration (env: SECRET)")
-	maxIPConns := flag.Int("max-ip-conns", defaultMaxIPConns, "Maximum concurrent WebSocket connections per client IP (env: MAX_IP_CONNS)")
-	trustedProxies := flag.String("trusted-proxies", defaultTrustedProxies, "Comma-separated trusted proxy CIDRs/IPs (default: loopback & RFC1918 private CIDRs; 'none' to disable, env: TRUSTED_PROXIES)")
-	metricsAddr := flag.String("metrics-addr", os.Getenv("METRICS_ADDR"), "Optional dedicated address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default /metrics)")
+	// 3. Override with Environment Variables (Tier 3: ENV)
+	if env := os.Getenv("ADDR"); env != "" {
+		cfgAddr = env
+	} else if env := os.Getenv("PORT"); env != "" {
+		cfgAddr = ":" + env
+	}
+	if env := os.Getenv("STATIC_DIR"); env != "" {
+		cfgStatic = env
+	}
+	if env := os.Getenv("TLS_CERT"); env != "" {
+		cfgTLSCert = env
+	}
+	if env := os.Getenv("TLS_KEY"); env != "" {
+		cfgTLSKey = env
+	}
+	if env := os.Getenv("TLS_AUTO"); env == "true" || env == "1" {
+		cfgTLSAuto = true
+	}
+	if env := os.Getenv("SIGNAL_SECRET"); env != "" {
+		cfgSignalSecret = env
+	} else if env := os.Getenv("SECRET"); env != "" {
+		cfgSignalSecret = env
+	}
+	if env := os.Getenv("MAX_IP_CONNS"); env != "" {
+		if v, err := strconv.Atoi(env); err == nil && v > 0 {
+			cfgMaxIPConns = v
+		}
+	}
+	if env := os.Getenv("TRUSTED_PROXIES"); env != "" {
+		cfgTrustedProxies = env
+	}
+	if env := os.Getenv("METRICS_ADDR"); env != "" {
+		cfgMetricsAddr = env
+	}
+
+	// 4. CLI Flags (Tier 4: CLI Flags - Highest Priority)
+	addr := flag.String("addr", cfgAddr, "Signaling HTTP/WS listening address (env: ADDR or PORT)")
+	staticDir := flag.String("static", cfgStatic, "Path to web portal static assets (env: STATIC_DIR)")
+	tlsCert := flag.String("tls-cert", cfgTLSCert, "Path to TLS certificate PEM file (e.g. cert.pem or fullchain.pem, env: TLS_CERT)")
+	tlsKey := flag.String("tls-key", cfgTLSKey, "Path to TLS private key PEM file (e.g. key.pem or privkey.pem, env: TLS_KEY)")
+	tlsAuto := flag.Bool("tls-auto", cfgTLSAuto, "Automatically generate in-memory self-signed TLS cert for HTTPS (env: TLS_AUTO)")
+	signalSecret := flag.String("signal-secret", cfgSignalSecret, "Server-wide pre-shared secret for agent registration (env: SIGNAL_SECRET)")
+	serverSecretAlias := flag.String("secret", "", "Alias for -signal-secret (env: SECRET)")
+	configFlag := flag.String("config", "", "Path to configuration file (.yaml, .yml, or .json, env: CONFIG_FILE)")
+	maxIPConns := flag.Int("max-ip-conns", cfgMaxIPConns, "Maximum concurrent WebSocket connections per client IP (env: MAX_IP_CONNS)")
+	trustedProxies := flag.String("trusted-proxies", cfgTrustedProxies, "Comma-separated trusted proxy CIDRs/IPs (default: loopback & RFC1918 private CIDRs; 'none' to disable, env: TRUSTED_PROXIES)")
+	metricsAddr := flag.String("metrics-addr", cfgMetricsAddr, "Optional dedicated address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default /metrics)")
+	_ = configFlag
 	flag.Parse()
+
+	finalSecret := *signalSecret
+	if *serverSecretAlias != "" {
+		finalSecret = *serverSecretAlias
+	}
 
 	trustedPrefixes, err := ParseTrustedProxies(*trustedProxies)
 	if err != nil {
@@ -539,7 +630,7 @@ func main() {
 		log.Printf("[Server] Custom trusted proxies configured (%d prefixes): %s", len(trustedPrefixes), *trustedProxies)
 	}
 
-	broker := NewSignalBroker(*serverSecret)
+	broker := NewSignalBroker(finalSecret)
 	limiter := NewIPRateLimiter(*maxIPConns, trustedPrefixes)
 
 	mux := http.NewServeMux()
@@ -625,7 +716,7 @@ func main() {
 					_ = session.Send(&signaling.Message{Type: signaling.TypeError, Error: "node_id is required"})
 					return
 				}
-				if err := broker.RegisterAgent(msg.NodeID, msg.Secret, session); err != nil {
+				if err := broker.RegisterAgent(msg.NodeID, msg.Secret, msg.RequireVisitorAuth, session); err != nil {
 					log.Printf("[Broker] Registration rejected for node_id=%s from IP %s: %v", msg.NodeID, clientIP, err)
 					if limiter.RecordFailedAuth(clientIP) {
 						_ = session.Send(&signaling.Message{Type: signaling.TypeError, Error: "too many failed authentication attempts, IP throttled"})
@@ -648,13 +739,13 @@ func main() {
 				broker.RegisterClient(session)
 
 				agent := broker.GetAgent(msg.NodeID)
-				hasSecret := broker.HasSecret(msg.NodeID)
+				requiresSecret := broker.RequiresVisitorAuth(msg.NodeID)
 				if agent == nil {
 					_ = session.Send(&signaling.Message{
 						Type:           signaling.TypePeerStatus,
 						NodeID:         msg.NodeID,
 						Status:         "offline",
-						RequiresSecret: hasSecret,
+						RequiresSecret: requiresSecret,
 						Error:          "agent is currently offline",
 					})
 				} else {
@@ -663,7 +754,7 @@ func main() {
 						NodeID:         msg.NodeID,
 						SessionID:      session.ID,
 						Status:         "online",
-						RequiresSecret: hasSecret,
+						RequiresSecret: requiresSecret,
 					})
 				}
 

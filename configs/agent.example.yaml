@@ -1,0 +1,54 @@
+# ==============================================================================
+# WebRTC Gateway Agent Configuration Template (YAML / JSON supported)
+# ==============================================================================
+# Priority Order: Defaults < Configuration File < Environment Variables < CLI Flags
+# Auto-detection files: agent.yaml, agent.yml, agent.json in current or binary dir.
+# ==============================================================================
+
+# Node ID registered on the signaling server (defaults to hostname if empty)
+node_id: "nas-web"
+
+# WebSocket signaling server URL (required)
+signal: "wss://signal.example.com/ws"
+
+# Signaling cluster admission secret (Control Plane)
+# Must match the signaling server's -signal-secret. Shared across nodes in the cluster.
+# Never exposed to end-user / visitor browsers.
+signal_secret: "cluster-secret-key-123"
+
+# Visitor access password (Data Plane)
+# - Leave empty (""): Public access, visitor browsers connect directly without a password prompt.
+# - Non-empty: Visitors must provide this password (or valid HMAC-SHA256 signature link) to enter.
+access_secret: ""
+
+# Target internal backend address (HTTP/HTTPS) to proxy
+target: "http://127.0.0.1:8080"
+
+# Optional forward proxy for outgoing connections (e.g. socks5://127.0.0.1:1080, http://proxy:8080)
+proxy: ""
+
+# Custom SNI server name for HTTPS targets (leave empty to infer from target host)
+sni: ""
+
+# Skip TLS certificate verification for intranet self-signed targets
+insecure: false
+
+# STUN servers for WebRTC ICE candidate discovery (string or list format supported)
+stun_servers:
+  - "stun:stun.l.google.com:19302"
+  - "stun:stun1.l.google.com:19302"
+
+# Optional TURN server relay configuration (recommended for symmetric NAT traversal)
+turn_url: ""
+turn_user: ""
+turn_pass: ""
+
+# Maximum concurrent data channel HTTP streams (default: 64)
+max_streams: 64
+
+# Prometheus metrics scrape endpoint (e.g. ":9091", leave empty to disable)
+metrics_addr: ":9091"
+
+# Signaling web portal URL printed in CLI QR codes and share links
+# (inferred from signal URL if empty, e.g. wss://host/ws -> https://host/)
+portal_url: ""

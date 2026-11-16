@@ -166,18 +166,24 @@ The Agent supports both command-line flags and environment variables:
 | `-node-id` | `NODE_ID` | `homeserver` | Unique node identifier in the signaling network |
 | `-signal` | `SIGNAL_URL` | `ws://127.0.0.1:8888/ws` | Signaling server WebSocket URL (`ws://` or `wss://`) |
 | `-target` | `TARGET_URL` | `http://127.0.0.1:8080` | Local or LAN destination Web service URL |
-| `-secret` | `SECRET` | `""` | Optional pre-shared authentication secret token |
+| `-config` | `CONFIG_FILE` / `CONFIG` | `""` | Optional YAML / JSON configuration file path (auto-detects `./agent.yaml`, `./agent.yml`, `./agent.json`) |
+| `-signal-secret` | `SIGNAL_SECRET` | `""` | Signaling cluster admission secret (Control Plane, shared with server, never exposed to visitors) |
+| `-access-secret` | `ACCESS_SECRET` | `""` | Visitor access password (Data Plane, leave empty for public access without password prompt) |
 | `-proxy` | `PROXY_URL` | `""` | Optional outbound proxy (`http://`, `https://`, `socks5://`) |
 | `-sni` | `SNI` | `""` | Optional TLS SNI & Host header override (for direct Anycast IP dialing) |
 | `-insecure` | `INSECURE` | `false` | Skip TLS certificate verification for self-signed signaling servers |
 | `-turn-url` | `TURN_URL` | `""` | Optional TURN relay server URL (`turn:relay.domain.com:3478`, bypasses symmetric NAT) |
 | `-turn-user` | `TURN_USER` | `""` | Optional TURN relay authentication username |
 | `-turn-pass` | `TURN_PASS` | `""` | Optional TURN relay authentication credential / password |
-| `-stun-servers` | `STUN_SERVERS` | `""` | Optional custom comma-separated STUN server list |
+| `-stun-servers` | `STUN_SERVERS` | `""` | Optional custom STUN server list (comma-separated string or YAML list) |
 | `-max-streams` | `MAX_STREAMS` | `512` | Maximum concurrent multiplexed streams (returns 503 upon limit to protect memory) |
 | `-metrics-addr` | `METRICS_ADDR` | `""` | Optional Prometheus `/metrics` exporter address (e.g. `:9090`, default disabled) |
-| `-sign-link` | - | `0` | Generate a temporary stateless share link with expiration (e.g. `1h`, `24h`, `7d`) and exit |
+| `-sign-link` | - | `0` | Generate a temporary stateless share link with expiration (e.g. `1h`, `24h`, `7d`) using `-access-secret` |
 | `-portal-url` | - | `https://your-portal-domain.com` | Base URL of Web Portal used for `-sign-link` generation |
+
+> [!NOTE]
+> **Deprecation of `-secret` / `SECRET` (v1.5.0+)**:
+> The ambiguous `-secret` and `SECRET` flags are fully deprecated. If passed to the Agent, it fails fast with instructions to use `-signal-secret` (cluster admission) or `-access-secret` (visitor password).
 
 ---
 
@@ -186,10 +192,11 @@ The Agent supports both command-line flags and environment variables:
 | CLI Flag | Environment Variable (ENV) | Default Value | Description |
 | :--- | :--- | :--- | :--- |
 | `-addr` | `ADDR` / `PORT` | `:8888` | Listening port and address for HTTP/HTTPS & WebSocket |
+| `-config` | `CONFIG_FILE` / `CONFIG` | `""` | Optional YAML / JSON configuration file path (auto-detects `./server.yaml`, `./server.yml`, `./server.json`) |
+| `-signal-secret` | `SIGNAL_SECRET` / `SECRET` | `""` | Optional global cluster admission secret token (accepts `-secret` as alias) |
 | `-tls-cert` | `TLS_CERT` | `""` | Path to TLS certificate PEM file |
 | `-tls-key` | `TLS_KEY` | `""` | Path to TLS private key PEM file |
 | `-tls-auto` | `TLS_AUTO` | `false` | Automatically generates in-memory ECDSA SAN certificates for LAN IPs |
-| `-secret` | `SECRET` | `""` | Optional global master secret token to restrict Agent registrations |
 | `-static` | `STATIC_DIR` | `./web/dist` | Custom static web directory (defaults to embedded DistFS) |
 | `-max-ip-conns` | `MAX_IP_CONNS` | `64` | Maximum concurrent WebSocket connections per IP address |
 | `-trusted-proxies` | `TRUSTED_PROXIES` | `""` (private CIDRs) | Comma-separated trusted proxy CIDRs/IPs (set `none` to disable proxy headers) |
@@ -200,21 +207,18 @@ The Agent supports both command-line flags and environment variables:
 ### 7. Security & Access Control
 
 - **End-to-End Native Cryptography**: All data traveling through the WebRTC DataChannel is encrypted via DTLS 1.2/1.3 and AES-GCM. Even if signaling traffic is monitored, payload decryption is cryptographically impossible.
-- **Dual Secret Token Protection**:
-  1. **Visitor Access Control**:
-     - Launch the Agent with `-secret your_token` (or `SECRET` env);
-     - Pass via URL: `https://p2p.yourdomain.com/#myhome?secret=your_token`;
-     - If absent, the portal prompts a dark-mode password modal with local persistence options;
-     - The Agent performs constant-time token comparison upon receiving Offer signals and rejects unauthorized attempts immediately.
-  2. **Signaling Node Anti-Hijacking**:
-     - When an Agent first registers a `node_id`, it binds its secret with the signaling server;
-     - Rogue agents cannot overwrite or hijack an existing online node without providing the matching secret;
-     - The signaling server can also enforce `-secret` cluster-wide master tokens.
+- **Control Plane & Data Plane Dual-Secret Decoupling (v1.5.0+)**:
+  1. **Signaling Cluster Secret (`-signal-secret` / `SIGNAL_SECRET`)**:
+     - Shared between the signaling server and trusted Agents for admission control and node anti-hijacking.
+     - **Never exposed to visitors or client browsers**.
+  2. **Visitor Access Password (`-access-secret` / `ACCESS_SECRET`)**:
+     - **Public Access (Default)**: When omitted/empty, the node is fully public. Visitors connect directly via P2P without password prompts, even if the signaling server has cluster secrets enabled.
+     - **Protected Access**: When configured, the portal prompts a dark-mode password modal (or reads `#nodeId?secret=xxx`), verified by the Agent during WebRTC Offer handshake.
 - **Stateless HMAC-SHA256 Time-Limited Sharing**:
   - Zero database, zero Redis, zero server-side revocation tables required;
-  - Pure mathematical validation: `sign = HMAC-SHA256(nodeId + ":" + exp, master_secret)`;
+  - Pure mathematical validation: `sign = HMAC-SHA256(nodeId + ":" + exp, access_secret)`;
   - When a visitor opens `#nodeId?exp=xxx&sign=yyy`, the Agent validates freshness and HMAC locally in constant time;
-  - Web console provides 1-click generation for 1h, 6h, 24h, 7d, 30d durations; CLI supports `./agent -secret xxx -sign-link 24h`.
+  - Web console provides 1-click generation for 1h, 6h, 24h, 7d, 30d durations; CLI supports `./agent -access-secret xxx -sign-link 24h`.
 - **Connection Resilience & Mobile Roaming Self-Healing (WebRTC ICE Restart)**:
   - When mobile devices switch between Wi-Fi and 5G cellular or roaming APs, a two-stage pipeline triggers automatically;
   - Re-establishes broken signaling sockets and renegotiates in-place on the existing `RTCPeerConnection` with `iceRestart: true`;
@@ -329,7 +333,7 @@ Generate mathematical temporary share links on the fly without installing Go:
 docker compose run --rm agent -sign-link 24h -portal-url https://p2p.yourdomain.com
 
 # Via standalone docker run:
-docker run --rm -e SECRET=your_master_secret \
+docker run --rm -e ACCESS_SECRET=your_visitor_password \
   ghcr.io/beingnoability/webrtc-p2p-agent:latest \
   -node-id homeserver -sign-link 24h -portal-url https://p2p.yourdomain.com
 ```

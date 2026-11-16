@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func TestSignalBroker_AgentRegistrationAndAntiHijack(t *testing.T) {
 	s3Legit := &Session{ID: "agent-sess-3-legit", Role: "agent"}
 
 	// 1. Legitimate Agent registers node "my-nas" with secret "correct-key-1"
-	err := broker.RegisterAgent("my-nas", "correct-key-1", s1)
+	err := broker.RegisterAgent("my-nas", "correct-key-1", nil, s1)
 	if err != nil {
 		t.Fatalf("Failed to register initial agent: %v", err)
 	}
@@ -31,19 +32,19 @@ func TestSignalBroker_AgentRegistrationAndAntiHijack(t *testing.T) {
 	}
 
 	// 2. Rogue Agent tries to hijack "my-nas" with wrong secret
-	err = broker.RegisterAgent("my-nas", "wrong-key", s2Rogue)
+	err = broker.RegisterAgent("my-nas", "wrong-key", nil, s2Rogue)
 	if err == nil || !strings.Contains(err.Error(), "unauthorized") {
 		t.Errorf("Expected unauthorized error on hijack attempt, got: %v", err)
 	}
 
 	// 3. Rogue Agent tries to register "my-nas" with empty secret
-	err = broker.RegisterAgent("my-nas", "", s2Rogue)
+	err = broker.RegisterAgent("my-nas", "", nil, s2Rogue)
 	if err == nil || !strings.Contains(err.Error(), "unauthorized") {
 		t.Errorf("Expected unauthorized error on empty secret hijack attempt, got: %v", err)
 	}
 
 	// 4. Legit Agent re-registers with matching secret -> replacement succeeds
-	err = broker.RegisterAgent("my-nas", "correct-key-1", s3Legit)
+	err = broker.RegisterAgent("my-nas", "correct-key-1", nil, s3Legit)
 	if err != nil {
 		t.Fatalf("Legitimate re-registration should succeed, got: %v", err)
 	}
@@ -63,13 +64,13 @@ func TestSignalBroker_ServerMasterSecret(t *testing.T) {
 	s2 := &Session{ID: "agent-sess-2"}
 
 	// 1. Agent registers with wrong master secret -> rejected
-	err := broker.RegisterAgent("node-1", "bad-secret", s1)
+	err := broker.RegisterAgent("node-1", "bad-secret", nil, s1)
 	if err == nil || !strings.Contains(err.Error(), "server secret mismatch") {
 		t.Errorf("Expected server secret mismatch error, got: %v", err)
 	}
 
 	// 2. Agent registers with correct master secret -> accepted
-	err = broker.RegisterAgent("node-1", masterSecret, s2)
+	err = broker.RegisterAgent("node-1", masterSecret, nil, s2)
 	if err != nil {
 		t.Fatalf("Expected registration to succeed with master secret, got: %v", err)
 	}
@@ -114,7 +115,8 @@ func TestSignalBroker_ClientNotificationAndState(t *testing.T) {
 
 	// Broker notifies waiting clients when agent comes online
 	time.Sleep(50 * time.Millisecond)
-	_ = broker.RegisterAgent("target-device", "pass123", &Session{ID: "agent-1"})
+	requiresAuth := true
+	_ = broker.RegisterAgent("target-device", "pass123", &requiresAuth, &Session{ID: "agent-1"})
 
 	broker.NotifyWaitingClients("target-device")
 
@@ -240,7 +242,7 @@ func TestServerMetrics_Export(t *testing.T) {
 	limiter := NewIPRateLimiter(10)
 
 	s1 := &Session{ID: "sess-node-1"}
-	_ = broker.RegisterAgent("nas-1", "", s1)
+	_ = broker.RegisterAgent("nas-1", "", nil, s1)
 
 	metrics := exportServerMetrics(broker, limiter)
 	if !strings.Contains(metrics, "webrtc_gateway_registered_nodes 1") {
@@ -328,5 +330,64 @@ func TestGetClientIP_TrustedProxiesAndHeaderSpoofing(t *testing.T) {
 	got = noneLimiter.GetClientIP(reqNone)
 	if got != "127.0.0.1" {
 		t.Errorf("Expected 'none' trusted proxies to reject loopback XFF and return socket IP 127.0.0.1, got %q", got)
+	}
+}
+
+func TestSignalBroker_VisitorAuthDecoupled(t *testing.T) {
+	broker := NewSignalBroker("cluster-master-secret")
+
+	// Case 1: Agent registers with cluster secret, but visitor auth is FALSE (public service)
+	pubVisitorAuth := false
+	sPub := &Session{ID: "sess-pub"}
+	err := broker.RegisterAgent("public-blog", "cluster-master-secret", &pubVisitorAuth, sPub)
+	if err != nil {
+		t.Fatalf("Failed to register public agent: %v", err)
+	}
+
+	if broker.RequiresVisitorAuth("public-blog") {
+		t.Errorf("Expected RequiresVisitorAuth to be false for public node")
+	}
+
+	// Case 2: Agent registers with cluster secret, and visitor auth is TRUE (private service)
+	privVisitorAuth := true
+	sPriv := &Session{ID: "sess-priv"}
+	err = broker.RegisterAgent("private-nas", "cluster-master-secret", &privVisitorAuth, sPriv)
+	if err != nil {
+		t.Fatalf("Failed to register private agent: %v", err)
+	}
+
+	if !broker.RequiresVisitorAuth("private-nas") {
+		t.Errorf("Expected RequiresVisitorAuth to be true for private node")
+	}
+}
+
+func TestServerConfig_FileParsing(t *testing.T) {
+	yamlContent := `
+addr: ":9999"
+signal_secret: "yaml-cluster-secret"
+max_ip_conns: 128
+trusted_proxies: "10.0.0.0/8"
+`
+	tmpYAML, err := os.CreateTemp("", "server-test-*.yaml")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpYAML.Name())
+	_, _ = tmpYAML.WriteString(yamlContent)
+	_ = tmpYAML.Close()
+
+	cfg, err := LoadServerConfigFile(tmpYAML.Name())
+	if err != nil {
+		t.Fatalf("Failed to load server config YAML: %v", err)
+	}
+
+	if cfg.Addr != ":9999" {
+		t.Errorf("Expected addr :9999, got %q", cfg.Addr)
+	}
+	if cfg.SignalSecret != "yaml-cluster-secret" {
+		t.Errorf("Expected signal_secret yaml-cluster-secret, got %q", cfg.SignalSecret)
+	}
+	if cfg.MaxIPConns != 128 {
+		t.Errorf("Expected max_ip_conns 128, got %d", cfg.MaxIPConns)
 	}
 }

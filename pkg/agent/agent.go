@@ -28,11 +28,12 @@ import (
 )
 
 type Agent struct {
-	NodeID      string
-	SignalURL   string
-	Secret      string
-	Target      string
-	ProxyURL    string
+	NodeID       string
+	SignalURL    string
+	SignalSecret string
+	AccessSecret string
+	Target       string
+	ProxyURL     string
 	SNI         string
 	InsecureTLS bool
 
@@ -69,7 +70,7 @@ func (c *countedTransport) Send(b []byte) error {
 	return c.DataChannel.Send(b)
 }
 
-func New(nodeID, signalURL, secret, target string) *Agent {
+func New(nodeID, signalURL, signalSecret, accessSecret, target string) *Agent {
 	cm := proxy.NewSessionCookieManager()
 	hp, err := proxy.NewHTTPProxy(target, cm)
 	if err != nil {
@@ -84,7 +85,8 @@ func New(nodeID, signalURL, secret, target string) *Agent {
 	return &Agent{
 		NodeID:        nodeID,
 		SignalURL:     signalURL,
-		Secret:        secret,
+		SignalSecret:  signalSecret,
+		AccessSecret:  accessSecret,
 		Target:        target,
 		cookieManager: cm,
 		httpProxy:     hp,
@@ -262,14 +264,14 @@ func GenerateShareLink(baseURL, nodeID, secret string, duration time.Duration) s
 }
 
 // VerifyAuth validates whether a client connection request is authorized.
-// It supports both direct master secret tokens and time-limited HMAC-SHA256 signatures.
-func (a *Agent) VerifyAuth(nodeID, masterSecret, reqSecret string, exp int64, sign string) bool {
-	if masterSecret == "" {
-		return true // No authentication configured on agent
+// It supports both direct access secret tokens and time-limited HMAC-SHA256 signatures.
+func (a *Agent) VerifyAuth(nodeID, accessSecret, reqSecret string, exp int64, sign string) bool {
+	if accessSecret == "" {
+		return true // No authentication configured on agent (public access)
 	}
 
-	// 1. Direct master secret token verification
-	if reqSecret != "" && subtle.ConstantTimeCompare([]byte(reqSecret), []byte(masterSecret)) == 1 {
+	// 1. Direct access secret token verification
+	if reqSecret != "" && subtle.ConstantTimeCompare([]byte(reqSecret), []byte(accessSecret)) == 1 {
 		return true
 	}
 
@@ -281,7 +283,7 @@ func (a *Agent) VerifyAuth(nodeID, masterSecret, reqSecret string, exp int64, si
 			log.Printf("[Agent] Share signature expired: exp=%d, now=%d", exp, now)
 			return false
 		}
-		expectedSign := GenerateShareSignature(nodeID, exp, masterSecret)
+		expectedSign := GenerateShareSignature(nodeID, exp, accessSecret)
 		if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedSign))) == 1 {
 			return true
 		}
@@ -418,11 +420,13 @@ func (a *Agent) Start(ctx context.Context) error {
 		a.wsMu.Unlock()
 
 		// Register NodeID
+		requireVisitorAuth := (a.AccessSecret != "")
 		regMsg := &signaling.Message{
-			Type:   signaling.TypeRegister,
-			NodeID: a.NodeID,
-			Role:   "agent",
-			Secret: a.Secret,
+			Type:               signaling.TypeRegister,
+			NodeID:             a.NodeID,
+			Role:               "agent",
+			Secret:             a.SignalSecret,
+			RequireVisitorAuth: &requireVisitorAuth,
 		}
 		if err := a.sendSignal(regMsg); err != nil {
 			log.Printf("[Agent] Failed to register: %v", err)
@@ -456,13 +460,13 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 
 		case signaling.TypeOffer:
 			log.Printf("[Agent] Received Offer from client session=%s (ice_restart=%v, exp=%d)", msg.SessionID, msg.IceRestart, msg.Exp)
-			if !a.VerifyAuth(a.NodeID, a.Secret, msg.Secret, msg.Exp, msg.Sign) {
-				log.Printf("[Agent] Rejected unauthorized Offer for session=%s (invalid secret or expired/invalid signature)", msg.SessionID)
+			if !a.VerifyAuth(a.NodeID, a.AccessSecret, msg.Secret, msg.Exp, msg.Sign) {
+				log.Printf("[Agent] Rejected unauthorized Offer for session=%s (invalid access secret or expired/invalid signature)", msg.SessionID)
 				_ = a.sendSignal(&signaling.Message{
 					Type:      signaling.TypeError,
 					NodeID:    a.NodeID,
 					SessionID: msg.SessionID,
-					Error:     "unauthorized: invalid secret or expired/invalid share signature",
+					Error:     "unauthorized: invalid access secret or expired/invalid share signature",
 				})
 				continue
 			}

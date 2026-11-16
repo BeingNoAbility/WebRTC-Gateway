@@ -24,10 +24,11 @@ import (
 // Helper: Start a full-featured real signal server using the production broker logic
 func startRealSignalServer(serverSecret string) (*httptest.Server, *mockRealBroker) {
 	broker := &mockRealBroker{
-		serverSecret: serverSecret,
-		agents:       make(map[string]*mockSession),
-		nodeSecrets:  make(map[string]string),
-		clients:      make(map[string]*mockSession),
+		serverSecret:    serverSecret,
+		agents:          make(map[string]*mockSession),
+		nodeSecrets:     make(map[string]string),
+		nodeVisitorAuth: make(map[string]bool),
+		clients:         make(map[string]*mockSession),
 	}
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
@@ -54,7 +55,7 @@ func startRealSignalServer(serverSecret string) (*httptest.Server, *mockRealBrok
 
 			switch msg.Type {
 			case signaling.TypeRegister:
-				if err := broker.registerAgent(msg.NodeID, msg.Secret, sess); err != nil {
+				if err := broker.registerAgent(msg.NodeID, msg.Secret, msg.RequireVisitorAuth, sess); err != nil {
 					_ = sess.send(&signaling.Message{Type: signaling.TypeError, Error: err.Error()})
 					return
 				}
@@ -69,7 +70,7 @@ func startRealSignalServer(serverSecret string) (*httptest.Server, *mockRealBrok
 				broker.registerClient(sess)
 
 				agent := broker.getAgent(msg.NodeID)
-				hasSec := broker.hasSecret(msg.NodeID)
+				hasSec := broker.requiresVisitorAuth(msg.NodeID)
 				if agent == nil {
 					_ = sess.send(&signaling.Message{
 						Type:           signaling.TypePeerStatus,
@@ -146,14 +147,15 @@ func (s *mockSession) send(msg *signaling.Message) error {
 }
 
 type mockRealBroker struct {
-	mu           sync.RWMutex
-	serverSecret string
-	agents       map[string]*mockSession
-	nodeSecrets  map[string]string
-	clients      map[string]*mockSession
+	mu              sync.RWMutex
+	serverSecret    string
+	agents          map[string]*mockSession
+	nodeSecrets     map[string]string
+	nodeVisitorAuth map[string]bool
+	clients         map[string]*mockSession
 }
 
-func (b *mockRealBroker) registerAgent(nodeID, secret string, s *mockSession) error {
+func (b *mockRealBroker) registerAgent(nodeID, secret string, requireVisitorAuth *bool, s *mockSession) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -175,7 +177,18 @@ func (b *mockRealBroker) registerAgent(nodeID, secret string, s *mockSession) er
 	if secret != "" {
 		b.nodeSecrets[nodeID] = secret
 	}
+	if requireVisitorAuth != nil {
+		b.nodeVisitorAuth[nodeID] = *requireVisitorAuth
+	} else {
+		b.nodeVisitorAuth[nodeID] = (secret != "")
+	}
 	return nil
+}
+
+func (b *mockRealBroker) requiresVisitorAuth(nodeID string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.nodeVisitorAuth[nodeID]
 }
 
 func (b *mockRealBroker) hasSecret(nodeID string) bool {
@@ -191,6 +204,7 @@ func (b *mockRealBroker) remove(s *mockSession) {
 	if s.role == "agent" && s.nodeID != "" {
 		if curr, ok := b.agents[s.nodeID]; ok && curr == s {
 			delete(b.agents, s.nodeID)
+			delete(b.nodeVisitorAuth, s.nodeID)
 		}
 	} else {
 		delete(b.clients, s.id)
@@ -218,7 +232,7 @@ func (b *mockRealBroker) getClient(sessionID string) *mockSession {
 func (b *mockRealBroker) notifyClients(nodeID string) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	hasSec := b.nodeSecrets[nodeID] != ""
+	hasSec := b.nodeVisitorAuth[nodeID]
 	for _, client := range b.clients {
 		if client.nodeID == nodeID {
 			_ = client.send(&signaling.Message{
@@ -249,7 +263,7 @@ func TestSecretAuth_CorrectSecret_Success(t *testing.T) {
 	secretToken := "strong-vault-pass-888"
 	nodeID := "secret-vault-node"
 
-	ag := agent.New(nodeID, wsURL, secretToken, backend.URL)
+	ag := agent.New(nodeID, wsURL, "", secretToken, backend.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -406,7 +420,7 @@ func TestSecretAuth_WrongSecret_Rejected(t *testing.T) {
 	secretToken := "vault-correct-secret"
 	nodeID := "secure-node-reject"
 
-	ag := agent.New(nodeID, wsURL, secretToken, backend.URL)
+	ag := agent.New(nodeID, wsURL, "", secretToken, backend.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -483,7 +497,7 @@ func TestSecretAuth_EmptySecret_Rejected(t *testing.T) {
 	secretToken := "strict-vault-secret"
 	nodeID := "secure-node-empty"
 
-	ag := agent.New(nodeID, wsURL, secretToken, backend.URL)
+	ag := agent.New(nodeID, wsURL, "", secretToken, backend.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -688,7 +702,7 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(signalServer.URL, "http")
 
 	// Start Agent
-	ag := agent.New(nodeID, wsURL, nodeSecret, targetApp.URL)
+	ag := agent.New(nodeID, wsURL, "", nodeSecret, targetApp.URL)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = ag.Start(ctx) }()
@@ -873,4 +887,53 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("Timeout waiting for ICE Restart Answer")
 	}
+}
+
+// ----------------------------------------------------------------------------
+// Test 7: Decoupled Secret: Cluster SignalSecret + Public Node (AccessSecret="")
+// ----------------------------------------------------------------------------
+func TestSecretAuth_Decoupled_ClusterSecret_PublicNode_Success(t *testing.T) {
+	clusterKey := "super-secure-server-cluster-token"
+	nodeID := "public-demo-node"
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"public": "access_granted"})
+	}))
+	defer backend.Close()
+
+	// Signal server requires cluster key
+	signalServer, _ := startRealSignalServer(clusterKey)
+	defer signalServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(signalServer.URL, "http")
+
+	// Agent connects with signalSecret=clusterKey, but accessSecret="" (public node!)
+	ag := agent.New(nodeID, wsURL, clusterKey, "", backend.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = ag.Start(ctx) }()
+	defer ag.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Visitor client connects without any secret
+	clientWS, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Client dial signal error: %v", err)
+	}
+	defer clientWS.Close()
+
+	_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
+	var statusMsg signaling.Message
+	_ = clientWS.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = clientWS.ReadJSON(&statusMsg)
+
+	if statusMsg.Status != "online" {
+		t.Fatalf("Expected status online, got: %s", statusMsg.Status)
+	}
+	// Crucial check: RequiresSecret MUST BE FALSE! Visitor is not prompted for password!
+	if statusMsg.RequiresSecret {
+		t.Fatalf("Expected RequiresSecret=false for public node, but got true")
+	}
+
+	t.Logf("Decoupled Secret verified: Cluster secret accepted, visitor access is completely public (requires_secret=false)!")
 }

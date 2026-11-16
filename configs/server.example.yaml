@@ -1,0 +1,37 @@
+# ==============================================================================
+# WebRTC Gateway Signaling Server Configuration Template (YAML / JSON supported)
+# ==============================================================================
+# Priority Order: Defaults < Configuration File < Environment Variables < CLI Flags
+# Auto-detection files: server.yaml, server.yml, server.json in current or binary dir.
+# ==============================================================================
+
+# Listen address for HTTP/WebSocket signaling service
+addr: ":8080"
+
+# Signaling cluster admission secret (Control Plane)
+# Must match the -signal-secret configured on connecting agents.
+# Prevents unauthorized agents from registering nodes on the signaling server.
+# Note: 'secret' is also accepted as an alias.
+signal_secret: "cluster-secret-key-123"
+
+# Path to static web UI directory (leave empty to use embedded HTML portal)
+static: ""
+
+# TLS Certificate and Private Key paths (leave empty for plain HTTP)
+tls_cert: ""
+tls_key: ""
+
+# Enable automatic Let's Encrypt ACME HTTPS certificates (requires valid public domain on port 80/443)
+tls_auto: false
+
+# Anti-DDoS / Rate Limiter: Maximum concurrent WebSocket connections allowed per client IP
+max_ip_conns: 50
+
+# Reverse Proxy Security: Comma-separated list of trusted proxy CIDRs/IPs
+# X-Forwarded-For & CF-Connecting-IP headers are ONLY trusted when RemoteAddr matches these CIDRs.
+# Defaults to RFC 1918 private subnets + loopback (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, ::1/128).
+# Set to "none" when running directly exposed on the public internet without reverse proxies.
+trusted_proxies: "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128"
+
+# Prometheus metrics scrape endpoint (e.g. ":9090", leave empty to disable)
+metrics_addr: ":9090"

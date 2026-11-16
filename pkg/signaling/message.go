@@ -23,8 +23,9 @@ type Message struct {
 	SessionID      string                     `json:"session_id,omitempty"`
 	ClientToken    string                     `json:"client_token,omitempty"`
 	Role           string                     `json:"role,omitempty"` // "agent" or "client"
-	Secret         string                     `json:"secret,omitempty"`
-	RequiresSecret bool                       `json:"requires_secret,omitempty"`
+	Secret             string                     `json:"secret,omitempty"`
+	RequiresSecret     bool                       `json:"requires_secret,omitempty"`
+	RequireVisitorAuth *bool                      `json:"require_visitor_auth,omitempty"`
 	IceRestart     bool                       `json:"ice_restart,omitempty"`
 	Exp            int64                      `json:"exp,omitempty"`  // Share link expiration timestamp (unix seconds)
 	Sign           string                     `json:"sign,omitempty"` // HMAC-SHA256 signature for temporary share

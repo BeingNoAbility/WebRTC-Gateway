@@ -17,6 +17,8 @@ export class SignalingRoom extends DurableObject {
     this.agentNodeIds = new Map();
     // nodeSecrets: node_id (string) -> registered secret (anti-hijack protection)
     this.nodeSecrets = new Map();
+    // nodeVisitorAuth: node_id (string) -> boolean (whether visitors require password)
+    this.nodeVisitorAuth = new Map();
 
     // clients: WebSocket -> { sessionId: string, targetNodeId: string }
     this.clients = new Map();
@@ -105,6 +107,8 @@ export class SignalingRoom extends DurableObject {
 
             this.agents.set(nodeId, ws);
             this.agentNodeIds.set(ws, nodeId);
+            const requireVisitorAuth = msg.require_visitor_auth !== undefined ? !!msg.require_visitor_auth : (msg.requires_secret !== undefined ? !!msg.requires_secret : !!secret);
+            this.nodeVisitorAuth.set(nodeId, requireVisitorAuth);
             ws.send(JSON.stringify({ type: 'registered', node_id: nodeId }));
 
             // Notify all clients waiting for this node
@@ -117,7 +121,7 @@ export class SignalingRoom extends DurableObject {
                       node_id: nodeId,
                       session_id: clientInfo.sessionId,
                       status: 'online',
-                      requires_secret: !!secret,
+                      requires_secret: requireVisitorAuth,
                     })
                   );
                 } catch {}
@@ -133,7 +137,7 @@ export class SignalingRoom extends DurableObject {
             this.clientBySession.set(sessionId, ws);
 
             const isOnline = this.agents.has(targetNodeId);
-            const requiresSecret = !!this.nodeSecrets.get(targetNodeId);
+            const requiresSecret = this.nodeVisitorAuth.has(targetNodeId) ? this.nodeVisitorAuth.get(targetNodeId) : !!this.nodeSecrets.get(targetNodeId);
             ws.send(
               JSON.stringify({
                 type: 'peer_status',

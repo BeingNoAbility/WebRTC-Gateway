@@ -30,7 +30,7 @@ func TestPhase4Large100MBStreamingAndBackpressure(t *testing.T) {
 
 	// 3. Start Agent Daemon
 	agentNodeID := "nas-large-test"
-	ag := agent.New(agentNodeID, wsSignalURL, "", mockBackend.URL)
+	ag := agent.New(agentNodeID, wsSignalURL, "", "", mockBackend.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
