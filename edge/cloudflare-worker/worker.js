@@ -152,6 +152,7 @@ export class SignalingRoom extends DurableObject {
 
           case 'offer': {
             msg.session_id = sessionId;
+            msg.client_ip = clientIP === 'unknown' ? '' : clientIP;
             const targetNodeId = msg.node_id;
             const targetAgent = this.agents.get(targetNodeId);
             if (targetAgent) {

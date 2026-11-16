@@ -52,11 +52,12 @@ func SetKeepaliveIntervalsForTest(ping, read time.Duration) {
 }
 
 type Session struct {
-	ID     string
-	Role   string
-	NodeID string
-	Conn   *websocket.Conn
-	mu     sync.Mutex
+	ID       string
+	Role     string
+	NodeID   string
+	RemoteIP string
+	Conn     *websocket.Conn
+	mu       sync.Mutex
 }
 
 func (s *Session) Send(msg *signaling.Message) error {
@@ -777,8 +778,9 @@ func main() {
 
 		sessionID := uuid.New().String()
 		session := &Session{
-			ID:   sessionID,
-			Conn: conn,
+			ID:       sessionID,
+			RemoteIP: clientIP,
+			Conn:     conn,
 		}
 
 		ctx, cancel := context.WithCancel(r.Context())
@@ -899,6 +901,7 @@ func main() {
 			case signaling.TypeOffer:
 				// Client sends Offer to Agent
 				msg.SessionID = session.ID
+				msg.ClientIP = session.RemoteIP
 				agent := broker.GetAgent(msg.NodeID)
 				if agent == nil {
 					_ = session.Send(&signaling.Message{Type: signaling.TypeError, Error: "target agent offline"})

@@ -164,7 +164,7 @@ func (wp *WSProxy) resolveTargetWSURL(reqPath string, headers map[string]string)
 }
 
 // HandleStream handles a WebSocket proxy stream.
-func (wp *WSProxy) HandleStream(sessionID string, stream *mux.Stream) {
+func (wp *WSProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream) {
 	defer stream.Close()
 
 	// 1. Read handshake metadata
@@ -203,7 +203,12 @@ func (wp *WSProxy) HandleStream(sessionID string, stream *mux.Stream) {
 		dialHeaders.Set(k, v)
 	}
 	dialHeaders.Set("Host", targetHost)
-	dialHeaders.Set("X-Forwarded-For", "127.0.0.1")
+	finalClientIP := strings.TrimSpace(clientIP)
+	if finalClientIP == "" || finalClientIP == "unknown" {
+		finalClientIP = "127.0.0.1"
+	}
+	dialHeaders.Set("X-Forwarded-For", finalClientIP)
+	dialHeaders.Set("X-Real-IP", finalClientIP)
 	dialHeaders.Set("X-Forwarded-Proto", "wss")
 	dialHeaders.Set("Referer", wp.targetBase.Scheme+"://"+wp.targetBase.Host+"/")
 

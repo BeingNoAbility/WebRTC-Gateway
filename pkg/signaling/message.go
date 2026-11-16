@@ -21,6 +21,7 @@ type Message struct {
 	Type           string                     `json:"type"`
 	NodeID         string                     `json:"node_id,omitempty"`
 	SessionID      string                     `json:"session_id,omitempty"`
+	ClientIP       string                     `json:"client_ip,omitempty"`
 	ClientToken    string                     `json:"client_token,omitempty"`
 	Role           string                     `json:"role,omitempty"` // "agent" or "client"
 	Secret             string                     `json:"secret,omitempty"`

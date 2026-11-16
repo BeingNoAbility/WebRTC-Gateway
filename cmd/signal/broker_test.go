@@ -586,3 +586,89 @@ func TestSignalServer_RunHealthCheckProbe(t *testing.T) {
 		t.Errorf("Expected runHealthCheck on closed port to return 1, got %d", failCode)
 	}
 }
+
+func TestSignalServer_Offer_ClientIP_InjectionAndAntiSpoofing(t *testing.T) {
+	broker := NewSignalBroker("")
+	limiter := NewIPRateLimiter(64, nil)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clientIP := limiter.GetClientIP(r)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		sessionID := "test-sess-" + clientIP
+		session := &Session{
+			ID:       sessionID,
+			RemoteIP: clientIP,
+			Conn:     conn,
+		}
+		defer conn.Close()
+
+		for {
+			var msg signaling.Message
+			if err := conn.ReadJSON(&msg); err != nil {
+				break
+			}
+			switch msg.Type {
+			case signaling.TypeRegister:
+				session.Role = "agent"
+				session.NodeID = msg.NodeID
+				_ = broker.RegisterAgent(msg.NodeID, "", nil, session)
+			case signaling.TypeOffer:
+				msg.SessionID = session.ID
+				msg.ClientIP = session.RemoteIP
+				agent := broker.GetAgent(msg.NodeID)
+				if agent != nil {
+					_ = agent.Send(&msg)
+				}
+			}
+		}
+	})
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	u, _ := url.Parse(server.URL)
+	u.Scheme = "ws"
+
+	// 1. Connect agent
+	agentWS, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		t.Fatalf("Agent dial failed: %v", err)
+	}
+	defer agentWS.Close()
+	_ = agentWS.WriteJSON(&signaling.Message{Type: signaling.TypeRegister, NodeID: "test-node"})
+
+	// Give registration a moment to be recorded in broker
+	time.Sleep(50 * time.Millisecond)
+
+	// 2. Connect client
+	clientWS, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		t.Fatalf("Client dial failed: %v", err)
+	}
+	defer clientWS.Close()
+
+	// 3. Client sends Offer with spoofed ClientIP
+	_ = clientWS.WriteJSON(&signaling.Message{
+		Type:      signaling.TypeOffer,
+		NodeID:    "test-node",
+		ClientIP:  "198.51.100.22", // Attacker trying to spoof IP!
+		SessionID: "spoofed-session",
+	})
+
+	// 4. Agent receives Offer
+	var forwarded signaling.Message
+	_ = agentWS.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if err := agentWS.ReadJSON(&forwarded); err != nil {
+		t.Fatalf("Agent failed to receive offer: %v", err)
+	}
+
+	if forwarded.ClientIP == "198.51.100.22" {
+		t.Errorf("Security risk! Agent received spoofed ClientIP")
+	}
+	if forwarded.ClientIP != "127.0.0.1" {
+		t.Errorf("Expected ClientIP to be 127.0.0.1, got %q", forwarded.ClientIP)
+	}
+}

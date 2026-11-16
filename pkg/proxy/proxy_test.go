@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"webrtc-gateway/pkg/mux"
 )
 
@@ -334,7 +335,7 @@ func TestHTTPProxy_GzipDecompressionAndResourceLeak(t *testing.T) {
 		if err != nil {
 			return
 		}
-		hp.HandleStream("test-session-gz", stream)
+		hp.HandleStream("test-session-gz", "127.0.0.1", stream)
 	}()
 
 	// Client sends GET request
@@ -430,7 +431,7 @@ func TestHTTPProxy_RangeRequestBypassesGzip(t *testing.T) {
 	go func() {
 		stream, _ := agentMux.AcceptStream(context.Background())
 		if stream != nil {
-			hp.HandleStream("sess-range", stream)
+			hp.HandleStream("sess-range", "127.0.0.1", stream)
 		}
 	}()
 
@@ -491,5 +492,241 @@ func TestHTTPProxy_OutboundProxyConfiguration(t *testing.T) {
 	hp.SetProxy("")
 	if hp.transport.Proxy == nil {
 		t.Errorf("Proxy func should not be nil when reset")
+	}
+}
+
+// 8. Test Client IP Forwarding, Anti-Spoofing and Fallback
+func TestHTTPProxy_ClientIP_ForwardingAndAntiSpoofing(t *testing.T) {
+	var receivedXFF, receivedXRealIP string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedXFF = r.Header.Get("X-Forwarded-For")
+		receivedXRealIP = r.Header.Get("X-Real-IP")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	cm := NewSessionCookieManager()
+	hp, err := NewHTTPProxy(backend.URL, cm)
+	if err != nil {
+		t.Fatalf("NewHTTPProxy failed: %v", err)
+	}
+
+	testCases := []struct {
+		name          string
+		clientIP      string
+		spoofedXFF    string
+		spoofedXReal  string
+		expectedXFF   string
+		expectedXReal string
+	}{
+		{
+			name:          "Authoritative IP overwrites spoofed headers",
+			clientIP:      "203.0.113.195",
+			spoofedXFF:    "127.0.0.1, 10.0.0.1",
+			spoofedXReal:  "192.168.1.100",
+			expectedXFF:   "203.0.113.195",
+			expectedXReal: "203.0.113.195",
+		},
+		{
+			name:          "Empty client IP falls back to 127.0.0.1",
+			clientIP:      "",
+			spoofedXFF:    "1.2.3.4",
+			spoofedXReal:  "5.6.7.8",
+			expectedXFF:   "127.0.0.1",
+			expectedXReal: "127.0.0.1",
+		},
+		{
+			name:          "Unknown client IP falls back to 127.0.0.1",
+			clientIP:      "unknown",
+			spoofedXFF:    "",
+			spoofedXReal:  "",
+			expectedXFF:   "127.0.0.1",
+			expectedXReal: "127.0.0.1",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tClient, tAgent := newMemoryTransportPair()
+			defer tClient.Close()
+			defer tAgent.Close()
+			clientMux := mux.NewMux(tClient, true)
+			agentMux := mux.NewMux(tAgent, false)
+
+			tClient.mu.Lock()
+			tClient.onMsg = func(d []byte) { _ = clientMux.HandleIncomingMessage(d) }
+			tClient.mu.Unlock()
+
+			tAgent.mu.Lock()
+			tAgent.onMsg = func(d []byte) { _ = agentMux.HandleIncomingMessage(d) }
+			tAgent.mu.Unlock()
+
+			defer clientMux.Close()
+			defer agentMux.Close()
+
+			go func() {
+				stream, err := agentMux.AcceptStream(context.Background())
+				if err != nil {
+					return
+				}
+				hp.HandleStream("sess-anti-spoof", tc.clientIP, stream)
+			}()
+
+			clientStream, err := clientMux.OpenStream()
+			if err != nil {
+				t.Fatalf("OpenStream failed: %v", err)
+			}
+
+			headers := map[string]string{}
+			if tc.spoofedXFF != "" {
+				headers["X-Forwarded-For"] = tc.spoofedXFF
+			}
+			if tc.spoofedXReal != "" {
+				headers["X-Real-IP"] = tc.spoofedXReal
+			}
+
+			reqMeta := RequestMetadata{
+				Method:  "GET",
+				Path:    "/check-ip",
+				Headers: headers,
+			}
+			reqData, _ := json.Marshal(reqMeta)
+			if err := clientStream.WriteHeaders(reqData); err != nil {
+				t.Fatalf("WriteHeaders failed: %v", err)
+			}
+			_ = clientStream.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, err = clientStream.ReadHeaders(ctx)
+			if err != nil {
+				t.Fatalf("ReadHeaders failed: %v", err)
+			}
+
+			if receivedXFF != tc.expectedXFF {
+				t.Errorf("X-Forwarded-For mismatch: expected %q, got %q", tc.expectedXFF, receivedXFF)
+			}
+			if receivedXRealIP != tc.expectedXReal {
+				t.Errorf("X-Real-IP mismatch: expected %q, got %q", tc.expectedXReal, receivedXRealIP)
+			}
+		})
+	}
+}
+
+// 9. Test WebSocket Proxy Client IP Forwarding, Anti-Spoofing and Fallback
+func TestWSProxy_ClientIP_ForwardingAndAntiSpoofing(t *testing.T) {
+	var receivedXFF, receivedXRealIP string
+	var upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedXFF = r.Header.Get("X-Forwarded-For")
+		receivedXRealIP = r.Header.Get("X-Real-IP")
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+	}))
+	defer backend.Close()
+
+	cm := NewSessionCookieManager()
+	wp, err := NewWSProxy(backend.URL, cm)
+	if err != nil {
+		t.Fatalf("NewWSProxy failed: %v", err)
+	}
+
+	testCases := []struct {
+		name          string
+		clientIP      string
+		spoofedXFF    string
+		spoofedXReal  string
+		expectedXFF   string
+		expectedXReal string
+	}{
+		{
+			name:          "Authoritative IP overwrites spoofed WS headers",
+			clientIP:      "198.51.100.200",
+			spoofedXFF:    "127.0.0.1",
+			spoofedXReal:  "10.0.0.99",
+			expectedXFF:   "198.51.100.200",
+			expectedXReal: "198.51.100.200",
+		},
+		{
+			name:          "Empty client IP falls back to 127.0.0.1",
+			clientIP:      "",
+			spoofedXFF:    "8.8.8.8",
+			spoofedXReal:  "8.8.4.4",
+			expectedXFF:   "127.0.0.1",
+			expectedXReal: "127.0.0.1",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tClient, tAgent := newMemoryTransportPair()
+			defer tClient.Close()
+			defer tAgent.Close()
+
+			clientMux := mux.NewMux(tClient, true)
+			agentMux := mux.NewMux(tAgent, false)
+
+			tClient.mu.Lock()
+			tClient.onMsg = func(d []byte) { _ = clientMux.HandleIncomingMessage(d) }
+			tClient.mu.Unlock()
+
+			tAgent.mu.Lock()
+			tAgent.onMsg = func(d []byte) { _ = agentMux.HandleIncomingMessage(d) }
+			tAgent.mu.Unlock()
+
+			defer clientMux.Close()
+			defer agentMux.Close()
+
+			go func() {
+				stream, err := agentMux.AcceptStream(context.Background())
+				if err != nil {
+					return
+				}
+				wp.HandleStream("sess-ws-anti-spoof", tc.clientIP, stream)
+			}()
+
+			clientStream, err := clientMux.OpenStream()
+			if err != nil {
+				t.Fatalf("OpenStream failed: %v", err)
+			}
+
+			headers := map[string]string{}
+			if tc.spoofedXFF != "" {
+				headers["X-Forwarded-For"] = tc.spoofedXFF
+			}
+			if tc.spoofedXReal != "" {
+				headers["X-Real-IP"] = tc.spoofedXReal
+			}
+
+			wsMeta := WSConnectMetadata{
+				Path:    "/ws",
+				Headers: headers,
+			}
+			reqData, _ := json.Marshal(wsMeta)
+			if err := clientStream.WriteHeaders(reqData); err != nil {
+				t.Fatalf("WriteHeaders failed: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, err = clientStream.ReadHeaders(ctx)
+			if err != nil {
+				t.Fatalf("ReadHeaders failed: %v", err)
+			}
+
+			if receivedXFF != tc.expectedXFF {
+				t.Errorf("WS X-Forwarded-For mismatch: expected %q, got %q", tc.expectedXFF, receivedXFF)
+			}
+			if receivedXRealIP != tc.expectedXReal {
+				t.Errorf("WS X-Real-IP mismatch: expected %q, got %q", tc.expectedXReal, receivedXRealIP)
+			}
+		})
 	}
 }

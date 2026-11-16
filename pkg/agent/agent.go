@@ -50,6 +50,7 @@ type Agent struct {
 
 	webrtcConfig     webrtc.Configuration
 	activeConns      map[string]*webrtc.PeerConnection
+	clientIPs        map[string]string
 	connMu           sync.Mutex
 	pendingTeardowns map[string]*time.Timer
 	pendingMu        sync.Mutex
@@ -109,6 +110,7 @@ func New(nodeID, signalURL, signalSecret, accessSecret, target string) *Agent {
 			},
 		},
 		activeConns:          make(map[string]*webrtc.PeerConnection),
+		clientIPs:            make(map[string]string),
 		pendingTeardowns:     make(map[string]*time.Timer),
 		maxConcurrentStreams: 512,
 		pingInterval:         25 * time.Second,
@@ -382,8 +384,9 @@ func (a *Agent) cancelPendingTeardown(sessionID string) {
 func (a *Agent) teardownSession(sessionID, cookieSession string, pc *webrtc.PeerConnection) {
 	a.connMu.Lock()
 	currPC, exists := a.activeConns[sessionID]
-	if exists && (currPC == pc || pc == nil) {
+	if !exists || currPC == pc || pc == nil {
 		delete(a.activeConns, sessionID)
+		delete(a.clientIPs, sessionID)
 	}
 	a.connMu.Unlock()
 	atomic.StoreInt64(&a.activePeers, int64(len(a.activeConns)))
@@ -414,7 +417,14 @@ func (a *Agent) Close() {
 		_ = pc.Close()
 		delete(a.activeConns, id)
 	}
+	a.clientIPs = make(map[string]string)
 	a.connMu.Unlock()
+}
+
+func (a *Agent) getClientIP(sessionID string) string {
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	return a.clientIPs[sessionID]
 }
 
 func (a *Agent) Start(ctx context.Context) error {
@@ -567,7 +577,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 			log.Printf("[Agent] Server confirmed registration for node: %s", msg.NodeID)
 
 		case signaling.TypeOffer:
-			log.Printf("[Agent] Received Offer from client session=%s (ice_restart=%v, exp=%d)", msg.SessionID, msg.IceRestart, msg.Exp)
+			log.Printf("[Agent] Received Offer from client session=%s (ice_restart=%v, exp=%d, client_ip=%s)", msg.SessionID, msg.IceRestart, msg.Exp, msg.ClientIP)
 			if !a.VerifyAuth(a.NodeID, a.AccessSecret, msg.Secret, msg.Exp, msg.Sign) {
 				log.Printf("[Agent] Rejected unauthorized Offer for session=%s (invalid access secret or expired/invalid signature)", msg.SessionID)
 				_ = a.sendSignal(&signaling.Message{
@@ -578,7 +588,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 				})
 				continue
 			}
-			go a.handleOffer(msg.SessionID, msg.SDP, msg.ClientToken, msg.IceRestart)
+			go a.handleOffer(msg.SessionID, msg.ClientIP, msg.SDP, msg.ClientToken, msg.IceRestart)
 
 		case signaling.TypeCandidate:
 			a.handleRemoteCandidate(msg.SessionID, msg.Candidate)
@@ -589,7 +599,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
-func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription, clientToken string, iceRestart bool) {
+func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescription, clientToken string, iceRestart bool) {
 	cookieSession := sessionID
 	if clientToken != "" {
 		cookieSession = clientToken
@@ -613,6 +623,11 @@ func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription, cl
 			} else if err := existingPC.SetLocalDescription(answer); err != nil {
 				log.Printf("[Agent] [Session %s] ICE Restart SetLocalDescription error: %v", sessionID, err)
 			} else {
+				if clientIP != "" {
+					a.connMu.Lock()
+					a.clientIPs[sessionID] = clientIP
+					a.connMu.Unlock()
+				}
 				_ = a.sendSignal(&signaling.Message{
 					Type:      signaling.TypeAnswer,
 					NodeID:    a.NodeID,
@@ -701,7 +716,7 @@ func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription, cl
 			})
 
 			// Accept incoming streams and route to Reverse Proxy
-			go a.streamAcceptLoop(cookieSession, m)
+			go a.streamAcceptLoop(sessionID, cookieSession, m)
 		})
 	})
 
@@ -714,6 +729,9 @@ func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription, cl
 
 	a.connMu.Lock()
 	a.activeConns[sessionID] = pc
+	if clientIP != "" {
+		a.clientIPs[sessionID] = clientIP
+	}
 	a.connMu.Unlock()
 
 	// Create Answer
@@ -772,7 +790,7 @@ func (a *Agent) handleRemoteCandidate(sessionID string, candidate *webrtc.ICECan
 }
 
 // streamAcceptLoop processes incoming multiplexed streams and proxies them to local services.
-func (a *Agent) streamAcceptLoop(sessionID string, m *mux.Mux) {
+func (a *Agent) streamAcceptLoop(sessionID, cookieSession string, m *mux.Mux) {
 	for {
 		stream, err := m.AcceptStream(context.Background())
 		if err != nil {
@@ -858,15 +876,16 @@ func (a *Agent) streamAcceptLoop(sessionID string, m *mux.Mux) {
 					_ = s.Reset()
 					return
 				}
-				a.fileProxy.HandleStream(sessionID, s)
+				a.fileProxy.HandleStream(cookieSession, s)
 				return
 			}
 
+			clientIP := a.getClientIP(sessionID)
 			if isWebSocket {
 				log.Printf("[Agent] [Session %s] Routing Stream %d to WebSocket Proxy", sessionID, s.ID())
-				a.wsProxy.HandleStream(sessionID, s)
+				a.wsProxy.HandleStream(cookieSession, clientIP, s)
 			} else {
-				a.httpProxy.HandleStream(sessionID, s)
+				a.httpProxy.HandleStream(cookieSession, clientIP, s)
 			}
 		}(stream)
 	}

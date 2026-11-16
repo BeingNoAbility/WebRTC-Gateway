@@ -280,7 +280,7 @@ func sanitizeCSP(csp string) string {
 }
 
 // HandleStream proxies an incoming P2PMux stream to the local target web application.
-func (p *HTTPProxy) HandleStream(sessionID string, stream *mux.Stream) {
+func (p *HTTPProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream) {
 	defer stream.Close()
 
 	// 1. Read request headers
@@ -355,7 +355,12 @@ func (p *HTTPProxy) HandleStream(sessionID string, stream *mux.Stream) {
 
 	// Standard reverse proxy headers
 	req.Host = targetHost
-	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	finalClientIP := strings.TrimSpace(clientIP)
+	if finalClientIP == "" || finalClientIP == "unknown" {
+		finalClientIP = "127.0.0.1"
+	}
+	req.Header.Set("X-Forwarded-For", finalClientIP)
+	req.Header.Set("X-Real-IP", finalClientIP)
 	req.Header.Set("X-Forwarded-Proto", destURL.Scheme)
 	if origHost := reqMeta.Headers["host"]; origHost != "" {
 		req.Header.Set("X-Forwarded-Host", origHost)

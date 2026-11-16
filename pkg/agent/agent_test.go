@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/webrtc/v4"
 	"webrtc-gateway/pkg/proxy"
 	"webrtc-gateway/pkg/signaling"
 )
@@ -364,4 +365,66 @@ func TestAgent_KeepalivePingPump(t *testing.T) {
 
 	cancel()
 	ag.Close()
+}
+
+func TestAgent_SessionClientIP_LifecycleAndCleanup(t *testing.T) {
+	ag := New("agent-ip-lifecycle", "ws://127.0.0.1:8888/ws", "", "", "http://127.0.0.1:8080")
+	defer ag.Close()
+
+	// 1. Initial lookup should be empty
+	if ip := ag.getClientIP("sess-test-1"); ip != "" {
+		t.Fatalf("Expected empty IP for non-existent session, got: %q", ip)
+	}
+
+	// 2. Prepare client PeerConnection to generate real SDP offer
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("Failed to create PeerConnection: %v", err)
+	}
+	defer pc.Close()
+
+	_, err = pc.CreateDataChannel("p2pmux", nil)
+	if err != nil {
+		t.Fatalf("Failed to create DataChannel: %v", err)
+	}
+
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("Failed to create Offer: %v", err)
+	}
+
+	// 3. Process offer with client IP
+	ag.handleOffer("sess-test-1", "198.51.100.99", &offer, "", false)
+
+	if ip := ag.getClientIP("sess-test-1"); ip != "198.51.100.99" {
+		t.Fatalf("Expected clientIP 198.51.100.99, got: %q", ip)
+	}
+
+	// 3b. Test in-place ICE Restart roaming IP update (e.g. client roams from Wi-Fi to 5G)
+	restartOffer, err := pc.CreateOffer(&webrtc.OfferOptions{ICERestart: true})
+	if err != nil {
+		t.Fatalf("Failed to create ICE restart offer: %v", err)
+	}
+	ag.handleOffer("sess-test-1", "198.51.100.150", &restartOffer, "", true)
+	if ip := ag.getClientIP("sess-test-1"); ip != "198.51.100.150" {
+		t.Fatalf("Expected updated clientIP 198.51.100.150 after ICE Restart, got: %q", ip)
+	}
+
+	// 4. Teardown session and verify IP is cleaned up (anti-leak)
+	ag.teardownSession("sess-test-1", "sess-test-1", nil)
+
+	if ip := ag.getClientIP("sess-test-1"); ip != "" {
+		t.Fatalf("Expected clientIP to be deleted after teardown, got: %q", ip)
+	}
+
+	// 5. Add another session and verify Close() cleans everything up
+	ag.handleOffer("sess-test-2", "203.0.113.88", &offer, "", false)
+	if ip := ag.getClientIP("sess-test-2"); ip != "203.0.113.88" {
+		t.Fatalf("Expected clientIP 203.0.113.88, got: %q", ip)
+	}
+
+	ag.Close()
+	if ip := ag.getClientIP("sess-test-2"); ip != "" {
+		t.Fatalf("Expected all clientIPs to be cleaned up after Close(), got: %q", ip)
+	}
 }
