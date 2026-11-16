@@ -2,7 +2,7 @@
 ### 浏览器零客户端依赖的 P2P WebRTC 端到端内网穿透网关
 
 <p align="center">
-  <a href="README.md"><b>简体中文</b></a> · <a href="README_en.md"><b>English</b></a>
+  <a href="README.md"><b>简体中文</b></a> · <a href="README_en.md"><b>English</b></a> · <a href="https://github.com/BeingNoAbility/WebRTC-Gateway/wiki"><b>📖 GitHub Wiki</b></a>
 </p>
 
 [![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go)](https://go.dev/)
@@ -36,7 +36,8 @@
   - [3. 多节点与子域名智能路由 (Subdomain & Routing)](#3-多节点与子域名智能路由)
   - [4. Web 控制台与节点设置器](#4-web-控制台与节点设置器)
   - [5. Agent 命令行参数与环境变量全量说明](#5-agent-命令行参数与环境变量全量说明)
-  - [6. 安全性与访问控制](#6-安全性与访问控制)
+  - [6. 一体化服务端 (Signal Server) 命令行参数全量说明](#6-一体化服务端-signal-server-命令行参数全量说明)
+  - [7. 安全性与访问控制](#7-安全性与访问控制)
 - [🛠️ 生产部署指南 (Self-Hosting & Operations)](#️-生产部署指南-self-hosting--operations)
   - [方案 A：Cloudflare Workers 一体化边缘部署 (零服务器成本)](#方案-acloudflare-workers-一体化边缘部署-零服务器成本)
   - [方案 B：自建 Linux / Windows 一体化自包含服务器 (单一二进制)](#方案-b自建-linux--windows-一体化自包含服务器-单一二进制)
@@ -119,6 +120,8 @@ chmod +x ./bin/agent_linux_amd64
 | **云相册 (Immich / Photoprism)** | `http://127.0.0.1:2283` | `./agent -node-id photo -target http://127.0.0.1:2283` | 相册极速缩略图瀑布流渲染，SvelteKit 前端无缝兼容。 |
 | **容器控制台 (Portainer)** | `https://127.0.0.1:9443` | `./agent -node-id docker -target https://127.0.0.1:9443` | 自动破除 Anti-Frame-Busting 限制，WebSocket 容器终端与日志实时交互。 |
 | **本地开发与 Web 调试** | `http://localhost:3000` | `./agent -node-id dev -target http://localhost:3000` | 免配置临时暴露 Vite / Next.js / Spring Boot 开发服务给客户或同事预览。 |
+| **P2P 单文件秒传 (私有 Wormhole / AirDrop)** | 本地单个大文件 (ISO/ZIP/MP4) | `./agent -file ./Ubuntu.iso -access-secret pass123 -sign-link 24h` | 访客浏览器打开签名链接即刻触发满速 P2P 直连下载，不限大小，零中心流量，时效自毁。 |
+| **静态网站与本地目录在线托管** | 本地静态目录路径 | `./agent -dir /path/to/dist` | 零额外 Web 服务器，自动索引 `index.html` 或渲染现代化极简只读文件浏览列表。 |
 
 ---
 

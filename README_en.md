@@ -2,7 +2,7 @@
 ### End-to-End P2P WebRTC Reverse Proxy Gateway with Zero Client Dependencies in Visitor Browsers
 
 <p align="center">
-  <a href="README.md"><b>简体中文</b></a> · <a href="README_en.md"><b>English</b></a>
+  <a href="README.md"><b>简体中文</b></a> · <a href="README_en.md"><b>English</b></a> · <a href="https://github.com/BeingNoAbility/WebRTC-Gateway/wiki"><b>📖 GitHub Wiki</b></a>
 </p>
 
 [![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go)](https://go.dev/)
@@ -120,6 +120,8 @@ The browser automatically exchanges signaling with the Agent, punches through NA
 | **Cloud Photos (Immich / PhotoPrism)** | `http://127.0.0.1:2283` | `./agent -node-id photo -target http://127.0.0.1:2283` | Instant thumbnail waterfall rendering, seamless SvelteKit frontend compatibility. |
 | **Container Dashboard (Portainer)** | `https://127.0.0.1:9443` | `./agent -node-id docker -target https://127.0.0.1:9443` | Neutralizes Anti-Frame-Busting restrictions, real-time WebSocket terminal interaction. |
 | **Local Development & Debugging** | `http://localhost:3000` | `./agent -node-id dev -target http://localhost:3000` | Zero-configuration sharing of local Vite / Next.js / Spring Boot apps for clients or peers. |
+| **P2P Single-File Transfer (Private Wormhole / AirDrop)** | Local file (ISO / ZIP / MP4) | `./agent -file ./Ubuntu.iso -access-secret pass123 -sign-link 24h` | Direct line-speed P2P download in visitor's browser, zero relay traffic, auto-expires. |
+| **Static Web Hosting & Directory Browsing** | Local folder / static dist | `./agent -dir /path/to/dist` | Zero-configuration static hosting, serves `index.html` or responsive read-only directory tree. |
 
 ---
 
