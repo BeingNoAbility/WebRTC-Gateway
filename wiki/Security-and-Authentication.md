@@ -105,7 +105,30 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 
 ---
 
-## 6. 设计哲学与安全边界声明 (Design Philosophy & Security Boundaries)
+## 6. 通用防御加固与收敛治理 (v1.8.1 Universal Security Hardening)
+
+网关自 **v1.8.1** 起，摒弃针对特例修补的坏味道，建立通用防御闭环：
+
+### ① 门户控制台 DOM XSS 彻底根除
+- **正向字符集门禁**：对所有节点 ID（URL Hash、Query、子域名、Storage）实行强制白名单（`/^[a-zA-Z0-9._-]{1,64}$/`），非规范字符直接拒绝并降级兜底；
+- **原生安全 DOM 赋值**：设置弹窗彻底废除模板字符串裸拼，改由标准 DOM API 属性设值（`input.value = ...`）与 HTML 实体转义。
+
+### ② 全链路最小特权口令切断 (PoLP)
+- 物理拔除 Service Worker 对代理 HTML 页面的 `window.__P2P_SECRET__` 注入，目标站点内部任何脚本均无法嗅探口令；
+- 移除 URL Query 中 `?secret=` 的拼接暴露；移除信令 `join` 握手阶段及 iframe 广播的冗余口令字段。
+
+### ③ `/--p2p-proxy/` 外域代发安全收敛
+- 彻底废除基于后缀模糊匹配（`.mp4` 参数绕过）及关键字匹配的启发式规则；
+- 默认仅允许同源及根域名子域代理；新增 `-allowed-proxy-domains` 通配符白名单配置，实现通用且安全的外链多媒体与图床直连；
+- `-proxy` 严格解耦于信令外出通道，不污染本地反向代理 Transport。
+
+### ④ 信令滑动窗口防暴破与敏感端点收敛
+- 在 WebSocket 信令握手阶段实行 `IsLocked` 滑动窗口熔断阻断，封禁期间硬性断开连接；
+- 彻底移除 Cloudflare Worker 未鉴权的 `list_nodes` 节点枚举端点。
+
+---
+
+## 7. 设计哲学与安全边界声明 (Design Philosophy & Security Boundaries)
 
 为了守住产品的核心护城河与轻量极致体验，本项目坚定恪守以下两条设计纪律：
 

@@ -36,7 +36,8 @@ Agent 支持三种核心运行模式，三者在业务上严格三选一（互�
 | `-config` | `CONFIG_FILE` / `CONFIG` | `""` | 可选的 YAML / JSON 配置文件路径（默认自动探测 `./agent.yaml`、`./agent.yml`、`./agent.json`） |
 | `-signal-secret` | `SIGNAL_SECRET` | `""` | 信令集群准入密钥（控制面，必须与信令端一致，防冒领，绝不透露给访客） |
 | `-access-secret` | `ACCESS_SECRET` | `""` | 访客访问口令（数据面，留空免密直连；配置后访客需输入口令或持有签名链接） |
-| `-proxy` | `PROXY_URL` | `""` | 可选的出站代理（支持 `http://`、`https://`、`socks5://`） |
+| `-proxy` | `PROXY_URL` | `""` | 可选的出站代理（支持 `http://`、`https://`、`socks5://`，仅用于信令外出，不污染本地反代） |
+| `-allowed-proxy-domains` | `ALLOWED_PROXY_DOMAINS` | `""` | 可选的 `/--p2p-proxy/` 外域转发通配符白名单（如 `*.hdslb.com,*.bilivideo.com`，防开放代理逃逸） |
 | `-sni` | `SNI` | `""` | 可选的 TLS SNI 与 Host 标头覆盖（用于绕过 DNS 污染直连 Anycast IP） |
 | `-insecure` | `INSECURE` | `false` | 连接自签名 TLS 信令服务器时跳过证书链校验 |
 | `-turn-url` | `TURN_URL` | `""` | 可选的 TURN 中继地址（如 `turn:relay.domain.com:3478`，用于对称型 NAT 降级中继） |
