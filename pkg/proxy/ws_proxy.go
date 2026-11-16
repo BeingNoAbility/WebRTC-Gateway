@@ -27,6 +27,7 @@ type WSConnectMetadata struct {
 	Path      string            `json:"p"`                   // Target WebSocket path & query
 	Protocols []string          `json:"protocols,omitempty"` // Requested subprotocols
 	Headers   map[string]string `json:"headers,omitempty"`   // Extra headers
+	H         map[string]string `json:"h,omitempty"`         // Compact extra headers shorthand
 }
 
 // WSProxy handles bidirectional relay between WebRTC streams and local WebSocket services.
@@ -171,6 +172,9 @@ func (wp *WSProxy) HandleStream(sessionID string, stream *mux.Stream) {
 		log.Printf("[WSProxy] Stream %d invalid WS metadata: %v", stream.ID(), err)
 		return
 	}
+	if meta.Headers == nil && meta.H != nil {
+		meta.Headers = meta.H
+	}
 
 	// 2. Build local WS URL
 	targetWSURL, targetHost, err := wp.resolveTargetWSURL(meta.Path, meta.Headers)
@@ -182,6 +186,10 @@ func (wp *WSProxy) HandleStream(sessionID string, stream *mux.Stream) {
 	// 3. Prepare dial headers
 	dialHeaders := make(http.Header)
 	for k, v := range meta.Headers {
+		lk := strings.ToLower(k)
+		if lk == "upgrade" || lk == "connection" || strings.HasPrefix(lk, "sec-websocket-") {
+			continue
+		}
 		dialHeaders.Set(k, v)
 	}
 	dialHeaders.Set("Host", targetHost)
@@ -189,12 +197,18 @@ func (wp *WSProxy) HandleStream(sessionID string, stream *mux.Stream) {
 	dialHeaders.Set("X-Forwarded-Proto", "wss")
 	dialHeaders.Set("Referer", wp.targetBase.Scheme+"://"+wp.targetBase.Host+"/")
 
+	// Prepare dialer with subprotocols if specified
+	dialer := *wp.dialer
+	if len(meta.Protocols) > 0 {
+		dialer.Subprotocols = meta.Protocols
+	}
+
 	// Inject cookies
 	dummyReq := &http.Request{URL: targetWSURL, Header: dialHeaders}
 	wp.cookieManager.InjectCookies(sessionID, dummyReq)
 
 	// 4. Dial local WebSocket service
-	conn, resp, err := wp.dialer.DialContext(stream.Context(), targetWSURL.String(), dialHeaders)
+	conn, resp, err := dialer.DialContext(stream.Context(), targetWSURL.String(), dialHeaders)
 	if err != nil {
 		log.Printf("[WSProxy] Stream %d dial local WS failed: %v", stream.ID(), err)
 		errResp := ResponseMetadata{

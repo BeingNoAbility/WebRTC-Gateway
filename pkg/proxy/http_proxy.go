@@ -392,6 +392,25 @@ func (p *HTTPProxy) HandleStream(sessionID string, stream *mux.Stream) {
 	// Inject session cookies from CookieJar
 	p.cookieManager.InjectCookies(sessionID, req)
 
+	// If client-side JavaScript sent document.cookie via X-Client-Cookie header, merge them into request
+	if clientCookieHeader := req.Header.Get("X-Client-Cookie"); clientCookieHeader != "" {
+		req.Header.Del("X-Client-Cookie")
+		rawCookies := strings.Split(clientCookieHeader, ";")
+		for _, raw := range rawCookies {
+			raw = strings.TrimSpace(raw)
+			if parts := strings.SplitN(raw, "=", 2); len(parts) == 2 {
+				name := strings.TrimSpace(parts[0])
+				val := strings.TrimSpace(parts[1])
+				if name != "" {
+					req.AddCookie(&http.Cookie{
+						Name:  name,
+						Value: val,
+					})
+				}
+			}
+		}
+	}
+
 	// 4. Forward to local backend service
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -426,6 +445,7 @@ func (p *HTTPProxy) HandleStream(sessionID string, stream *mux.Stream) {
 
 		// Anti-iframe bypass: strip headers that forbid framing or break sandbox virtualization
 		if lk == "x-frame-options" || lk == "cross-origin-embedder-policy" || lk == "cross-origin-opener-policy" ||
+			lk == "cross-origin-resource-policy" ||
 			lk == "content-security-policy" || lk == "content-security-policy-report-only" {
 			continue
 		}

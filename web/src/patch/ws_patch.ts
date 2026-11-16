@@ -30,6 +30,12 @@
     }
   };
 
+  // Store the real portal window reference for inter-frame tunneling BEFORE anti-frame-busting
+  const realPortalWindow: Window | null =
+    typeof window !== 'undefined' && window.parent && window.parent !== window
+      ? window.parent
+      : null;
+
   // 1. Anti-Frame-Busting & Window Virtualization (Window scope only)
   if (typeof window !== 'undefined') {
     try {
@@ -394,8 +400,9 @@
           set(val: string) {
             originalCookieDesc.set?.call(document, val);
             try {
-              if (typeof window !== 'undefined' && window.parent && window.parent !== window) {
-                window.parent.postMessage({ type: 'TUNNEL_COOKIE_UPDATE', cookie: val }, '*');
+              const target = realPortalWindow || (typeof window !== 'undefined' && window.parent && window.parent !== window ? window.parent : null);
+              if (target) {
+                target.postMessage({ type: 'TUNNEL_COOKIE_UPDATE', cookie: val }, '*');
               }
             } catch {}
           },
@@ -476,6 +483,17 @@
           input = new Request(rewritten, input);
         }
       }
+
+      // Attach client-side document.cookie via X-Client-Cookie header so Agent merges it
+      if (typeof document !== 'undefined' && document.cookie) {
+        init = init || {};
+        const headers = new Headers(init.headers || {});
+        if (!headers.has('X-Client-Cookie')) {
+          headers.set('X-Client-Cookie', document.cookie);
+        }
+        init.headers = headers;
+      }
+
       return origFetch.call(this, input, init);
     };
   }
@@ -521,6 +539,12 @@
     };
 
     OriginalXHR.prototype.send = function (body?: any) {
+      if (typeof document !== 'undefined' && document.cookie) {
+        try {
+          this.setRequestHeader('X-Client-Cookie', document.cookie);
+        } catch (e) {}
+      }
+
       if (!body) {
         return originalSend.call(this, body);
       }
@@ -753,9 +777,9 @@
           }
         };
 
-        const targetWindow = typeof window !== 'undefined'
+        const targetWindow = realPortalWindow || (typeof window !== 'undefined'
           ? (window.parent !== window ? window.parent : window)
-          : null;
+          : null);
 
         if (targetWindow) {
           targetWindow.postMessage(
