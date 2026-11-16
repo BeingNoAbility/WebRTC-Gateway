@@ -25,19 +25,17 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Run Go Unit & Integration Tests
-        run: go test -v ./...
-
-      - name: Run Web & Routing Tests
-        run: |
-          node test/test_subdomain_logic.cjs
-          node test/node_id_preservation_test.cjs
-
       - name: Verify Web Frontend Build
         working-directory: ./web
         run: |
           npm ci
           npm run build
+
+      - name: Run Web & Routing Tests
+        run: npm --prefix web test
+
+      - name: Run Go Unit & Integration Tests
+        run: go test -v ./...
 
       - name: Build Agent & Server Binaries
         run: |
