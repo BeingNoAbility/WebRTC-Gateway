@@ -33,8 +33,15 @@ target: "http://127.0.0.1:8080"
 # file: "/path/to/archive.zip"
 # ------------------------------------------------------------------------------
 
-# Optional forward proxy for outgoing connections (e.g. socks5://127.0.0.1:1080, http://proxy:8080)
+# Optional forward proxy for outbound signaling connections (e.g. socks5://127.0.0.1:1080, http://proxy:8080)
 proxy: ""
+
+# Allowed outbound proxy domain patterns for /--p2p-proxy/ media and CDN relay
+# By default, only the target origin and its root domain subdomains are permitted.
+# List additional permitted wildcard domain suffixes (string or list format supported).
+# allowed_proxy_domains:
+#   - "*.hdslb.com"
+#   - "*.bilivideo.com"
 
 # Custom SNI server name for HTTPS targets (leave empty to infer from target host)
 sni: ""

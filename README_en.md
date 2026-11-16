@@ -179,6 +179,7 @@ The Agent supports both command-line flags and environment variables:
 | `-signal-secret` | `SIGNAL_SECRET` | `""` | Signaling cluster admission secret (Control Plane, shared with server, never exposed to visitors) |
 | `-access-secret` | `ACCESS_SECRET` | `""` | Visitor access password (Data Plane, leave empty for public access without password prompt) |
 | `-proxy` | `PROXY_URL` | `""` | Optional outbound proxy (`http://`, `https://`, `socks5://`) |
+| `-allowed-proxy-domains` | `ALLOWED_PROXY_DOMAINS` | `""` | Optional outbound proxy domain wildcard whitelist for `/--p2p-proxy/` (e.g. `*.hdslb.com,*.bilivideo.com`) |
 | `-sni` | `SNI` | `""` | Optional TLS SNI & Host header override (for direct Anycast IP dialing) |
 | `-insecure` | `INSECURE` | `false` | Skip TLS certificate verification for self-signed signaling servers |
 | `-turn-url` | `TURN_URL` | `""` | Optional TURN relay server URL (`turn:relay.domain.com:3478`, bypasses symmetric NAT) |

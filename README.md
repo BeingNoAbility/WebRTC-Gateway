@@ -180,6 +180,7 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-signal-secret` | `SIGNAL_SECRET` | `""` | 信令集群准入密钥（控制面，必须与信令端配置一致，防节点冒领，绝不透露给访客） |
 | `-access-secret` | `ACCESS_SECRET` | `""` | 访客访问口令（数据面，留空表示公开免密直连；配置后访客需输入口令或持有 HMAC 签名链接） |
 | `-proxy` | `PROXY_URL` | `""` | 可选的前置代理（支持 HTTP/HTTPS/SOCKS5，用于连接受限信令） |
+| `-allowed-proxy-domains` | `ALLOWED_PROXY_DOMAINS` | `""` | 可选的 `/--p2p-proxy/` 允许转发的外链域名通配符白名单（如 `*.hdslb.com,*.bilivideo.com`） |
 | `-sni` | `SNI` | `""` | 可选的 TLS SNI 与 Host 标头覆盖（用于绕过 DNS 污染直连 Cloudflare Anycast IP） |
 | `-insecure` | `INSECURE` | `false` | 连接自签名 TLS 信令服务器时跳过证书链校验 |
 | `-turn-url` | `TURN_URL` | `""` | 可选的 TURN 中继服务器地址（如 `turn:relay.domain.com:3478`，用于对称型 NAT 降级中继） |

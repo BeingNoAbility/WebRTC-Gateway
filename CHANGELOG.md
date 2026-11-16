@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.8.1] - 2026-11-17
+
+### Security
+- **Portal DOM XSS Elimination**:
+  - Enforced strict regex whitelist validation (`/^[a-zA-Z0-9._-]{1,64}$/`) across all node ID inputs (URL Hash, Query, Hostnames, Subdomains, Local/SessionStorage). Malformed node IDs safely fall back to default.
+  - Eliminated template string interpolation in settings and diagnostic modals, adopting DOM API property setting (`input.value = ...`) and comprehensive HTML entity escaping.
+- **Secret Leakage Chain Severed (PoLP Minimal Privilege)**:
+  - Completely removed `window.__P2P_SECRET__` injection into proxied HTML pages via Service Worker.
+  - Removed `?secret=` query parameter appending in virtualized URL resolutions (`ws_patch.ts`).
+  - Removed secret transmission in WebSocket `join` signaling messages and child iframe `postMessage`.
+- **Outbound Media & Proxy Relay Whitelist Defense (`/--p2p-proxy/`)**:
+  - Deprecated and removed fuzzy heuristic `isMedia` and `brandShort` substring matching in reverse HTTP and WebSocket proxies.
+  - Enforced default strict target host / root domain matching with an explicit `-allowed-proxy-domains` wildcard pattern whitelist flag and YAML config.
+  - Isolated signaling proxy from backend reverse proxy Transport.
+- **Signaling Server Anti-Brute-Force & Node Enumeration Hardening**:
+  - Implemented preemptive `IsLocked` sliding window circuit breaker on WebSocket signaling handshake, immediately rejecting blocked attacker IPs and clearing lockout upon successful auth.
+  - Removed unauthenticated `list_nodes` endpoint from Cloudflare Worker edge signaling.
+- **Unified Worker Single Source of Truth**:
+  - Removed redundant `web/worker.js` and consolidated `web/wrangler.toml` entrypoint to `edge/cloudflare-worker/worker.js`, ensuring authoritative client IP stamping across all edge deployments.
+
+### Fixed
+- **Agent Active Peer Concurrency Race Condition**:
+  - Encapsulated `len(a.activeConns)` and atomic updates to `activePeers` inside `connMu.Lock()` across session handling, in-place replacement, and teardown lifecycles.
+
+---
+
 ## [v1.8.0] - 2026-11-17
 
 ### Added
