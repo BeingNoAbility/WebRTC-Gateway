@@ -15,7 +15,7 @@ export class SignalingRoom extends DurableObject {
     this.agents = new Map();
     // agentNodeIds: WebSocket -> node_id (string)
     this.agentNodeIds = new Map();
-    // nodeSecrets: node_id (string) -> secret (string) (anti-hijack)
+    // nodeSecrets: node_id (string) -> registered secret (anti-hijack protection)
     this.nodeSecrets = new Map();
 
     // clients: WebSocket -> { sessionId: string, targetNodeId: string }
@@ -52,11 +52,21 @@ export class SignalingRoom extends DurableObject {
             const secret = msg.secret || '';
             if (!nodeId) return;
 
-            // Anti-hijack protection: check if node is already bound to a different secret
+            // Anti-hijack protection: verify node secret if already bound
             const boundSecret = this.nodeSecrets.get(nodeId);
-            if (boundSecret && secret !== boundSecret) {
-              ws.send(JSON.stringify({ type: 'error', error: `unauthorized: node_id "${nodeId}" is protected by a different secret` }));
+            if (boundSecret && boundSecret !== secret) {
+              try {
+                ws.send(JSON.stringify({
+                  type: 'error',
+                  error: `Unauthorized: node_id "${nodeId}" is protected by a different secret`,
+                }));
+                ws.close(4003, 'Unauthorized');
+              } catch {}
               return;
+            }
+
+            if (secret) {
+              this.nodeSecrets.set(nodeId, secret);
             }
 
             // If an old agent connection existed for this nodeId, close it cleanly
@@ -71,13 +81,9 @@ export class SignalingRoom extends DurableObject {
 
             this.agents.set(nodeId, ws);
             this.agentNodeIds.set(ws, nodeId);
-            if (secret) {
-              this.nodeSecrets.set(nodeId, secret);
-            }
             ws.send(JSON.stringify({ type: 'registered', node_id: nodeId }));
 
             // Notify all clients waiting for this node
-            const hasSecret = !!this.nodeSecrets.get(nodeId);
             for (const [clWs, clientInfo] of this.clients.entries()) {
               if (clientInfo.targetNodeId === nodeId) {
                 try {
@@ -87,7 +93,7 @@ export class SignalingRoom extends DurableObject {
                       node_id: nodeId,
                       session_id: clientInfo.sessionId,
                       status: 'online',
-                      requires_secret: hasSecret,
+                      requires_secret: !!secret,
                     })
                   );
                 } catch {}
@@ -103,14 +109,14 @@ export class SignalingRoom extends DurableObject {
             this.clientBySession.set(sessionId, ws);
 
             const isOnline = this.agents.has(targetNodeId);
-            const hasSecret = !!this.nodeSecrets.get(targetNodeId);
+            const requiresSecret = !!this.nodeSecrets.get(targetNodeId);
             ws.send(
               JSON.stringify({
                 type: 'peer_status',
                 node_id: targetNodeId,
                 session_id: sessionId,
                 status: isOnline ? 'online' : 'offline',
-                requires_secret: hasSecret,
+                requires_secret: requiresSecret,
               })
             );
             break;

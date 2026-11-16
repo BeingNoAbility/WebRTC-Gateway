@@ -133,6 +133,7 @@ jobs:
         with:
           tag_name: ${{ steps.vars.outputs.tag }}
           name: ${{ steps.vars.outputs.tag }} - Zero-Client WebRTC P2P Gateway
+          body_path: RELEASE_NOTES.md
           files: release_assets/*
           generate_release_notes: true
           draft: false
