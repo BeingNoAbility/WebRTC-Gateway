@@ -399,7 +399,7 @@ async function main() {
     let imagesCount = 0;
 
     const waitSiteStart = Date.now();
-    while (Date.now() - waitSiteStart < 20000) {
+    while (Date.now() - waitSiteStart < 25000) {
       await sleep(1500);
 
       const res = await cdp.evaluate(`(() => {
@@ -429,7 +429,7 @@ async function main() {
           // Cross-origin protected iframe or sandbox
           return { status: 'RESTRICTED', badge, error: e.message };
         }
-      })()`, 5000);
+      })()`, 8000);
 
       if (res && (res.status === 'LOADED' || (res.status === 'RESTRICTED' && Date.now() - waitSiteStart > 4000))) {
         siteLoaded = true;

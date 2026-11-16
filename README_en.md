@@ -58,6 +58,9 @@ This project is built upon **WebRTC RTCDataChannel (SCTP) + In-Browser Service W
 - ⚡ **P2P Direct Line Speed**: Powered by WebRTC ICE/STUN NAT traversal. Enjoy full upstream speeds of home gigabit broadband (verified LAN RTT of 1~3ms; cross-ISP P2P utilizes full broadband uplink without third-party throttling).
 - 🔄 **WebRTC Standard ICE Restart (Mobile Roaming Self-Healing)**: When devices switch networks (e.g. Wi-Fi to 5G cellular, AP roaming, or elevator signal restoration), the client automatically reconnects the signaling socket and negotiates an in-place ICE Restart. Streaming media, WebSockets, and page sessions continue without reloading.
 - 🔗 **Stateless HMAC-SHA256 Time-Limited Share Links**: Pure mathematical zero-database authorization. Generate temporary shareable links (`#nodeId?exp=xxx&sign=yyy`) with 1-click in the Web UI or CLI. Mathematically expires when elapsed without leaking master credentials.
+- 📊 **WebRTC HUD Real-time Diagnostic Dashboard**: Floating status pill dynamically displays `⚡ P2P Direct` vs `🛡️ TURN Relay` connection status. 1-click opens an interactive diagnostics HUD displaying real-time RTT, downlink/uplink transfer rates, packet loss, and candidate IPs with on-demand ICE Restart testing.
+- 🛡️ **Production Capacity Governance & Anti-DoS**: Agent features a semaphore-guarded capacity limit (`-max-streams`, default 512) that gracefully returns 503 to protect NAS memory; signaling server enforces per-IP concurrent connection quotas (`-max-ip-conns`), message rate limits, and brute-force lockouts.
+- 📈 **Prometheus Metrics Out-of-the-Box**: Signaling server serves `/metrics`; Agent strictly adheres to the pure outbound daemon principle and supports optional opt-in `-metrics-addr` to export peer counts, active streams, traffic bytes, and backpressure rejections.
 - 🔒 **End-to-End Native Encryption**: Transport layer enforces DTLS-SRTP asymmetric negotiation and strong cryptography. The signaling broker only routes metadata; relay nodes cannot decrypt or inspect application traffic.
 - 🌐 **Multi-Node & Subdomain Awareness**: Run multiple machines and services simultaneously. Route seamlessly via `<nodeId>.p2p.domain.com`, `#nodeId`, or interactive settings modal.
 - 🧰 **Transparent Web Protocol Stack Virtualization**:
@@ -171,6 +174,8 @@ The Agent supports both command-line flags and environment variables:
 | `-turn-user` | `TURN_USER` | `""` | Optional TURN relay authentication username |
 | `-turn-pass` | `TURN_PASS` | `""` | Optional TURN relay authentication credential / password |
 | `-stun-servers` | `STUN_SERVERS` | `""` | Optional custom comma-separated STUN server list |
+| `-max-streams` | `MAX_STREAMS` | `512` | Maximum concurrent multiplexed streams (returns 503 upon limit to protect memory) |
+| `-metrics-addr` | `METRICS_ADDR` | `""` | Optional Prometheus `/metrics` exporter address (e.g. `:9090`, default disabled) |
 | `-sign-link` | - | `0` | Generate a temporary stateless share link with expiration (e.g. `1h`, `24h`, `7d`) and exit |
 | `-portal-url` | - | `https://your-portal-domain.com` | Base URL of Web Portal used for `-sign-link` generation |
 
@@ -186,6 +191,8 @@ The Agent supports both command-line flags and environment variables:
 | `-tls-auto` | `TLS_AUTO` | `false` | Automatically generates in-memory ECDSA SAN certificates for LAN IPs |
 | `-secret` | `SECRET` | `""` | Optional global master secret token to restrict Agent registrations |
 | `-static` | `STATIC_DIR` | `./web/dist` | Custom static web directory (defaults to embedded DistFS) |
+| `-max-ip-conns` | `MAX_IP_CONNS` | `64` | Maximum concurrent WebSocket connections per IP address |
+| `-metrics-addr` | `METRICS_ADDR` | `""` | Optional dedicated Prometheus `/metrics` address (default served on `/metrics`) |
 
 ---
 

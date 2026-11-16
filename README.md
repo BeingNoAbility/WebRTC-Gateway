@@ -57,6 +57,9 @@
 - ⚡ **P2P 点对点极速直连**：基于标准 WebRTC ICE/STUN 打洞，家庭千兆宽带能跑多快就跑多快（实测内网/局域网 RTT 1~3ms，跨运营商直连跑满宽带上行），完全脱离云中继带宽限制。
 - 🔄 **WebRTC 标准 ICE Restart（移动漫游自愈）**：在手机或笔记本网络突变（Wi-Fi 切换 5G 蜂窝网络、AP 漫游、弱网恢复）时，自动触发信令保活与 in-place ICE Restart 双阶段重协商，无需刷新浏览器页面，正在播放的视频与底层长连接不中断。
 - 🔗 **HMAC-SHA256 无状态时效安全分享**：纯数学自包含签名，零中心化数据库依赖。支持在 Web 控制台或 CLI 中一键生成限时免密分享链接（`#nodeId?exp=xxx&sign=yyy`），到期自动失效，免向访客透露主口令。
+- 📊 **前端 WebRTC HUD 实时诊断看板**：悬浮药丸实时显示 `⚡ P2P Direct` 直连或 `🛡️ TURN Relay` 中继状态，一键展开高科技诊断 HUD，透视往返延迟 (RTT)、丢包率、瞬时上下行流速与双方候选 IP，支持一键现场触发 ICE Restart 测试。
+- 🛡️ **生产容量治理与防 DoS 限流**：Agent 端支持 `-max-streams` 并发流信号量容量防守（默认 512），超出时平滑回复 503 保护 NAS 内存；信令服务端支持单 IP 并发连接限制 (`-max-ip-conns`)、请求速率频控与防暴力破解锁定。
+- 📈 **Prometheus 监控开箱支持**：服务端开箱提供 `/metrics`；Agent 严格遵循纯出站安全原则，支持显式 opt-in `-metrics-addr` 导出活跃连接、流数、吞吐字节与拒绝量。
 - 🔒 **端到端原生加密**：传输层采用 WebRTC 强制的 DTLS-SRTP 军工级非对称协商与强加密，信令服务仅撮合网络拓扑，中继节点不可见、无法解密任何业务数据。
 - 🌐 **多节点与子域名智能感知**：支持多台机器/多个服务并发在线，通过 `<nodeId>.p2p.domain.com`、`#nodeId` 或前端可视化设置弹窗秒级切换。
 - 🧰 **全类型 Web 协议透明透传**：
@@ -171,6 +174,8 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-turn-user` | `TURN_USER` | `""` | 可选的 TURN 中继认证用户名 |
 | `-turn-pass` | `TURN_PASS` | `""` | 可选的 TURN 中继认证密码 |
 | `-stun-servers` | `STUN_SERVERS` | `""` | 可选的自定义 STUN 服务器列表（英文逗号分隔） |
+| `-max-streams` | `MAX_STREAMS` | `512` | 最大并发逻辑流上限，超出时平滑回复 503 保护宿主机内存 |
+| `-metrics-addr` | `METRICS_ADDR` | `""` | 可选的 Prometheus 监控导出地址（如 `:9090`，默认不开放任何端口，保持纯出站安全） |
 | `-sign-link` | - | `0` | 生成指定有效期的无状态安全分享链接（如 `1h`、`24h`、`7d`）并退出 |
 | `-portal-url` | - | `https://your-portal-domain.com` | 为 `-sign-link` 指定 Web 门户的基准访问地址 |
 
@@ -184,6 +189,8 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-tls-auto` | `TLS_AUTO` | `false` | 一键内存自动签发包含当前局域网所有真实 IP 的 ECDSA SAN 证书 |
 | `-secret` | `SECRET` | `""` | 可选的服务端全局预共享密钥，仅允许匹配口令的 Agent 注册 |
 | `-static` | `STATIC_DIR` | `./web/dist` | 静态网页资产目录（默认优先使用二进制内置嵌入的 DistFS） |
+| `-max-ip-conns` | `MAX_IP_CONNS` | `64` | 单个 IP 允许的最大并发 WebSocket 握手连接数（防 DoS 耗尽套接字） |
+| `-metrics-addr` | `METRICS_ADDR` | `""` | 可选的专用 Prometheus 监控导出地址（如 `:9090`，默认直接复用主服务 `/metrics`） |
 
 ---
 
@@ -471,6 +478,8 @@ docker run --rm -e SECRET=your_master_secret \
 | `TLS_CERT` | 空 | `-tls-cert` | 容器内的 SSL/TLS 证书文件 PEM 路径（需挂载外部证书） |
 | `TLS_KEY` | 空 | `-tls-key` | 容器内的 SSL/TLS 私钥文件 PEM 路径 |
 | `STATIC_DIR` | 空 (内置) | `-static` | 自定义前端静态资源文件目录路径（若挂载外部 `dist`） |
+| `MAX_IP_CONNS` | `64` | `-max-ip-conns` | 单 IP 最大并发连接数限制（防 DoS 耗尽套接字） |
+| `METRICS_ADDR` | 空 | `-metrics-addr` | 可选的专用 Prometheus 监控导出地址（默认直接通过主端口 `/metrics` 导出） |
 
 ##### Agent 客户端环境变量 (`webrtc-p2p-agent`)
 | 环境变量 | 默认值 | 对应命令行参数 | 说明 |
@@ -486,6 +495,8 @@ docker run --rm -e SECRET=your_master_secret \
 | `TURN_USER` | 空 | `-turn-user` | 可选的 TURN 认证用户名 |
 | `TURN_PASS` | 空 | `-turn-pass` | 可选的 TURN 认证密码 |
 | `STUN_SERVERS` | 空 | `-stun-servers` | 可选的自定义 STUN 服务器列表（逗号分隔） |
+| `MAX_STREAMS` | `512` | `-max-streams` | 最大并发逻辑流上限（超出时平滑返回 503 保护 NAS 内存） |
+| `METRICS_ADDR` | 空 | `-metrics-addr` | 可选的 Prometheus 监控导出地址（默认关闭，保持纯出站安全） |
 
 ---
 

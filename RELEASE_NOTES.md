@@ -1,23 +1,27 @@
 # WebRTC Gateway Release Notes
 
-## [v1.3.0] - 2026-11-16
+## [v1.4.0] - 2026-11-16
 
-### 🔄 WebRTC 标准 ICE Restart 移动漫游自愈 (Mobile Roaming Self-Healing)
-- **两阶段漫游韧性流水线**：解决手机、笔记本在移动过程中从 Wi-Fi 切换为 5G 蜂窝网络、AP 漫游或电梯弱网恢复时底层 IP 突变导致的断连。
-- **自动信令闪连与原地重协商**：底层套接字断开时快速重建信令 WebSocket，并在现有 `RTCPeerConnection` 上以 `iceRestart: true` 发起重协商，无需销毁重建连接。
-- **Agent 5 秒平滑宽限期 (Grace Window)**：在网络状态恶化或中断时启动 5 秒自愈窗口，若收到 ICE Restart Offer 则取消析构并原地生成 Answer，应用层 DataChannel、P2PMux 多路复用器与内网会话 100% 保持，正在播放的视频或后台操作完全无需刷新、不中断。
+### 📊 WebRTC HUD 诊断看板与实时可观测性 (WebRTC Diagnostics HUD & Observability)
+- **浮动状态胶囊升级**：页面右上角状态胶囊实时呈现传输链路模式（`⚡ P2P 直连` 或 `🛡️ TURN 中继`）、毫秒级往返延迟 (RTT) 以及实时下行流速（`↓ XX KB/s`），点击胶囊即可呼出诊断面板。
+- **WebRTC 实时诊断看板 (HUD Modal)**：前端基于 `pc.getStats()` 深度解析 WebRTC 传输层指标，实时呈现：
+  - 本地与远端候选者对（Local/Remote IP、端口、协议 UDP/TCP、类型 host/srflx/relay）；
+  - 动态往返时延 (RTT)、下行与上行实时速率 (KB/s)、累计传输流量 (MB) 与丢包率；
+  - 提供 “🔄 测试 ICE Restart (网络漫游自愈)” 实时交互测试按钮，可视化验证无感重协商与会话韧性。
+- **Prometheus `/metrics` 标准指标导出**：
+  - **信令服务端 (`server`)**：原生暴露 `webrtc_gateway_registered_nodes`、`webrtc_gateway_active_clients`、`webrtc_gateway_signaling_messages_total` 与 `webrtc_gateway_ratelimit_rejected_total`，支持通过 `-metrics-addr` / `METRICS_ADDR` 配置独立监听端口。
+  - **穿透客户端 (`agent`)**：**严格默认零监听**（Pure Outbound Daemon 守护模式，不开放任何入站端口，避免局域网暴露与 NAS 端口冲突）。显式配置 `-metrics-addr` / `METRICS_ADDR` 时安全暴露 `webrtc_gateway_active_peers`、`webrtc_gateway_active_streams`、`webrtc_gateway_max_streams`、`webrtc_gateway_traffic_bytes_total{direction="rx|tx"}` 及 `webrtc_gateway_stream_rejections_total`。
 
-### 🔐 HMAC-SHA256 无状态时效安全分享 (Stateless Time-Limited Sharing)
-- **数学级无状态验签**：纯数学自包含签名方案（`#nodeId?exp=timestamp&sign=hex_hmac`），无需中心化数据库、无需 Redis、无需服务器记录撤销表。
-- **防止主口令泄露**：向同事或朋友分享内网服务时，无需透露主口令 `-secret`；签名携带过期时间戳，Agent 本地以微秒级时间复杂度比对验签，到期后数学上天然失效。
-- **Web 控制台 1 键生成**：在前端设置弹窗中提供 1 小时、6 小时、24 小时、7 天、30 天等多种时效选项，基于现代浏览器原生 `crypto.subtle` 计算 HMAC-SHA256，生成即时分享链接并支持一键复制。
-- **CLI 极速生成**：Agent CLI 新增 `-sign-link <duration>`（如 `24h`、`7d`）与 `-portal-url <url>` 参数，命令行直接输出可分享链接。
-- **路由同步签名保留**：优化 iframe 内部 SPA 路由同步引擎，在子页面跳转同步至外层 Hash 时完整保留 `exp` 与 `sign` 参数，防止页面跳转导致签名丢失。
+### 🛡️ 生产容量过载保护与信令防 DoS 治理 (Capacity Governance & Anti-DoS)
+- **Agent 并发流容量治理**：引入 `-max-streams` / `MAX_STREAMS`（默认 512）并发流上限。在突发大并发或爬虫扫盘导致过载时，优雅返回带有 `Retry-After: 2` 的 HTTP 503 响应，保护宿主机与家庭 NAS 内存及文件描述符不被耗尽。
+- **信令端 IP 并发连接与频次限制**：信令服务器内置 `IPRateLimiter`，默认单 IP 最大允许 64 个并发连接（`-max-ip-conns` / `MAX_IP_CONNS`），滑动窗口限制单连接 120 消息/10秒，防止恶意滥用与死循环洪水攻击。
+- **暴力破解锁定防御**：单 IP 节点认证口令错误超过 10 次/分钟时自动触发临时封锁，拦截针对 `-secret` 的字典与彩虹表暴力破解。
+- **Cloudflare Worker 边缘防滥用同步**：同步更新 `web/worker.js` 与 `edge/cloudflare-worker/worker.js`，Durable Object 支持单 IP 并发连接限制与认证失败封锁。
 
 ---
 
 ### 📦 资产下载与快速验证
 - 预编译二进制跨平台支持：Linux (amd64 / arm64)、Windows (amd64 / arm64)、macOS Darwin (amd64 / Apple Silicon arm64)。
 - 多架构 Docker 镜像已同步发布至 GitHub Container Registry (`ghcr.io`)：
-  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.3.0` (`latest`)
-  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.3.0` (`latest`)
+  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.4.0` (`latest`)
+  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.4.0` (`latest`)

@@ -21,6 +21,23 @@ async function computeHMACSHA256Hex(keyStr: string, message: string): Promise<st
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+interface WebRTCHUDInfo {
+  transportType: 'direct' | 'relay' | 'unknown';
+  localType: string;
+  remoteType: string;
+  localAddress: string;
+  remoteAddress: string;
+  protocol: string;
+  rttMs: number;
+  rxRateKB: number;
+  txRateKB: number;
+  totalRxMB: number;
+  totalTxMB: number;
+  packetsLost: number;
+  iceState: string;
+  connState: string;
+}
+
 class PortalApp {
   private peerId: string;
   private signalUrl: string;
@@ -33,6 +50,28 @@ class PortalApp {
   private initialSubpath: string = '/';
   private ws: WebSocket | null = null;
   private pc: RTCPeerConnection | null = null;
+
+  // WebRTC HUD Diagnostics & Real-time Metrics
+  private hudStatsTimer: any = null;
+  private lastStatsTime: number = 0;
+  private lastBytesReceived: number = 0;
+  private lastBytesSent: number = 0;
+  private hudInfo: WebRTCHUDInfo = {
+    transportType: 'unknown',
+    localType: '',
+    remoteType: '',
+    localAddress: '',
+    remoteAddress: '',
+    protocol: 'UDP',
+    rttMs: 0,
+    rxRateKB: 0,
+    txRateKB: 0,
+    totalRxMB: 0,
+    totalTxMB: 0,
+    packetsLost: 0,
+    iceState: 'disconnected',
+    connState: 'new',
+  };
   private dc: RTCDataChannel | null = null;
   private mux: P2PMux | null = null;
   private pingInterval: any = null;
@@ -833,7 +872,305 @@ class PortalApp {
     });
   }
 
+  private startHUDStatsMonitor() {
+    if (this.hudStatsTimer) return;
+    this.hudStatsTimer = setInterval(async () => {
+      await this.updateWebRTCStats();
+    }, 1000);
+  }
+
+  private async updateWebRTCStats() {
+    if (!this.pc) return;
+    try {
+      const stats = await this.pc.getStats();
+      let selectedPair: any = null;
+      const candidates = new Map<string, any>();
+
+      stats.forEach((report: any) => {
+        if (report.type === 'candidate-pair' && (report.selected || (report.nominated && report.state === 'succeeded'))) {
+          selectedPair = report;
+        }
+        if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+          candidates.set(report.id, report);
+        }
+      });
+
+      if (!selectedPair) {
+        stats.forEach((report: any) => {
+          if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+            selectedPair = report;
+          }
+        });
+      }
+
+      const now = performance.now();
+      const timeDelta = this.lastStatsTime > 0 ? (now - this.lastStatsTime) / 1000 : 1;
+
+      let rxRate = 0;
+      let txRate = 0;
+      let totalRx = 0;
+      let totalTx = 0;
+      let rtt = 0;
+
+      if (selectedPair) {
+        totalRx = selectedPair.bytesReceived || 0;
+        totalTx = selectedPair.bytesSent || 0;
+        if (this.lastStatsTime > 0 && timeDelta > 0) {
+          rxRate = Math.max(0, (totalRx - this.lastBytesReceived) / 1024 / timeDelta);
+          txRate = Math.max(0, (totalTx - this.lastBytesSent) / 1024 / timeDelta);
+        }
+        this.lastBytesReceived = totalRx;
+        this.lastBytesSent = totalTx;
+        this.lastStatsTime = now;
+
+        if (typeof selectedPair.currentRoundTripTime === 'number') {
+          rtt = Math.round(selectedPair.currentRoundTripTime * 1000);
+        } else if (typeof selectedPair.totalRoundTripTime === 'number' && selectedPair.responsesReceived > 0) {
+          rtt = Math.round((selectedPair.totalRoundTripTime / selectedPair.responsesReceived) * 1000);
+        }
+
+        const localCand = candidates.get(selectedPair.localCandidateId);
+        const remoteCand = candidates.get(selectedPair.remoteCandidateId);
+
+        const localType = (localCand?.candidateType || '').toLowerCase();
+        const remoteType = (remoteCand?.candidateType || '').toLowerCase();
+        const isRelay = localType === 'relay' || remoteType === 'relay';
+
+        this.hudInfo = {
+          transportType: isRelay ? 'relay' : 'direct',
+          localType: localType || 'host',
+          remoteType: remoteType || 'srflx',
+          localAddress: localCand ? `${localCand.address || localCand.ip || '?'}:${localCand.port || '?'}` : 'Unknown',
+          remoteAddress: remoteCand ? `${remoteCand.address || remoteCand.ip || '?'}:${remoteCand.port || '?'}` : 'Unknown',
+          protocol: (localCand?.protocol || 'udp').toUpperCase(),
+          rttMs: rtt || (this.rttVal ? parseInt(this.rttVal.textContent || '0') : 0),
+          rxRateKB: parseFloat(rxRate.toFixed(1)),
+          txRateKB: parseFloat(txRate.toFixed(1)),
+          totalRxMB: parseFloat((totalRx / (1024 * 1024)).toFixed(2)),
+          totalTxMB: parseFloat((totalTx / (1024 * 1024)).toFixed(2)),
+          packetsLost: selectedPair.packetsLost || 0,
+          iceState: this.pc.iceConnectionState || 'connected',
+          connState: this.pc.connectionState || 'connected',
+        };
+      } else {
+        this.hudInfo.iceState = this.pc.iceConnectionState;
+        this.hudInfo.connState = this.pc.connectionState;
+        if (this.rttVal) {
+          const parsed = parseInt(this.rttVal.textContent || '0');
+          if (parsed > 0) this.hudInfo.rttMs = parsed;
+        }
+      }
+
+      this.updateHUDUI();
+    } catch {
+      // Ignore poll error during ICE reconnection
+    }
+  }
+
+  private openHUDModal() {
+    const modal = document.getElementById('p2pHudModal');
+    if (modal) {
+      modal.style.display = 'flex';
+      this.updateHUDUI();
+    }
+  }
+
+  private closeHUDModal() {
+    const modal = document.getElementById('p2pHudModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  private createHUDModal() {
+    if (document.getElementById('p2pHudModal')) return;
+    const modal = document.createElement('div');
+    modal.id = 'p2pHudModal';
+    modal.style.cssText = `
+      position: fixed;
+      top: 0; left: 0; width: 100vw; height: 100vh;
+      background: rgba(0,0,0,0.75);
+      backdrop-filter: blur(8px);
+      display: none; justify-content: center; align-items: center;
+      z-index: 20000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    `;
+    modal.innerHTML = `
+      <div style="background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 24px; max-width: 520px; width: 92%; color: #c9d1d9; box-shadow: 0 20px 50px rgba(0,0,0,0.7);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 18px;">⚡</span>
+            <h3 style="font-size: 16px; color: #f0f6fc; font-weight: 600; margin: 0;">WebRTC Connection Diagnostic HUD</h3>
+          </div>
+          <button id="btnCloseHud" style="background: none; border: none; color: #8b949e; font-size: 20px; cursor: pointer; padding: 0 4px;">✕</button>
+        </div>
+
+        <!-- Section 1: Route & Mode -->
+        <div style="background: #0d1117; border: 1px solid #21262d; border-radius: 10px; padding: 14px; margin-bottom: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <span style="font-size: 12px; color: #8b949e; text-transform: uppercase; font-weight: 600;">传输连接模式 (Transport Mode)</span>
+            <span id="hudBadge" style="display: inline-flex; align-items: center; gap: 4px; font-weight: 700; padding: 3px 10px; border-radius: 12px; font-size: 12px; background: #238636; color: #ffffff;">⚡ P2P Direct 直连</span>
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 12px;">
+            <div>
+              <div style="color: #8b949e; font-size: 11px;">本地节点候选 (Local)</div>
+              <div id="hudLocalCand" style="color: #f0f6fc; font-family: monospace; font-size: 11px; margin-top: 2px;">--</div>
+            </div>
+            <div>
+              <div style="color: #8b949e; font-size: 11px;">远端穿透目标 (Remote)</div>
+              <div id="hudRemoteCand" style="color: #f0f6fc; font-family: monospace; font-size: 11px; margin-top: 2px;">--</div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 16px; margin-top: 10px; padding-top: 8px; border-top: 1px solid #21262d; font-size: 11px; color: #8b949e;">
+            <span>协议: <strong id="hudProto" style="color: #58a6ff;">UDP</strong></span>
+            <span>ICE 状态: <strong id="hudIceState" style="color: #3fb950;">connected</strong></span>
+            <span>节点: <strong id="hudNodeId" style="color: #f0f6fc;">${this.peerId}</strong></span>
+          </div>
+        </div>
+
+        <!-- Section 2: Realtime Metrics Cards -->
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px;">
+          <div style="background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 12px;">
+            <div style="font-size: 11px; color: #8b949e;">往返网络延迟 (RTT)</div>
+            <div id="hudRtt" style="font-size: 20px; font-weight: 700; color: #58a6ff; font-family: monospace; margin-top: 4px;">-- ms</div>
+          </div>
+          <div style="background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 12px;">
+            <div style="font-size: 11px; color: #8b949e;">瞬时下载速率 (Downlink)</div>
+            <div id="hudRxRate" style="font-size: 20px; font-weight: 700; color: #3fb950; font-family: monospace; margin-top: 4px;">0 KB/s</div>
+            <div id="hudTotalRx" style="font-size: 10px; color: #8b949e; margin-top: 2px;">累计: 0 MB</div>
+          </div>
+          <div style="background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 12px;">
+            <div style="font-size: 11px; color: #8b949e;">瞬时上传速率 (Uplink)</div>
+            <div id="hudTxRate" style="font-size: 20px; font-weight: 700; color: #d29922; font-family: monospace; margin-top: 4px;">0 KB/s</div>
+            <div id="hudTotalTx" style="font-size: 10px; color: #8b949e; margin-top: 2px;">累计: 0 MB</div>
+          </div>
+          <div style="background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 12px;">
+            <div style="font-size: 11px; color: #8b949e;">丢包统计 (Packet Loss)</div>
+            <div id="hudPacketsLost" style="font-size: 20px; font-weight: 700; color: #f0f6fc; font-family: monospace; margin-top: 4px;">0 pkts</div>
+          </div>
+        </div>
+
+        <!-- Section 3: Actions -->
+        <div style="display: flex; gap: 10px;">
+          <button id="btnHudIceRestart" style="flex: 1; padding: 10px 14px; background: #21262d; border: 1px solid #30363d; color: #58a6ff; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s;">🔄 测试 ICE Restart (切网自愈)</button>
+          <button id="btnHudOpenSettings" style="padding: 10px 14px; background: #238636; border: none; color: #ffffff; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;">⚙ 连接设置</button>
+        </div>
+        <div id="hudActionFeedback" style="font-size: 11px; color: #3fb950; margin-top: 8px; text-align: center; display: none;"></div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    document.getElementById('btnCloseHud')?.addEventListener('click', () => this.closeHUDModal());
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) this.closeHUDModal();
+    });
+
+    document.getElementById('btnHudIceRestart')?.addEventListener('click', async () => {
+      const fb = document.getElementById('hudActionFeedback');
+      if (fb) {
+        fb.style.display = 'block';
+        fb.style.color = '#58a6ff';
+        fb.textContent = '🔄 正在触发 WebRTC 原地 ICE Restart 重协商...';
+      }
+      try {
+        await this.triggerIceRestart();
+        if (fb) {
+          fb.style.color = '#3fb950';
+          fb.textContent = '✅ ICE Restart 重协商成功，数据通道与会话无感保持！';
+          setTimeout(() => { if (fb) fb.style.display = 'none'; }, 4000);
+        }
+      } catch (err: any) {
+        if (fb) {
+          fb.style.color = '#f85149';
+          fb.textContent = `❌ ICE Restart 失败: ${err?.message || err}`;
+        }
+      }
+    });
+
+    document.getElementById('btnHudOpenSettings')?.addEventListener('click', () => {
+      this.closeHUDModal();
+      this.openSettingsModal();
+    });
+  }
+
+  private updateHUDUI() {
+    const isRelay = this.hudInfo.transportType === 'relay';
+
+    // Update Floating Pill
+    const pillBadge = document.getElementById('pillModeBadge');
+    if (pillBadge) {
+      if (isRelay) {
+        pillBadge.textContent = '🛡️ TURN';
+        pillBadge.style.background = '#d29922';
+      } else {
+        pillBadge.textContent = '⚡ P2P';
+        pillBadge.style.background = '#238636';
+      }
+    }
+
+    const pillNode = document.getElementById('pillNode');
+    if (pillNode) pillNode.textContent = `P2P: ${this.peerId}`;
+
+    const pillRtt = document.getElementById('pillRtt');
+    if (pillRtt) {
+      pillRtt.textContent = `${this.hudInfo.rttMs || '--'} ms`;
+    }
+
+    const pillSpeed = document.getElementById('pillSpeed');
+    if (pillSpeed) {
+      pillSpeed.textContent = `↓ ${this.hudInfo.rxRateKB} KB/s`;
+    }
+
+    // Update HUD Modal if open
+    const hudBadge = document.getElementById('hudBadge');
+    if (hudBadge) {
+      if (isRelay) {
+        hudBadge.textContent = '🛡️ TURN RELAY (加密中继)';
+        hudBadge.style.background = '#d29922';
+      } else {
+        hudBadge.textContent = '⚡ P2P DIRECT (打洞直连)';
+        hudBadge.style.background = '#238636';
+      }
+    }
+
+    const hudLocalCand = document.getElementById('hudLocalCand');
+    if (hudLocalCand) hudLocalCand.textContent = `${this.hudInfo.localType} (${this.hudInfo.localAddress})`;
+
+    const hudRemoteCand = document.getElementById('hudRemoteCand');
+    if (hudRemoteCand) hudRemoteCand.textContent = `${this.hudInfo.remoteType} (${this.hudInfo.remoteAddress})`;
+
+    const hudProto = document.getElementById('hudProto');
+    if (hudProto) hudProto.textContent = this.hudInfo.protocol;
+
+    const hudIceState = document.getElementById('hudIceState');
+    if (hudIceState) hudIceState.textContent = this.hudInfo.iceState;
+
+    const hudNodeId = document.getElementById('hudNodeId');
+    if (hudNodeId) hudNodeId.textContent = this.peerId;
+
+    const hudRtt = document.getElementById('hudRtt');
+    if (hudRtt) hudRtt.textContent = `${this.hudInfo.rttMs || '--'} ms`;
+
+    const hudRxRate = document.getElementById('hudRxRate');
+    if (hudRxRate) hudRxRate.textContent = `${this.hudInfo.rxRateKB} KB/s`;
+
+    const hudTotalRx = document.getElementById('hudTotalRx');
+    if (hudTotalRx) hudTotalRx.textContent = `累计: ${this.hudInfo.totalRxMB} MB`;
+
+    const hudTxRate = document.getElementById('hudTxRate');
+    if (hudTxRate) hudTxRate.textContent = `${this.hudInfo.txRateKB} KB/s`;
+
+    const hudTotalTx = document.getElementById('hudTotalTx');
+    if (hudTotalTx) hudTotalTx.textContent = `累计: ${this.hudInfo.totalTxMB} MB`;
+
+    const hudPacketsLost = document.getElementById('hudPacketsLost');
+    if (hudPacketsLost) hudPacketsLost.textContent = `${this.hudInfo.packetsLost} pkts`;
+  }
+
   private createFloatingPill() {
+    this.startHUDStatsMonitor();
+    this.createHUDModal();
+    this.createSettingsModal();
+
     if (document.getElementById('p2pPill')) {
       const pillNode = document.getElementById('pillNode');
       if (pillNode) pillNode.textContent = `P2P: ${this.peerId}`;
@@ -846,45 +1183,41 @@ class PortalApp {
       position: fixed;
       bottom: 16px;
       right: 16px;
-      background: rgba(22, 27, 34, 0.92);
-      backdrop-filter: blur(8px);
+      background: rgba(22, 27, 34, 0.94);
+      backdrop-filter: blur(10px);
       border: 1px solid #30363d;
       color: #c9d1d9;
-      padding: 7px 14px;
+      padding: 6px 14px;
       border-radius: 20px;
       font-size: 12px;
-      font-family: monospace;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
       z-index: 10000;
-      box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
       display: flex;
       align-items: center;
       gap: 8px;
       user-select: none;
+      transition: all 0.2s ease;
+      cursor: pointer;
     `;
     pill.innerHTML = `
-      <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#3fb950;"></span>
-      <span id="pillNode" style="cursor:pointer;" title="Click to open settings">P2P: ${this.peerId}</span>
-      <span id="pillRtt" style="color:#58a6ff;">-- ms</span>
-      <span id="pillGear" style="cursor:pointer; opacity:0.75; font-size:13px;" title="Connection Settings">⚙</span>
+      <span id="pillModeBadge" style="display:inline-flex; align-items:center; gap:3px; font-weight:700; padding:2px 7px; border-radius:10px; font-size:11px; background:#238636; color:#ffffff; letter-spacing:0.5px;">⚡ P2P</span>
+      <span id="pillNode" style="font-weight:500;" title="Click to open WebRTC HUD">P2P: ${this.peerId}</span>
+      <span id="pillRtt" style="color:#58a6ff; font-family:monospace;">-- ms</span>
+      <span id="pillSpeed" style="color:#8b949e; font-size:11px; font-family:monospace;">↓ 0 KB/s</span>
+      <span id="pillGear" style="cursor:pointer; opacity:0.75; font-size:13px; margin-left:2px;" title="Connection Settings">⚙</span>
     `;
 
-    pill.addEventListener('click', () => {
-      this.openSettingsModal();
+    pill.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      if (target && target.id === 'pillGear') {
+        this.openSettingsModal();
+      } else {
+        this.openHUDModal();
+      }
     });
 
     document.body.appendChild(pill);
-
-    // Update pill RTT and Node ID
-    setInterval(() => {
-      const pillRtt = document.getElementById('pillRtt');
-      if (pillRtt && this.rttVal) {
-        pillRtt.textContent = this.rttVal.textContent;
-      }
-      const pillNode = document.getElementById('pillNode');
-      if (pillNode) {
-        pillNode.textContent = `P2P: ${this.peerId}`;
-      }
-    }, 1000);
   }
 
   private createSettingsModal() {

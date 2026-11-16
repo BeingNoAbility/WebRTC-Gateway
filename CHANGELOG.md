@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.4.0] - 2026-11-16
+
+### Added
+- **WebRTC Diagnostics HUD & Observability**: Real-time stats engine (`pc.getStats`) embedded into the web portal with an interactive HUD modal (`p2pHudModal`) displaying connection mode (`⚡ Direct P2P` vs `🛡️ Relay TURN`), selected candidate pair (local & remote IP/port/protocol/candidateType), live latency (RTT), downlink/uplink bitrates and throughput (MB), packet loss, and on-demand "🔄 测试 ICE Restart (网络漫游自愈)" action.
+- **Enhanced Connection Pill**: Live floating pill in top-right displaying real-time connection status badge (`⚡ P2P` or `🛡️ TURN`), RTT latency in milliseconds, and live download speed (`↓ XX KB/s`), clicking opens the diagnostic HUD.
+- **Prometheus Metrics Exporter**:
+  - **Signaling Server**: Native `/metrics` endpoint exposing `webrtc_gateway_registered_nodes`, `webrtc_gateway_active_clients`, `webrtc_gateway_signaling_messages_total`, and `webrtc_gateway_ratelimit_rejected_total`. Configurable via `-metrics-addr` / `METRICS_ADDR`.
+  - **Agent Daemon (Strict Opt-in)**: Exposes `webrtc_gateway_active_peers`, `webrtc_gateway_active_streams`, `webrtc_gateway_max_streams`, `webrtc_gateway_traffic_bytes_total{direction="rx|tx"}`, and `webrtc_gateway_stream_rejections_total`. Default disabled (Pure Outbound Daemon with zero open listening ports); activated only when `-metrics-addr` / `METRICS_ADDR` is explicitly set.
+- **Agent Capacity Governance & Backpressure**: Implemented concurrent stream semaphore limit (`-max-streams` / `MAX_STREAMS`, default 512). Reaching capacity gracefully returns standard HTTP 503 Service Unavailable with `Retry-After: 2` header, protecting host/NAS resources under high load.
+- **Signaling Server Anti-DoS Rate Limiting**: Built-in `IPRateLimiter` enforcing max concurrent WebSockets per client IP (`-max-ip-conns` / `MAX_IP_CONNS`, default 64), sliding window message rate limits (120 msg / 10s), and authentication failure brute-force lockout (10 fails / min).
+- **Edge Worker Anti-Abuse**: Cloudflare Worker SignalingRoom Durable Object updated with per-IP concurrent connection tracking and authentication failure lockout.
+
+---
+
 ## [v1.3.0] - 2026-11-16
 
 ### Added

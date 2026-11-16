@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -47,6 +48,25 @@ type Agent struct {
 	connMu           sync.Mutex
 	pendingTeardowns map[string]*time.Timer
 	pendingMu        sync.Mutex
+
+	maxConcurrentStreams int
+	activeStreams        int64
+	streamRejections     uint64
+	rxBytesTotal         uint64
+	txBytesTotal         uint64
+	activePeers          int64
+}
+
+type countedTransport struct {
+	*webrtc.DataChannel
+	txCounter *uint64
+}
+
+func (c *countedTransport) Send(b []byte) error {
+	if c.txCounter != nil {
+		atomic.AddUint64(c.txCounter, uint64(len(b)))
+	}
+	return c.DataChannel.Send(b)
 }
 
 func New(nodeID, signalURL, secret, target string) *Agent {
@@ -78,8 +98,9 @@ func New(nodeID, signalURL, secret, target string) *Agent {
 				{URLs: []string{"stun:stun.l.google.com:19302"}},
 			},
 		},
-		activeConns:      make(map[string]*webrtc.PeerConnection),
-		pendingTeardowns: make(map[string]*time.Timer),
+		activeConns:          make(map[string]*webrtc.PeerConnection),
+		pendingTeardowns:     make(map[string]*time.Timer),
+		maxConcurrentStreams: 512,
 	}
 }
 
@@ -141,6 +162,66 @@ func (a *Agent) SetTURN(turnURL, turnUser, turnPass string) {
 	}
 	a.webrtcConfig.ICEServers = append(a.webrtcConfig.ICEServers, server)
 	log.Printf("[Agent] Configured TURN relay: %s (user: %s)", turnURL, turnUser)
+}
+
+// SetMaxConcurrentStreams sets the maximum number of concurrent multiplexed streams (default 512).
+func (a *Agent) SetMaxConcurrentStreams(limit int) {
+	if limit > 0 {
+		a.maxConcurrentStreams = limit
+	}
+}
+
+// MaxConcurrentStreams returns the configured concurrent streams limit.
+func (a *Agent) MaxConcurrentStreams() int {
+	return a.maxConcurrentStreams
+}
+
+// ActiveStreams returns the current number of active proxy streams.
+func (a *Agent) ActiveStreams() int64 {
+	return atomic.LoadInt64(&a.activeStreams)
+}
+
+// StreamRejections returns the total count of rejected streams due to capacity limits.
+func (a *Agent) StreamRejections() uint64 {
+	return atomic.LoadUint64(&a.streamRejections)
+}
+
+// TrafficBytes returns the total RX and TX bytes transferred over WebRTC DataChannels.
+func (a *Agent) TrafficBytes() (rx, tx uint64) {
+	return atomic.LoadUint64(&a.rxBytesTotal), atomic.LoadUint64(&a.txBytesTotal)
+}
+
+// ActivePeers returns the count of active WebRTC peer connections.
+func (a *Agent) ActivePeers() int64 {
+	return atomic.LoadInt64(&a.activePeers)
+}
+
+// ExportPrometheusMetrics renders the current agent metrics in standard Prometheus text format.
+func (a *Agent) ExportPrometheusMetrics() string {
+	rx, tx := a.TrafficBytes()
+	var b strings.Builder
+	b.WriteString("# HELP webrtc_gateway_active_peers Current number of active WebRTC peer connections\n")
+	b.WriteString("# TYPE webrtc_gateway_active_peers gauge\n")
+	b.WriteString(fmt.Sprintf("webrtc_gateway_active_peers{node_id=%q} %d\n\n", a.NodeID, a.ActivePeers()))
+
+	b.WriteString("# HELP webrtc_gateway_active_streams Current number of active P2PMux logical streams\n")
+	b.WriteString("# TYPE webrtc_gateway_active_streams gauge\n")
+	b.WriteString(fmt.Sprintf("webrtc_gateway_active_streams{node_id=%q} %d\n\n", a.NodeID, a.ActiveStreams()))
+
+	b.WriteString("# HELP webrtc_gateway_max_streams Configured maximum concurrent streams threshold\n")
+	b.WriteString("# TYPE webrtc_gateway_max_streams gauge\n")
+	b.WriteString(fmt.Sprintf("webrtc_gateway_max_streams{node_id=%q} %d\n\n", a.NodeID, a.maxConcurrentStreams))
+
+	b.WriteString("# HELP webrtc_gateway_stream_rejections_total Total number of streams rejected due to capacity limit\n")
+	b.WriteString("# TYPE webrtc_gateway_stream_rejections_total counter\n")
+	b.WriteString(fmt.Sprintf("webrtc_gateway_stream_rejections_total{node_id=%q} %d\n\n", a.NodeID, a.StreamRejections()))
+
+	b.WriteString("# HELP webrtc_gateway_traffic_bytes_total Total traffic bytes transferred over WebRTC DataChannels\n")
+	b.WriteString("# TYPE webrtc_gateway_traffic_bytes_total counter\n")
+	b.WriteString(fmt.Sprintf("webrtc_gateway_traffic_bytes_total{node_id=%q,direction=\"rx\"} %d\n", a.NodeID, rx))
+	b.WriteString(fmt.Sprintf("webrtc_gateway_traffic_bytes_total{node_id=%q,direction=\"tx\"} %d\n\n", a.NodeID, tx))
+
+	return b.String()
 }
 
 // SetInsecureTLS enables or disables skipping TLS certificate verification (useful for self-signed certificates).
@@ -247,6 +328,7 @@ func (a *Agent) teardownSession(sessionID, cookieSession string, pc *webrtc.Peer
 		delete(a.activeConns, sessionID)
 	}
 	a.connMu.Unlock()
+	atomic.StoreInt64(&a.activePeers, int64(len(a.activeConns)))
 	a.cookieManager.RemoveSession(cookieSession)
 	if pc != nil {
 		_ = pc.Close()
@@ -491,9 +573,11 @@ func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription, cl
 
 		dc.OnOpen(func() {
 			log.Printf("[Agent] [Session %s] DataChannel p2pmux OPENED! (cookieSession: %s)", sessionID, cookieSession)
-			m := mux.NewMux(dc, false)
+			transport := &countedTransport{DataChannel: dc, txCounter: &a.txBytesTotal}
+			m := mux.NewMux(transport, false)
 
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+				atomic.AddUint64(&a.rxBytesTotal, uint64(len(msg.Data)))
 				if err := m.HandleIncomingMessage(msg.Data); err != nil {
 					log.Printf("[Agent] Mux handle message error: %v", err)
 				}
@@ -583,7 +667,38 @@ func (a *Agent) streamAcceptLoop(sessionID string, m *mux.Mux) {
 			return
 		}
 
+		limit := a.maxConcurrentStreams
+		if limit <= 0 {
+			limit = 512
+		}
+
+		if atomic.LoadInt64(&a.activeStreams) >= int64(limit) {
+			atomic.AddUint64(&a.streamRejections, 1)
+			log.Printf("[Agent] [Session %s] Stream %d rejected: max concurrent streams limit (%d) reached", sessionID, stream.ID(), limit)
+			go func(s *mux.Stream) {
+				if s.InitialType() == protocol.TypeHeaders {
+					respHeaders, _ := json.Marshal(map[string]interface{}{
+						"s": 503,
+						"m": "Service Unavailable",
+						"h": map[string]string{
+							"Content-Type": "text/plain; charset=utf-8",
+							"Retry-After":  "2",
+						},
+					})
+					_ = s.WriteHeaders(respHeaders)
+					_, _ = s.Write([]byte("503 Service Unavailable: Agent concurrent streams capacity reached (backpressure limit)\n"))
+					_ = s.Close()
+				} else {
+					_ = s.Reset()
+				}
+			}(stream)
+			continue
+		}
+
+		atomic.AddInt64(&a.activeStreams, 1)
 		go func(s *mux.Stream) {
+			defer atomic.AddInt64(&a.activeStreams, -1)
+
 			if s.InitialType() == protocol.TypeData {
 				// Raw data stream (e.g. echo or direct raw pipe)
 				defer s.Close()

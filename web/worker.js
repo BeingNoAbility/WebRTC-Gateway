@@ -22,14 +22,25 @@ export class SignalingRoom extends DurableObject {
     this.clients = new Map();
     // clientBySession: sessionId (string) -> WebSocket
     this.clientBySession = new Map();
+    // ipConns: clientIP (string) -> count (number)
+    this.ipConns = new Map();
+    // failedAttempts: clientIP (string) -> count (number)
+    this.failedAttempts = new Map();
   }
 
   async fetch(request) {
+    const clientIP = request.headers.get('cf-connecting-ip') || 'unknown';
+    const currentConns = this.ipConns.get(clientIP) || 0;
+    if (currentConns >= 64) {
+      return new Response('429 Too Many Requests: Concurrent connection limit exceeded', { status: 429 });
+    }
+    this.ipConns.set(clientIP, currentConns + 1);
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
     server.accept();
-    this.handleWS(server);
+    this.handleWS(server, clientIP);
 
     return new Response(null, {
       status: 101,
@@ -37,9 +48,18 @@ export class SignalingRoom extends DurableObject {
     });
   }
 
-  handleWS(ws) {
+  handleWS(ws, clientIP) {
     let role = '';
     let sessionId = crypto.randomUUID();
+
+    const cleanupIP = () => {
+      const c = this.ipConns.get(clientIP) || 0;
+      if (c <= 1) this.ipConns.delete(clientIP);
+      else this.ipConns.set(clientIP, c - 1);
+    };
+
+    ws.addEventListener('close', cleanupIP);
+    ws.addEventListener('error', cleanupIP);
 
     ws.addEventListener('message', (event) => {
       try {
@@ -55,10 +75,14 @@ export class SignalingRoom extends DurableObject {
             // Anti-hijack protection: verify node secret if already bound
             const boundSecret = this.nodeSecrets.get(nodeId);
             if (boundSecret && boundSecret !== secret) {
+              const fails = (this.failedAttempts.get(clientIP) || 0) + 1;
+              this.failedAttempts.set(clientIP, fails);
               try {
                 ws.send(JSON.stringify({
                   type: 'error',
-                  error: `Unauthorized: node_id "${nodeId}" is protected by a different secret`,
+                  error: fails >= 10 
+                    ? 'Too many failed authentication attempts, throttled'
+                    : `Unauthorized: node_id "${nodeId}" is protected by a different secret`,
                 }));
                 ws.close(4003, 'Unauthorized');
               } catch {}

@@ -56,7 +56,9 @@ ENV ADDR=:8888 \
     TLS_AUTO=false \
     TLS_CERT="" \
     TLS_KEY="" \
-    STATIC_DIR=""
+    STATIC_DIR="" \
+    MAX_IP_CONNS=64 \
+    METRICS_ADDR=""
 
 EXPOSE 8888 443
 

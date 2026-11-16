@@ -45,6 +45,8 @@ ENV NODE_ID=homeserver \
     TURN_URL="" \
     TURN_USER="" \
     TURN_PASS="" \
-    STUN_SERVERS=""
+    STUN_SERVERS="" \
+    MAX_STREAMS=512 \
+    METRICS_ADDR=""
 
 ENTRYPOINT ["/app/agent"]

@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -35,6 +37,13 @@ func main() {
 	defaultTurnUser := os.Getenv("TURN_USER")
 	defaultTurnPass := os.Getenv("TURN_PASS")
 	defaultStunServers := os.Getenv("STUN_SERVERS")
+	defaultMetricsAddr := os.Getenv("METRICS_ADDR")
+	defaultMaxStreams := 512
+	if env := os.Getenv("MAX_STREAMS"); env != "" {
+		if v, err := strconv.Atoi(env); err == nil && v > 0 {
+			defaultMaxStreams = v
+		}
+	}
 
 	nodeID := flag.String("node-id", defaultNodeID, "Unique node ID for this agent (env: NODE_ID)")
 	signalURL := flag.String("signal", defaultSignal, "Signaling server WebSocket URL (env: SIGNAL_URL)")
@@ -47,6 +56,8 @@ func main() {
 	turnUser := flag.String("turn-user", defaultTurnUser, "Optional TURN relay username (env: TURN_USER)")
 	turnPass := flag.String("turn-pass", defaultTurnPass, "Optional TURN relay password / credential (env: TURN_PASS)")
 	stunServers := flag.String("stun-servers", defaultStunServers, "Optional comma-separated custom STUN servers (env: STUN_SERVERS)")
+	maxStreams := flag.Int("max-streams", defaultMaxStreams, "Maximum concurrent multiplexed streams before capacity backpressure rejection (env: MAX_STREAMS)")
+	metricsAddr := flag.String("metrics-addr", defaultMetricsAddr, "Optional address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default disabled)")
 	shareDuration := flag.Duration("sign-link", 0, "Generate a temporary signed share link with the given expiration duration (e.g. 1h, 24h, 7d) and exit")
 	portalURL := flag.String("portal-url", "https://your-portal-domain.com", "Base URL of the Web Portal for -sign-link generation")
 	flag.Parse()
@@ -99,6 +110,25 @@ func main() {
 	}
 	if *turnURL != "" {
 		ag.SetTURN(*turnURL, *turnUser, *turnPass)
+	}
+	ag.SetMaxConcurrentStreams(*maxStreams)
+
+	if *metricsAddr != "" {
+		go func() {
+			metricsMux := http.NewServeMux()
+			metricsMux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+				_, _ = w.Write([]byte(ag.ExportPrometheusMetrics()))
+			})
+			metricsMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("OK\n"))
+			})
+			log.Printf("[Agent] Prometheus metrics listening on http://%s/metrics (healthcheck: /healthz)", *metricsAddr)
+			if err := http.ListenAndServe(*metricsAddr, metricsMux); err != nil && err != http.ErrServerClosed {
+				log.Printf("[Agent] Metrics server error: %v", err)
+			}
+		}()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

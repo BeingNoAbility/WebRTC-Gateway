@@ -180,3 +180,73 @@ func TestSelfSignedCert_ValidityAndSAN(t *testing.T) {
 		t.Errorf("Certificate IPAddresses missing ::1: %v", x509Cert.IPAddresses)
 	}
 }
+
+func TestIPRateLimiter_ConnectionAndRateLimits(t *testing.T) {
+	limiter := NewIPRateLimiter(3) // Max 3 conns per IP
+
+	ip := "192.168.1.100"
+
+	// 1. Connection limit test
+	if !limiter.AcquireConn(ip) {
+		t.Errorf("First connection should be allowed")
+	}
+	if !limiter.AcquireConn(ip) {
+		t.Errorf("Second connection should be allowed")
+	}
+	if !limiter.AcquireConn(ip) {
+		t.Errorf("Third connection should be allowed")
+	}
+	// 4th connection should be rejected
+	if limiter.AcquireConn(ip) {
+		t.Errorf("Fourth connection should be rejected (limit=3)")
+	}
+
+	if limiter.Rejections() != 1 {
+		t.Errorf("Expected 1 rejection, got %d", limiter.Rejections())
+	}
+
+	// Release one connection
+	limiter.ReleaseConn(ip)
+	if !limiter.AcquireConn(ip) {
+		t.Errorf("Should allow connection after releasing one")
+	}
+
+	// 2. Message rate limit test
+	for i := 0; i < 120; i++ {
+		if !limiter.AllowMessage(ip) {
+			t.Fatalf("Message %d should be allowed within threshold", i)
+		}
+	}
+	// 121st message in 10s should be throttled
+	if limiter.AllowMessage(ip) {
+		t.Errorf("Message above 120 should be throttled")
+	}
+
+	// 3. Failed auth lockout test
+	attackerIP := "10.0.0.50"
+	for i := 0; i < 9; i++ {
+		if limiter.RecordFailedAuth(attackerIP) {
+			t.Fatalf("Attempt %d should not lock out yet", i)
+		}
+	}
+	// 10th failure should lock out
+	if !limiter.RecordFailedAuth(attackerIP) {
+		t.Errorf("10th failure should trigger lockout")
+	}
+}
+
+func TestServerMetrics_Export(t *testing.T) {
+	broker := NewSignalBroker("")
+	limiter := NewIPRateLimiter(10)
+
+	s1 := &Session{ID: "sess-node-1"}
+	_ = broker.RegisterAgent("nas-1", "", s1)
+
+	metrics := exportServerMetrics(broker, limiter)
+	if !strings.Contains(metrics, "webrtc_gateway_registered_nodes 1") {
+		t.Errorf("Expected registered_nodes 1 in metrics, got:\n%s", metrics)
+	}
+	if !strings.Contains(metrics, "webrtc_gateway_ratelimit_rejected_total 0") {
+		t.Errorf("Expected ratelimit_rejected_total 0 in metrics, got:\n%s", metrics)
+	}
+}

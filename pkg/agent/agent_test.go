@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -227,5 +228,30 @@ func TestAgent_TeardownGraceWindow(t *testing.T) {
 
 	if existsAfterCancel {
 		t.Fatalf("Expected pending teardown timer to be removed after cancel")
+	}
+}
+
+func TestAgent_ConcurrentStreamsCapacity(t *testing.T) {
+	ag := New("test-capacity-node", "ws://127.0.0.1:8888/ws", "", "http://127.0.0.1:8080")
+	defer ag.Close()
+
+	ag.SetMaxConcurrentStreams(2)
+	if ag.MaxConcurrentStreams() != 2 {
+		t.Fatalf("Expected MaxConcurrentStreams to be 2, got %d", ag.MaxConcurrentStreams())
+	}
+
+	// Manipulate activeStreams to verify threshold accounting
+	atomic.StoreInt64(&ag.activeStreams, 2)
+
+	if ag.ActiveStreams() != 2 {
+		t.Errorf("Expected 2 active streams, got %d", ag.ActiveStreams())
+	}
+
+	metrics := ag.ExportPrometheusMetrics()
+	if !strings.Contains(metrics, `webrtc_gateway_max_streams{node_id="test-capacity-node"} 2`) {
+		t.Errorf("Prometheus metrics missing max_streams 2:\n%s", metrics)
+	}
+	if !strings.Contains(metrics, `webrtc_gateway_active_streams{node_id="test-capacity-node"} 2`) {
+		t.Errorf("Prometheus metrics missing active_streams 2:\n%s", metrics)
 	}
 }
