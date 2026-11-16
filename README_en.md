@@ -459,7 +459,17 @@ cd web && npm test
 # Or directly from root:
 node test/test_subdomain_logic.cjs
 node test/node_id_preservation_test.cjs
+
+# 3. Run full real browser test matrix (Headless Chromium / Edge CDP)
+node test/real_browser_matrix_runner.cjs
+
+# 4. Run HTTP & WebSocket feature verification suite
+node test/verify_features.cjs
 ```
+
+**Key Verification Highlights:**
+- `RealBrowserMatrixTests`: Automated execution of 22/22 test matrix using real Chromium CDP (12 complex WebApp scenarios, page reload & session resilience, and Top 10 real-world websites);
+- `HTTP & WebSocket Feature Verification`: Comprehensive verification of GET/POST/PUT/PATCH/DELETE, Query String, Request Body, Cookie isolation, Authorization headers, 301/302/307 Redirects, HTTP 206 Range streaming, 5MB chunked download, 204/304 Null-Body compliance, and WebSocket bursts & 128KB jumbo frame defragmentation.
 
 ---
 

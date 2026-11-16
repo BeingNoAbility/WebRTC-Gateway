@@ -690,9 +690,17 @@ cd web && npm test
 # 或直接在项目根目录下通过 Node 运行：
 node test/test_subdomain_logic.cjs
 node test/node_id_preservation_test.cjs
+
+# 3. 运行基于真实 Chromium 内核 (Edge / Chrome CDP) 的全量浏览器测试矩阵
+node test/real_browser_matrix_runner.cjs
+
+# 4. 运行 HTTP / WebSocket 核心业务特性全项核验套件
+node test/verify_features.cjs
 ```
 
 **测试套件涵盖的核心验证点：**
+- `RealBrowserMatrixTests`：基于真实无头 Chromium (CDP 协议) 自动化运行 22/22 项全量矩阵（12 项复杂 Web 应用场景、页面刷新与会话韧性保持、Top 10 真实高流量网站秒级渲染）；
+- `HTTP & WebSocket Feature Verification`：覆盖 GET/POST/PUT/PATCH/DELETE、Query String、Request Body、Cookie 隔离与双向穿透、Authorization 标头、301/302/307 重定向、HTTP 206 Range 断点续传、5MB 流式传输、204/304 Null-Body 规范、WebSocket 20 突发与 128KB 巨型帧分片重组；
 - `TestFrameEncodeDecode`：二进制 10 字节帧头与大端序序列化边界验证；
 - `TestMuxPingPongAndConcurrentStreams`：并发流隔离读写与流控背压；
 - `TestPhase2E2EWebRTCP2PMux`：端到端 WebRTC 信令撮合与 P2P SCTP 通道打洞；
