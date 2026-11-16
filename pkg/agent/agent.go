@@ -40,6 +40,9 @@ type Agent struct {
 	wsConn *websocket.Conn
 	wsMu   sync.Mutex
 
+	pingInterval time.Duration
+	readTimeout  time.Duration
+
 	cookieManager *proxy.SessionCookieManager
 	httpProxy     *proxy.HTTPProxy
 	wsProxy       *proxy.WSProxy
@@ -108,6 +111,8 @@ func New(nodeID, signalURL, signalSecret, accessSecret, target string) *Agent {
 		activeConns:          make(map[string]*webrtc.PeerConnection),
 		pendingTeardowns:     make(map[string]*time.Timer),
 		maxConcurrentStreams: 512,
+		pingInterval:         25 * time.Second,
+		readTimeout:          60 * time.Second,
 	}
 }
 
@@ -266,13 +271,34 @@ func (a *Agent) SetSNI(sni string) {
 	a.SNI = sni
 }
 
+// SetPingInterval sets custom interval for signaling WebSocket ping keepalive.
+func (a *Agent) SetPingInterval(d time.Duration) {
+	a.pingInterval = d
+}
+
+// SetReadTimeout sets custom read deadline timeout for signaling WebSocket.
+func (a *Agent) SetReadTimeout(d time.Duration) {
+	a.readTimeout = d
+}
+
 func (a *Agent) sendSignal(msg *signaling.Message) error {
 	a.wsMu.Lock()
 	defer a.wsMu.Unlock()
 	if a.wsConn == nil {
 		return nil
 	}
+	_ = a.wsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	return a.wsConn.WriteJSON(msg)
+}
+
+func (a *Agent) sendPing() error {
+	a.wsMu.Lock()
+	defer a.wsMu.Unlock()
+	if a.wsConn == nil {
+		return nil
+	}
+	_ = a.wsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	return a.wsConn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5 * time.Second))
 }
 
 // GenerateShareSignature calculates an HMAC-SHA256 signature for a temporary share link.
@@ -467,6 +493,10 @@ func (a *Agent) Start(ctx context.Context) error {
 		log.Printf("[Agent] Connected and registered as node_id=%s. Awaiting incoming peers...", a.NodeID)
 		a.readLoop(ctx, conn)
 
+		a.wsMu.Lock()
+		a.wsConn = nil
+		a.wsMu.Unlock()
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -478,7 +508,55 @@ func (a *Agent) Start(ctx context.Context) error {
 func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 	defer conn.Close()
 
+	readCtx, readCancel := context.WithCancel(ctx)
+	defer readCancel()
+
+	pingInt := a.pingInterval
+	if pingInt <= 0 {
+		pingInt = 25 * time.Second
+	}
+	readTo := a.readTimeout
+	if readTo <= 0 {
+		readTo = 60 * time.Second
+	}
+
+	// 1. Synchronized Ping handler: reply Pong under wsMu to prevent concurrent write panic
+	conn.SetPingHandler(func(appData string) error {
+		a.wsMu.Lock()
+		defer a.wsMu.Unlock()
+		if a.wsConn == nil {
+			return nil
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(readTo))
+		return err
+	})
+
+	// 2. Pong handler: refresh read deadline when server responds to Agent Ping
+	conn.SetPongHandler(func(string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(readTo))
+		return nil
+	})
+
+	// 3. Proactive Agent Ping Pump: send Ping periodically to keep connection alive across proxies/firewalls
+	go func() {
+		ticker := time.NewTicker(pingInt)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-readCtx.Done():
+				return
+			case <-ticker.C:
+				if err := a.sendPing(); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(readTo))
 		var msg signaling.Message
 		if err := conn.ReadJSON(&msg); err != nil {
 			return

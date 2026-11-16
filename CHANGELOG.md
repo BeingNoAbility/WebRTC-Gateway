@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.6.1] - 2026-11-16
+
+### Fixed
+- **WebSocket Keepalive Ping Pump & Oscillation Elimination (Dual-Sided Heartbeat)**:
+  - **Root Cause Resolution**: Eliminated the "61-second oscillation" bug where the signaling server enforced a 60-second `ReadDeadline` expecting Pongs, but neither the server nor the agent sent periodic Ping frames during idle periods, causing repetitive socket timeout disconnections every 61 seconds.
+  - **Server-Side Proactive Ping Pump (`cmd/signal/main.go`)**: Implemented a 25-second Ping ticker sending RFC 6455 `PingMessage` control frames with 5-second write deadlines, synchronized strictly under `session.mu` mutex to prevent concurrent write panics. Automatically keeps visitor browsers connected without client-side code changes.
+  - **Agent-Side Proactive Ping Pump & Synchronized Handlers (`pkg/agent/agent.go`)**:
+    - Added a proactive 25-second Ping pump protected by `a.wsMu` mutex, ensuring long-lived connections survive across idle timeouts on enterprise firewalls, Nginx reverse proxies, and Cloudflare Workers (100s idle timeout);
+    - Implemented thread-safe `SetPingHandler` (responding with Pong under `a.wsMu`) and `SetPongHandler` extending `ReadDeadline` to +60s;
+    - Safely cleared `a.wsConn = nil` on disconnect under mutex to prevent stale socket writes.
+  - **Comprehensive Automated Test Coverage**:
+    - Added `TestSignalBroker_WebSocketKeepalivePingPong` in `cmd/signal/broker_test.go`;
+    - Added `TestAgent_KeepalivePingPump` in `pkg/agent/agent_test.go`;
+    - Added `TestE2E_WebSocketDualKeepalive` in `test/keepalive_e2e_test.go`.
+
+---
+
 ## [v1.6.0] - 2026-11-16
 
 ### Added

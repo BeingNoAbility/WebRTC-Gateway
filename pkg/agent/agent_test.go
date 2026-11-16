@@ -295,3 +295,73 @@ func TestAgent_FileAndDirectoryMode(t *testing.T) {
 		t.Errorf("Expected FileModeDirectory, got %v", agDir.FileProxy().Mode())
 	}
 }
+
+func TestAgent_KeepalivePingPump(t *testing.T) {
+	pingsReceived := int64(0)
+	serverClosed := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		defer close(serverClosed)
+
+		conn.SetPingHandler(func(appData string) error {
+			atomic.AddInt64(&pingsReceived, 1)
+			_ = conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+			return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+		})
+
+		// Server enforces a 200ms read deadline.
+		// If Agent doesn't send Pings, the connection will drop after 200ms.
+		// If Agent sends Pings every 40ms, the read deadline is refreshed and connection stays alive!
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			var msg signaling.Message
+			if err := conn.ReadJSON(&msg); err != nil {
+				break
+			}
+			if msg.Type == signaling.TypeRegister {
+				_ = conn.WriteJSON(&signaling.Message{
+					Type:   signaling.TypeRegistered,
+					NodeID: msg.NodeID,
+				})
+			}
+		}
+	}))
+	defer server.Close()
+
+	u, _ := url.Parse(server.URL)
+	wsURL := "ws://" + u.Host + "/ws"
+
+	ag := New("agent-keepalive-node", wsURL, "secret-tok", "", "http://127.0.0.1:8080")
+	ag.SetPingInterval(40 * time.Millisecond)
+	ag.SetReadTimeout(200 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = ag.Start(ctx)
+	}()
+
+	// Wait 350ms (well past the 200ms read deadline)
+	time.Sleep(350 * time.Millisecond)
+
+	select {
+	case <-serverClosed:
+		t.Fatalf("Server connection closed prematurely; Agent keepalive ping pump failed!")
+	default:
+		// Connection is still open, as expected!
+	}
+
+	count := atomic.LoadInt64(&pingsReceived)
+	if count < 3 {
+		t.Errorf("Expected at least 3 pings received in 350ms, got %d", count)
+	}
+
+	cancel()
+	ag.Close()
+}

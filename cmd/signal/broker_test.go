@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
@@ -389,5 +390,132 @@ trusted_proxies: "10.0.0.0/8"
 	}
 	if cfg.MaxIPConns != 128 {
 		t.Errorf("Expected max_ip_conns 128, got %d", cfg.MaxIPConns)
+	}
+}
+
+func TestSignalBroker_WebSocketKeepalivePingPong(t *testing.T) {
+	// 1. Temporarily configure short keepalive intervals for fast testing
+	origPing := defaultPingPeriod
+	origRead := defaultReadTimeout
+	defer func() {
+		SetKeepaliveIntervalsForTest(origPing, origRead)
+	}()
+	SetKeepaliveIntervalsForTest(40*time.Millisecond, 150*time.Millisecond)
+
+	broker := NewSignalBroker("")
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		sessionID := "test-keepalive-sess"
+		session := &Session{ID: sessionID, Conn: conn}
+
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+
+		defer func() {
+			cancel()
+			session.mu.Lock()
+			_ = conn.Close()
+			session.Conn = nil
+			session.mu.Unlock()
+			broker.RemoveAgent("keepalive-node", session)
+		}()
+
+		conn.SetPongHandler(func(string) error {
+			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+			return nil
+		})
+
+		conn.SetPingHandler(func(appData string) error {
+			session.mu.Lock()
+			defer session.mu.Unlock()
+			if session.Conn == nil {
+				return nil
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5 * time.Second))
+			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+			return err
+		})
+
+		go func() {
+			ticker := time.NewTicker(defaultPingPeriod)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := session.Ping(); err != nil {
+						return
+					}
+				}
+			}
+		}()
+
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+			var msg signaling.Message
+			if err := conn.ReadJSON(&msg); err != nil {
+				break
+			}
+			if msg.Type == signaling.TypeRegister {
+				_ = broker.RegisterAgent(msg.NodeID, msg.Secret, msg.RequireVisitorAuth, session)
+			}
+		}
+	}))
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+
+	// Client connects
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial error: %v", err)
+	}
+	defer ws.Close()
+
+	// Register
+	regMsg := signaling.Message{Type: signaling.TypeRegister, NodeID: "keepalive-node"}
+	if err := ws.WriteJSON(regMsg); err != nil {
+		t.Fatalf("WriteJSON error: %v", err)
+	}
+
+	// Verify agent registered
+	time.Sleep(20 * time.Millisecond)
+	if broker.GetAgent("keepalive-node") == nil {
+		t.Fatalf("Agent should be registered")
+	}
+
+	// Client receives Pings and sends Pongs back
+	pingsReceived := 0
+	ws.SetPingHandler(func(appData string) error {
+		pingsReceived++
+		return ws.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+	})
+
+	// Start reading to allow control frame handler to process pings
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		for {
+			var m signaling.Message
+			if err := ws.ReadJSON(&m); err != nil {
+				break
+			}
+		}
+	}()
+
+	// Wait 350ms (more than 2x the 150ms read deadline)
+	time.Sleep(350 * time.Millisecond)
+
+	if broker.GetAgent("keepalive-node") == nil {
+		t.Errorf("Agent was prematurely disconnected; keepalive ping/pong failed to maintain read deadline!")
+	}
+	if pingsReceived < 3 {
+		t.Errorf("Expected at least 3 pings received in 350ms with 40ms interval, got %d", pingsReceived)
 	}
 }

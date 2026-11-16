@@ -40,6 +40,17 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+var (
+	defaultPingPeriod  = 25 * time.Second
+	defaultReadTimeout = 60 * time.Second
+)
+
+// SetKeepaliveIntervalsForTest adjusts the ping period and read timeout for tests.
+func SetKeepaliveIntervalsForTest(ping, read time.Duration) {
+	defaultPingPeriod = ping
+	defaultReadTimeout = read
+}
+
 type Session struct {
 	ID     string
 	Role   string
@@ -54,7 +65,18 @@ func (s *Session) Send(msg *signaling.Message) error {
 	if s.Conn == nil {
 		return nil
 	}
+	_ = s.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	return s.Conn.WriteJSON(msg)
+}
+
+func (s *Session) Ping() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Conn == nil {
+		return nil
+	}
+	_ = s.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	return s.Conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5 * time.Second))
 }
 
 type SignalBroker struct {
@@ -679,8 +701,15 @@ func main() {
 			Conn: conn,
 		}
 
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+
 		defer func() {
+			cancel()
+			session.mu.Lock()
 			_ = conn.Close()
+			session.Conn = nil
+			session.mu.Unlock()
 			if session.Role == "agent" && session.NodeID != "" {
 				broker.RemoveAgent(session.NodeID, session)
 			} else {
@@ -688,14 +717,43 @@ func main() {
 			}
 		}()
 
-		// Keepalive
+		// Keepalive: synchronized Pong handler to extend ReadDeadline
 		conn.SetPongHandler(func(string) error {
-			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
 			return nil
 		})
 
+		// Keepalive: synchronized Ping handler to reply Pong under session.mu
+		conn.SetPingHandler(func(appData string) error {
+			session.mu.Lock()
+			defer session.mu.Unlock()
+			if session.Conn == nil {
+				return nil
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5 * time.Second))
+			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+			return err
+		})
+
+		// Server-side Ping Pump: send Ping periodically to keep connection alive and refresh read deadlines
+		go func() {
+			ticker := time.NewTicker(defaultPingPeriod)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := session.Ping(); err != nil {
+						return
+					}
+				}
+			}
+		}()
+
 		for {
-			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
 			var msg signaling.Message
 			if err := conn.ReadJSON(&msg); err != nil {
 				break
