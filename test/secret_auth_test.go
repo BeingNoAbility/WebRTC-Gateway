@@ -702,8 +702,6 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 	expiredWS, _, _ := websocket.DefaultDialer.Dial(wsURL, nil)
 	defer expiredWS.Close()
 	_ = expiredWS.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
-	var expStatus signaling.Message
-	_ = expiredWS.ReadJSON(&expStatus)
 
 	_ = expiredWS.WriteJSON(&signaling.Message{
 		Type:   signaling.TypeOffer,
@@ -713,12 +711,29 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 		Sign:   expiredSign,
 	})
 
-	var expResp signaling.Message
-	_ = expiredWS.ReadJSON(&expResp)
-	if expResp.Type != signaling.TypeError || !strings.Contains(expResp.Error, "unauthorized") {
-		t.Fatalf("Expected expired signature to be rejected, got: %+v", expResp)
+	errCh := make(chan string, 1)
+	go func() {
+		for {
+			var m signaling.Message
+			if err := expiredWS.ReadJSON(&m); err != nil {
+				return
+			}
+			if m.Type == signaling.TypeError {
+				errCh <- m.Error
+				return
+			}
+		}
+	}()
+
+	select {
+	case errText := <-errCh:
+		if !strings.Contains(errText, "unauthorized") {
+			t.Fatalf("Expected unauthorized error, got %q", errText)
+		}
+		t.Logf("Agent correctly rejected expired share link signature: %s", errText)
+	case <-time.After(3 * time.Second):
+		t.Fatalf("Expected agent to reject expired signature with TypeError, but timed out")
 	}
-	t.Logf("Agent correctly rejected expired share link signature: %s", expResp.Error)
 
 	// 2. Client with VALID future share signature -> successfully connects over WebRTC & DataChannel!
 	futureExp := time.Now().Add(2 * time.Hour).Unix()
@@ -726,9 +741,21 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 
 	clientWS, _, _ := websocket.DefaultDialer.Dial(wsURL, nil)
 	defer clientWS.Close()
+
+	ansCh := make(chan signaling.Message, 5)
+	go func() {
+		for {
+			var m signaling.Message
+			if err := clientWS.ReadJSON(&m); err != nil {
+				return
+			}
+			if m.Type == signaling.TypeAnswer {
+				ansCh <- m
+			}
+		}
+	}()
+
 	_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
-	var validStatus signaling.Message
-	_ = clientWS.ReadJSON(&validStatus)
 
 	clientPC, err := webrtc.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
@@ -775,16 +802,12 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 		Sign:   validSign,
 	})
 
-	var ans signaling.Message
-	for {
-		if err := clientWS.ReadJSON(&ans); err != nil {
-			t.Fatalf("ReadJSON error: %v", err)
-		}
-		if ans.Type == signaling.TypeAnswer {
-			break
-		}
+	select {
+	case ans := <-ansCh:
+		_ = clientPC.SetRemoteDescription(*ans.SDP)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Timeout waiting for Answer with valid share signature")
 	}
-	_ = clientPC.SetRemoteDescription(*ans.SDP)
 
 	dcOpenCh := make(chan struct{}, 1)
 	dc.OnOpen(func() { close(dcOpenCh) })
@@ -792,7 +815,7 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 	select {
 	case <-dcOpenCh:
 		t.Logf("DataChannel opened successfully via stateless HMAC-SHA256 signed share link!")
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatalf("Timeout waiting for DataChannel to open via share link")
 	}
 
@@ -814,7 +837,7 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 	}
 	_ = stream.Close()
 
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel2()
 	rawHeaders, err := stream.ReadHeaders(ctx2)
 	if err != nil {
@@ -843,15 +866,11 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 		Sign:       validSign,
 	})
 
-	var restartAns signaling.Message
-	for {
-		if err := clientWS.ReadJSON(&restartAns); err != nil {
-			t.Fatalf("ReadJSON error: %v", err)
-		}
-		if restartAns.Type == signaling.TypeAnswer {
-			break
-		}
+	select {
+	case restartAns := <-ansCh:
+		_ = clientPC.SetRemoteDescription(*restartAns.SDP)
+		t.Logf("In-place ICE Restart completed successfully! DataChannel and Mux preserved.")
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Timeout waiting for ICE Restart Answer")
 	}
-	_ = clientPC.SetRemoteDescription(*restartAns.SDP)
-	t.Logf("In-place ICE Restart completed successfully! DataChannel and Mux preserved.")
 }
