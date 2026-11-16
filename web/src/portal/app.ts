@@ -91,7 +91,6 @@ class PortalApp {
 
   private appFrame: HTMLIFrameElement | null = null;
   private vaultContainer: HTMLElement | null = null;
-  private mediaContainer: HTMLElement | null = null;
   private activeStreamsCount = 0;
 
   constructor() {
@@ -785,6 +784,7 @@ class PortalApp {
       'allow',
       'fullscreen; clipboard-read; clipboard-write; autoplay; camera; microphone; display-capture; web-share; publickey-credentials-get; publickey-credentials-create; identity-credentials-get; cross-origin-isolated; storage-access; encrypted-media; presentation; screen-wake-lock; picture-in-picture'
     );
+    frame.setAttribute('allowfullscreen', 'true');
 
     frame.src = startPath; // Intercepted by Service Worker
     document.body.appendChild(frame);
@@ -1765,10 +1765,6 @@ class PortalApp {
       this.vaultContainer.remove();
       this.vaultContainer = null;
     }
-    if (this.mediaContainer) {
-      this.mediaContainer.remove();
-      this.mediaContainer = null;
-    }
 
     if (this.pingInterval) clearInterval(this.pingInterval);
     if (this.mux) {
@@ -1862,46 +1858,35 @@ class PortalApp {
       // Handle navigation requests originated from the appViewport iframe
       if (msg.destination === 'iframe') {
         const isPdf = contentType.includes('application/pdf') || (p2pFileName && p2pFileName.toLowerCase().endsWith('.pdf'));
-        const isVideo = contentType.startsWith('video/') || (p2pFileName && p2pFileName.match(/\.(mp4|webm|mkv|mov|avi|ts|m4v)$/i));
-        const isAudio = contentType.startsWith('audio/') || (p2pFileName && p2pFileName.match(/\.(mp3|wav|flac|aac|m4a|ogg)$/i));
-        const isAttachment = contentDisposition.includes('attachment') || (p2pMode === 'file' && !contentType.includes('text/html') && !contentType.startsWith('image/'));
+        const isAttachment = contentDisposition.includes('attachment') ||
+                             (p2pMode === 'file' && !contentType.includes('text/html') && !contentType.startsWith('image/') && !contentType.startsWith('video/') && !contentType.startsWith('audio/'));
 
-        if (isPdf) {
+        if (isPdf || isAttachment) {
           this.showFileVault({
             fileName: p2pFileName || this.extractFileName(msg.path),
             fileSize: p2pFileSize,
-            type: 'pdf',
+            type: isPdf ? 'pdf' : 'file',
             path: msg.path,
             isDir: p2pMode === 'dir',
           });
-        } else if (isVideo) {
-          this.showNativeMediaPlayer({
-            src: msg.path,
-            fileName: p2pFileName || this.extractFileName(msg.path),
-            isDir: p2pMode === 'dir',
-            type: 'video',
+
+          // Terminate iframe navigation: Send 204 No Content so the iframe cancels navigation
+          // and remains safely on its current page (e.g. directory listing), completely eliminating
+          // Edge's sandbox plugin blocking error and preventing background bandwidth consumption.
+          port.postMessage({
+            type: 'RESP_START',
+            status: 204,
+            statusText: 'No Content',
+            headers: {},
           });
-        } else if (isAudio) {
-          this.showNativeMediaPlayer({
-            src: msg.path,
-            fileName: p2pFileName || this.extractFileName(msg.path),
-            isDir: p2pMode === 'dir',
-            type: 'audio',
-          });
-        } else if (isAttachment) {
-          this.showFileVault({
-            fileName: p2pFileName || this.extractFileName(msg.path),
-            fileSize: p2pFileSize,
-            type: 'file',
-            path: msg.path,
-            isDir: p2pMode === 'dir',
-          });
+          port.postMessage({ type: 'RESP_END' });
+          this.updateStreamsCount(-1);
+
+          // Reset the backend stream immediately to stop pushing data and preserve P2P bandwidth
+          stream.reset();
+          return;
         } else if (this.appFrame && this.appFrame.style.display === 'none') {
-          // Restore iframe if returning to normal HTML page or directory view
-          if (this.mediaContainer) {
-            this.mediaContainer.remove();
-            this.mediaContainer = null;
-          }
+          // Restore iframe if returning to normal HTML page, media streaming, or directory view
           if (this.vaultContainer) {
             this.vaultContainer.remove();
             this.vaultContainer = null;
@@ -2201,122 +2186,6 @@ class PortalApp {
     }
   }
 
-  // Show native HTML5 media player directly in portal DOM to eliminate iframe sandbox constraints
-  private showNativeMediaPlayer(opts: { src: string; fileName: string; isDir: boolean; type: 'video' | 'audio' }) {
-    if (this.appFrame) {
-      this.appFrame.style.display = 'none';
-    }
-    if (this.vaultContainer) {
-      this.vaultContainer.remove();
-      this.vaultContainer = null;
-    }
-    if (this.mediaContainer) {
-      this.mediaContainer.remove();
-      this.mediaContainer = null;
-    }
-
-    const container = document.createElement('div');
-    container.id = 'p2pMediaPlayerContainer';
-    container.style.cssText = `
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      background: #000000;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      z-index: 100;
-    `;
-
-    const viewUrl = opts.isDir ? opts.src : '/' + encodeURIComponent(opts.fileName || 'media');
-
-    if (opts.isDir) {
-      const topBar = document.createElement('div');
-      topBar.style.cssText = `
-        position: absolute;
-        top: 16px;
-        left: 20px;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        z-index: 102;
-      `;
-      topBar.innerHTML = `
-        <button id="btnMediaBack" style="background: rgba(33, 38, 45, 0.85); backdrop-filter: blur(8px); border: 1px solid #30363d; color: #f0f6fc; border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 500; cursor: pointer; display: flex; align-items: center; gap: 6px;">
-          ⬅ 返回目录
-        </button>
-        <span style="color: #c9d1d9; font-size: 13px; font-weight: 500; max-width: 50vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">
-          ${this.escapeHtml(opts.fileName)}
-        </span>
-      `;
-      container.appendChild(topBar);
-    }
-
-    if (opts.type === 'video') {
-      const video = document.createElement('video');
-      video.id = 'p2pNativeVideo';
-      video.controls = true;
-      video.autoplay = true;
-      video.playsInline = true;
-      video.style.cssText = 'width: 100vw; height: 100vh; object-fit: contain; background: #000;';
-      video.src = viewUrl;
-      container.appendChild(video);
-    } else {
-      const audioCard = document.createElement('div');
-      audioCard.style.cssText = `
-        background: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 12px;
-        padding: 32px;
-        max-width: 500px;
-        width: 90%;
-        text-align: center;
-        box-shadow: 0 16px 36px rgba(0,0,0,0.6);
-      `;
-      audioCard.innerHTML = `
-        <div style="font-size: 48px; margin-bottom: 16px;">🎵</div>
-        <h3 style="font-size: 16px; color: #f0f6fc; margin-bottom: 20px; word-break: break-all;">${this.escapeHtml(opts.fileName)}</h3>
-        <audio controls autoplay style="width: 100%;" src="${viewUrl}"></audio>
-      `;
-      container.appendChild(audioCard);
-    }
-
-    document.body.appendChild(container);
-    this.mediaContainer = container;
-
-    if (opts.isDir) {
-      document.getElementById('btnMediaBack')?.addEventListener('click', () => {
-        this.closeMediaAndRestoreIframe();
-      });
-    }
-  }
-
-  private closeMediaAndRestoreIframe() {
-    if (this.mediaContainer) {
-      const video = this.mediaContainer.querySelector('video') as HTMLVideoElement;
-      if (video) {
-        video.pause();
-        video.src = '';
-        video.load();
-      }
-      const audio = this.mediaContainer.querySelector('audio') as HTMLAudioElement;
-      if (audio) {
-        audio.pause();
-        audio.src = '';
-        audio.load();
-      }
-      this.mediaContainer.remove();
-      this.mediaContainer = null;
-    }
-    if (this.appFrame) {
-      this.appFrame.style.display = 'block';
-      this.appFrame.src = '/';
-    }
-  }
-
   private closeVaultAndRestoreIframe() {
     if (this.vaultContainer) {
       this.vaultContainer.remove();
@@ -2324,7 +2193,6 @@ class PortalApp {
     }
     if (this.appFrame) {
       this.appFrame.style.display = 'block';
-      this.appFrame.src = '/';
     }
   }
 

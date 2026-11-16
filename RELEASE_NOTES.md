@@ -1,36 +1,30 @@
 # WebRTC Gateway Release Notes
 
-## [v1.7.1] - 2026-11-16
+## [v1.7.2] - 2026-11-16
 
-### 🎬 特殊文件名编解码修复、媒体流原生播放与 P2P File Vault 文件舱 (Special Filenames, Media Streaming & P2P File Vault)
+### 🎧 彻底消除音视频重音回声、回归浏览器原生播放器 & 严密截断文件舱后台流 (Eliminate Audio Echo, Native Player & File Vault Stream Truncation)
 
-- **`-dir` 目录模式特殊文件名 404 彻底修复 (Special Characters & Percent-Decoding)**：
-  - **根本原因解决**：修复了浏览器发起包含 RFC 3986 百分号编码（如中文字符、方括号 `[ANi]`、空格 `%20` 等动漫番剧文件名）的请求时，Agent 服务端直接将编码路径传入底层 `os.Stat` 导致 404 Not Found 的历史缺陷；
-  - **安全防御前置**：在执行 `path.Clean` 之前严格先执行 `url.PathUnescape`，并在解码后剔除空字节（Null-byte `%00`）注入，从根本上兼顾了 RFC 3986 还原与 `%2e%2e` 路径穿越防御；
-  - **严格边界校验**：结合 `filepath.Rel` 与 `filepath.EvalSymlinks` 彻底防范目录逃逸与软链接逃逸。
+- **彻底消除音视频“双重声音 / 重音”缺陷 (100% Elimination of Double Audio Echo)**：
+  - **根本原因解决**：修复了在 `-dir` 与 `-file` 模式下打开音视频时，前端一方面在 DOM 顶层动态创建新播放器发起第二路流，另一方面被隐藏的 iframe 仍在持续接收第一路流并起播，导致“前台一个声音、后台一个声音”以及 P2P 带宽被瞬间翻倍消耗的双重缺陷；
+  - **全面回归浏览器原生能力 (Plan A)**：基于 `v1.7.1` 已治愈的底层 Service Worker 根路由精准放行（`isTopLevelDocNav`）与 Go 端内置标准 MIME 字典（`video/mp4` 及 `Accept-Ranges: bytes`），彻底移除多余的前端 DOM 播放器逻辑，让音视频自然在 `appViewport` iframe 中播放；
+  - **享受顶级原生播放体验**：由浏览器（Chrome/Edge/Safari/Firefox/移动端）原生媒体引擎渲染，完美支持 GPU 硬件加速、倍速播放（0.5x~2.0x）、音量记忆、画中画（PiP）、全屏以及空格/方向键快捷键；
+  - **目录模式历史栈自然自愈**：在 `-dir` 模式点播视频后，点击浏览器“后退”按钮或手机侧滑返回，浏览器的 History API 会自然无缝回到文件目录树。
 
-- **`-file` 视频播放失败修复与多媒体流式体验升级 (Media Streaming Fix & Native Player)**：
-  - **Service Worker 根路径精准放行**：将原 `url.pathname === '/' && event.request.destination !== 'iframe'` 粗暴规则重构为基于标准 W3C 规范的 `isTopLevelDocNav`，仅允许顶层 HTML 文档导航穿透到信令服务端加载门户外壳，100% 拦截并转发 `<video src="/">`、`<audio>` 及带有 `Range` 请求头的多媒体流；
-  - **全平台内置 MIME 映射表**：在 `pkg/proxy/file_proxy.go` 中内置涵盖视频（MP4, WebM, MKV, MOV, TS, AVI）、音频（MP3, WAV, FLAC, AAC, M4A, OGG）、文档（PDF, TXT, MD, JSON）及压缩镜像的完整 MIME 字典，彻底解决 Alpine Linux、极简 Docker 镜像及 Windows 缺失 `/etc/mime.types` 时默认退化为 `application/octet-stream` 导致 HTML5 播放器拒播的痛点；
-  - **原生 DOM 媒体播放器**：当检测到目标为视频/音频流时，脱离 iframe 沙箱限制，在 DOM 顶层动态挂载原生 HTML5 `<video controls autoplay playsinline>`，全面解锁 GPU 硬件加速、画中画（PiP）、全屏与原生快捷键交互。
+- **弹出 P2P File Vault 文件舱时彻底截断后台 iframe 推流 (Stream Truncation & Bandwidth Conservation)**：
+  - 当检测到 PDF 文档（`application/pdf`）或非内联二进制下载（`isAttachment`）并激活文件舱时：
+    - 主动向 iframe 的 MessagePort 发送 `HTTP 204 No Content` 终止响应；
+    - 立即调用 `stream.reset()` 告知 Agent 停止推送后续数据块；
+  - **双重收益**：
+    1. 根据 W3C 规范，导航请求收到 204 时浏览器强制终止跳转并保留在当前页面，彻底杜绝 Edge 沙箱报出“此页面已被阻止”错误；
+    2. 彻底掐断后台静默推流，节省 100% 的无谓 P2P 带宽损耗，并避免与文件舱中的下载按钮产生交互冲突。
 
-- **Edge 桌面端与安卓端 PDF 拦截解决：全新打造 P2P File Vault 文件舱**：
-  - **规避 W3C 沙箱插件冲突**：W3C 规范中 `sandbox` 属性强制禁用浏览器扩展插件（包括 Edge/Chromium 内置的 PDFium 插件），导致 iframe 渲染 PDF 时被 Edge 安全机制强行拦截（“此页面已被 Microsoft Edge 阻止” / 安卓端“已在 Microsoft Edge 中禁用 PDF 阅读器”）；
-  - **P2P File Vault 极简高质感文件舱**：
-    - 精致深色系卡片展示真实文件名、文件体积及 `⚡ P2P Direct Tunnel` 零中转直连状态；
-    - **[ ⚡ 极速 P2P 下载 ]**：一键触发浏览器原生下载，跑满局域网/公网直连带宽；
-    - **[ 📑 在新标签页打开原生预览 ]**：在独立的无沙箱标签页激活 Edge/Chrome 原生 PDF 阅读器，完整享受缩略图、目录、缩放、搜索与批注能力；
-    - 针对移动端（iOS / Android）提供针对性使用指引。
-
-- **严密的多层测试与真实浏览器矩阵验证**：
-  - **单元测试**：`pkg/proxy/file_proxy_test.go` 新增 `TestFileProxy_SpecialFilenameAndURLDecoding`、`TestFileProxy_PathTraversalDefense_PercentEncoded`、`TestFileProxy_SingleFile_MediaAndPDF_MimeTypes`；
-  - **端到端测试**：`test/file_server_e2e_test.go` 新增 `TestE2E_FileServer_SpecialCharactersAndMediaMIME`，完整跑通 DataChannel 隧道下的特殊字符视频点播与 PDF 传输；
-  - **真实浏览器矩阵**：基于 CDP 真实无头 Edge 自动化运行 22 个场景（12 个复杂应用场景 + F5 会话自愈 + 全球 Top 10 真实网站镜像）全部 100% PASS。
+- **完备的 Feature Policy 权限穿透**：
+  - 为 `appViewport` 显式补全 `allow="fullscreen; ... picture-in-picture"` 及 `allowfullscreen="true"` 跨代兼容属性，确保原生播放器在点击全屏或画中画时不受父级容器约束，100% 铺满整块物理屏幕。
 
 ---
 
 ### 📦 资产下载与快速验证
 - 预编译二进制跨平台支持：Linux (amd64 / arm64)、Windows (amd64 / arm64)、macOS Darwin (amd64 / Apple Silicon arm64)。
 - 多架构 Docker 镜像已同步发布至 GitHub Container Registry (`ghcr.io`)：
-  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.7.1` (`latest`)
-  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.7.1` (`latest`)
+  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.7.2` (`latest`)
+  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.7.2` (`latest`)

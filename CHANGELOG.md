@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.7.2] - 2026-11-16
+
+### Fixed
+- **Elimination of Audio Echo & Double Playback in Media Streaming**:
+  - Removed duplicate foreground DOM video/audio player (`showNativeMediaPlayer`), completely curing the concurrency flaw where a foreground player and a hidden iframe player simultaneously streamed and played the same video.
+  - Returned media rendering entirely to the browser's native engine inside `appViewport` iframe, preserving line-rate P2P streaming with zero duplicate streams.
+  - Enabled smooth natural history navigation via browser Back button / mobile swipe in directory browsing mode.
+- **P2P File Vault Background Stream Truncation & 204 Interception**:
+  - When activating `P2P File Vault` for PDFs and binary downloads, immediately replies with `HTTP 204 No Content` to the iframe navigation and calls `stream.reset()`.
+  - Cancels iframe navigation per W3C spec, preventing Edge sandbox plugin blocking errors and saving 100% of background P2P bandwidth.
+- **Enhanced Feature Policy on App Shell Viewport**:
+  - Explicitly configured `allowfullscreen="true"` alongside `allow="fullscreen; ... picture-in-picture"` on `appViewport` for universal cross-browser fullscreen capability.
+
+---
+
 ## [v1.7.1] - 2026-11-16
 
 ### Fixed
