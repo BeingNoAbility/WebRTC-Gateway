@@ -7,7 +7,7 @@ dist_release/
 *.so
 *.dylib
 *_linux_amd64
-mock_service
+/mock_service
 
 # Source maps
 web/dist/*.map
