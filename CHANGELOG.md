@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.4.1] - 2026-11-16
+
+### Security
+- **Signaling Server Trusted Proxies & Anti-Spoofing (`-trusted-proxies` / `TRUSTED_PROXIES`)**:
+  - Implemented strict proxy trust verification against client IP header spoofing (`X-Forwarded-For`, `CF-Connecting-IP`, `X-Real-IP`).
+  - Pre-compiled zero-allocation CIDR matching using Go `netip.Prefix`.
+  - **Zero-Config Compatibility**: Defaults to trusting loopback (`127.0.0.0/8`, `::1/128`), RFC 1918 private networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), CGNAT (`100.64.0.0/10`), link-local, and IPv6 ULA, ensuring out-of-the-box compatibility with Docker bridges, Kubernetes Ingress, and Nginx/Caddy reverse proxies.
+  - **Public Socket Fallback**: Direct untrusted connections bypassing proxies strictly ignore proxy headers and bind directly to the underlying TCP socket address, preventing attackers from spoofing IPs to bypass rate limits and auth brute-force locks.
+  - **Priority Ingestion**: Evaluates `CF-Connecting-IP` before `X-Forwarded-For` and `X-Real-IP` when incoming requests originate from trusted proxies.
+
+---
+
 ## [v1.4.0] - 2026-11-16
 
 ### Added

@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -178,25 +179,124 @@ func (b *SignalBroker) ClientCount() int {
 
 var signalingMessagesTotal uint64
 
-type IPRateLimiter struct {
-	mu            sync.Mutex
-	maxConns      int
-	connsPerIP    map[string]int
-	msgTimes      map[string][]time.Time
-	failedAuths   map[string][]time.Time
-	rejectedCount uint64
+var defaultTrustedProxyCIDRs = []string{
+	"127.0.0.0/8",    // IPv4 Loopback
+	"::1/128",        // IPv6 Loopback
+	"10.0.0.0/8",     // RFC 1918 Class A
+	"172.16.0.0/12",  // RFC 1918 Class B
+	"192.168.0.0/16", // RFC 1918 Class C
+	"100.64.0.0/10",  // RFC 6598 Carrier-Grade NAT (CGNAT, Tailscale, Docker overlays)
+	"169.254.0.0/16", // IPv4 Link-Local
+	"fe80::/10",      // IPv6 Link-Local
+	"fc00::/7",       // IPv6 Unique Local Address (ULA)
 }
 
-func NewIPRateLimiter(maxConnsPerIP int) *IPRateLimiter {
+// DefaultTrustedProxies returns the pre-compiled list of default trusted proxy prefixes.
+func DefaultTrustedProxies() []netip.Prefix {
+	prefixes := make([]netip.Prefix, 0, len(defaultTrustedProxyCIDRs))
+	for _, cidr := range defaultTrustedProxyCIDRs {
+		p, err := netip.ParsePrefix(cidr)
+		if err == nil {
+			prefixes = append(prefixes, p)
+		}
+	}
+	return prefixes
+}
+
+// ParseTrustedProxies parses a comma-separated list of CIDRs or IP addresses into []netip.Prefix.
+// If s is empty or "default", DefaultTrustedProxies() is returned.
+// If s is "none", an empty slice is returned (disabling trusted proxy headers entirely).
+func ParseTrustedProxies(s string) ([]netip.Prefix, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.EqualFold(s, "default") {
+		return DefaultTrustedProxies(), nil
+	}
+	if strings.EqualFold(s, "none") {
+		return []netip.Prefix{}, nil
+	}
+
+	var prefixes []netip.Prefix
+	parts := strings.Split(s, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "/") {
+			prefix, err := netip.ParsePrefix(part)
+			if err != nil {
+				return nil, fmt.Errorf("invalid CIDR %q: %w", part, err)
+			}
+			prefixes = append(prefixes, prefix)
+		} else {
+			addr, err := netip.ParseAddr(part)
+			if err != nil {
+				return nil, fmt.Errorf("invalid IP address %q: %w", part, err)
+			}
+			bits := 32
+			if addr.Is6() {
+				bits = 128
+			}
+			prefixes = append(prefixes, netip.PrefixFrom(addr, bits))
+		}
+	}
+	return prefixes, nil
+}
+
+// isTrustedProxy returns true if remoteAddr's IP belongs to any of the trusted prefixes.
+func isTrustedProxy(remoteAddr string, prefixes []netip.Prefix) bool {
+	if len(prefixes) == 0 {
+		return false
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	// In IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1), unmap to IPv4 for accurate matching
+	addr = addr.Unmap()
+	for _, p := range prefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+type IPRateLimiter struct {
+	mu              sync.Mutex
+	maxConns        int
+	trustedPrefixes []netip.Prefix
+	connsPerIP      map[string]int
+	msgTimes        map[string][]time.Time
+	failedAuths     map[string][]time.Time
+	rejectedCount   uint64
+}
+
+func NewIPRateLimiter(maxConnsPerIP int, trustedPrefixes ...[]netip.Prefix) *IPRateLimiter {
 	if maxConnsPerIP <= 0 {
 		maxConnsPerIP = 64
 	}
-	return &IPRateLimiter{
-		maxConns:    maxConnsPerIP,
-		connsPerIP:  make(map[string]int),
-		msgTimes:    make(map[string][]time.Time),
-		failedAuths: make(map[string][]time.Time),
+	var prefixes []netip.Prefix
+	if len(trustedPrefixes) > 0 && trustedPrefixes[0] != nil {
+		prefixes = trustedPrefixes[0]
+	} else {
+		prefixes = DefaultTrustedProxies()
 	}
+	return &IPRateLimiter{
+		maxConns:        maxConnsPerIP,
+		trustedPrefixes: prefixes,
+		connsPerIP:      make(map[string]int),
+		msgTimes:        make(map[string][]time.Time),
+		failedAuths:     make(map[string][]time.Time),
+	}
+}
+
+func (l *IPRateLimiter) GetClientIP(r *http.Request) string {
+	return getClientIP(r, l.trustedPrefixes)
 }
 
 func (l *IPRateLimiter) AcquireConn(ip string) bool {
@@ -269,24 +369,50 @@ func (l *IPRateLimiter) Rejections() uint64 {
 	return atomic.LoadUint64(&l.rejectedCount)
 }
 
-func getClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			ip := strings.TrimSpace(parts[0])
+// getClientIP extracts the real client IP address from the HTTP request.
+// If remoteAddr belongs to a trusted proxy (e.g. Docker bridge, Nginx, Cloudflare):
+// 1. CF-Connecting-IP (overwritten by Cloudflare CDN/Worker edge, cannot be forged)
+// 2. X-Forwarded-For (first client IP)
+// 3. X-Real-IP
+// If remoteAddr is NOT from a trusted proxy (e.g. direct raw connection from public Internet),
+// proxy headers are strictly ignored to prevent IP spoofing against rate limiting.
+func getClientIP(r *http.Request, trustedPrefixes []netip.Prefix) string {
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		remoteHost = r.RemoteAddr
+	}
+
+	if isTrustedProxy(r.RemoteAddr, trustedPrefixes) {
+		// 1. CF-Connecting-IP (Cloudflare Edge CDN / Worker headers, cannot be forged when coming from Cloudflare)
+		if cfIP := r.Header.Get("CF-Connecting-IP"); cfIP != "" {
+			ip := strings.TrimSpace(cfIP)
+			if ip != "" {
+				return ip
+			}
+		}
+
+		// 2. X-Forwarded-For: client, proxy1, proxy2...
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if len(parts) > 0 {
+				ip := strings.TrimSpace(parts[0])
+				if ip != "" {
+					return ip
+				}
+			}
+		}
+
+		// 3. X-Real-IP
+		if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
+			ip := strings.TrimSpace(xrip)
 			if ip != "" {
 				return ip
 			}
 		}
 	}
-	if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
-		return strings.TrimSpace(xrip)
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
+
+	// Untrusted proxy or raw direct connection: strictly use the underlying socket IP
+	return remoteHost
 }
 
 func exportServerMetrics(broker *SignalBroker, limiter *IPRateLimiter) string {
@@ -386,6 +512,7 @@ func main() {
 	defaultTLSKey := os.Getenv("TLS_KEY")
 	defaultTLSAuto := os.Getenv("TLS_AUTO") == "true" || os.Getenv("TLS_AUTO") == "1"
 	defaultSecret := os.Getenv("SECRET")
+	defaultTrustedProxies := os.Getenv("TRUSTED_PROXIES")
 	defaultMaxIPConns := 64
 	if env := os.Getenv("MAX_IP_CONNS"); env != "" {
 		if v, err := strconv.Atoi(env); err == nil && v > 0 {
@@ -400,11 +527,20 @@ func main() {
 	tlsAuto := flag.Bool("tls-auto", defaultTLSAuto, "Automatically generate in-memory self-signed TLS cert for HTTPS (env: TLS_AUTO)")
 	serverSecret := flag.String("secret", defaultSecret, "Optional server-wide pre-shared secret for agent registration (env: SECRET)")
 	maxIPConns := flag.Int("max-ip-conns", defaultMaxIPConns, "Maximum concurrent WebSocket connections per client IP (env: MAX_IP_CONNS)")
+	trustedProxies := flag.String("trusted-proxies", defaultTrustedProxies, "Comma-separated trusted proxy CIDRs/IPs (default: loopback & RFC1918 private CIDRs; 'none' to disable, env: TRUSTED_PROXIES)")
 	metricsAddr := flag.String("metrics-addr", os.Getenv("METRICS_ADDR"), "Optional dedicated address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default /metrics)")
 	flag.Parse()
 
+	trustedPrefixes, err := ParseTrustedProxies(*trustedProxies)
+	if err != nil {
+		log.Fatalf("Invalid -trusted-proxies configuration: %v", err)
+	}
+	if *trustedProxies != "" && strings.ToLower(*trustedProxies) != "default" {
+		log.Printf("[Server] Custom trusted proxies configured (%d prefixes): %s", len(trustedPrefixes), *trustedProxies)
+	}
+
 	broker := NewSignalBroker(*serverSecret)
-	limiter := NewIPRateLimiter(*maxIPConns)
+	limiter := NewIPRateLimiter(*maxIPConns, trustedPrefixes)
 
 	mux := http.NewServeMux()
 
@@ -432,7 +568,7 @@ func main() {
 	}
 
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		clientIP := getClientIP(r)
+		clientIP := limiter.GetClientIP(r)
 		if !limiter.AcquireConn(clientIP) {
 			log.Printf("[WS] Connection rejected for IP %s: max concurrent connections limit (%d) reached", clientIP, *maxIPConns)
 			http.Error(w, "429 Too Many Requests: Concurrent WebSocket connections limit exceeded", http.StatusTooManyRequests)
@@ -661,7 +797,6 @@ func main() {
 		_ = server.Shutdown(ctx)
 	}()
 
-	var err error
 	if isTLS {
 		if *tlsCert != "" && *tlsKey != "" {
 			err = server.ListenAndServeTLS(*tlsCert, *tlsKey)

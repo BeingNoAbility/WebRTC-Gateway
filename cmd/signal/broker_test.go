@@ -250,3 +250,83 @@ func TestServerMetrics_Export(t *testing.T) {
 		t.Errorf("Expected ratelimit_rejected_total 0 in metrics, got:\n%s", metrics)
 	}
 }
+
+func TestGetClientIP_TrustedProxiesAndHeaderSpoofing(t *testing.T) {
+	defaultLimiter := NewIPRateLimiter(64) // uses DefaultTrustedProxies()
+
+	// 1. Untrusted direct public connection: should IGNORE forged proxy headers
+	reqUntrusted := httptest.NewRequest("GET", "http://example.com/ws", nil)
+	reqUntrusted.RemoteAddr = "203.0.113.5:12345"
+	reqUntrusted.Header.Set("X-Forwarded-For", "1.1.1.1")
+	reqUntrusted.Header.Set("CF-Connecting-IP", "2.2.2.2")
+	reqUntrusted.Header.Set("X-Real-IP", "3.3.3.3")
+
+	got := defaultLimiter.GetClientIP(reqUntrusted)
+	if got != "203.0.113.5" {
+		t.Errorf("Expected direct untrusted remote IP 203.0.113.5, got spoofed %q", got)
+	}
+
+	// 2. Trusted proxy (loopback): CF-Connecting-IP takes highest priority
+	reqLoopback := httptest.NewRequest("GET", "http://example.com/ws", nil)
+	reqLoopback.RemoteAddr = "127.0.0.1:54321"
+	reqLoopback.Header.Set("CF-Connecting-IP", "203.0.113.10")
+	reqLoopback.Header.Set("X-Forwarded-For", "198.51.100.20, 10.0.0.1")
+	reqLoopback.Header.Set("X-Real-IP", "198.51.100.30")
+
+	got = defaultLimiter.GetClientIP(reqLoopback)
+	if got != "203.0.113.10" {
+		t.Errorf("Expected CF-Connecting-IP 203.0.113.10, got %q", got)
+	}
+
+	// 3. Trusted proxy (Docker private IP 172.17.0.1): X-Forwarded-For first IP
+	reqDocker := httptest.NewRequest("GET", "http://example.com/ws", nil)
+	reqDocker.RemoteAddr = "172.17.0.1:45678"
+	reqDocker.Header.Set("X-Forwarded-For", "198.51.100.25, 172.17.0.1")
+
+	got = defaultLimiter.GetClientIP(reqDocker)
+	if got != "198.51.100.25" {
+		t.Errorf("Expected first XFF IP 198.51.100.25, got %q", got)
+	}
+
+	// 4. IPv4-mapped IPv6 connection (::ffff:172.17.0.1) from container host
+	reqMapped := httptest.NewRequest("GET", "http://example.com/ws", nil)
+	reqMapped.RemoteAddr = "[::ffff:172.17.0.1]:45678"
+	reqMapped.Header.Set("X-Forwarded-For", "198.51.100.35")
+
+	got = defaultLimiter.GetClientIP(reqMapped)
+	if got != "198.51.100.35" {
+		t.Errorf("Expected unmapped IPv4 proxy matching and XFF IP 198.51.100.35, got %q", got)
+	}
+
+	// 5. Custom trusted proxy list: parse custom CIDR
+	customPrefixes, err := ParseTrustedProxies("203.0.113.0/24, 198.51.100.5")
+	if err != nil {
+		t.Fatalf("Failed to parse custom trusted proxies: %v", err)
+	}
+	customLimiter := NewIPRateLimiter(64, customPrefixes)
+
+	reqCustom := httptest.NewRequest("GET", "http://example.com/ws", nil)
+	reqCustom.RemoteAddr = "203.0.113.99:9999"
+	reqCustom.Header.Set("X-Forwarded-For", "8.8.8.8")
+
+	got = customLimiter.GetClientIP(reqCustom)
+	if got != "8.8.8.8" {
+		t.Errorf("Expected custom proxy match and XFF IP 8.8.8.8, got %q", got)
+	}
+
+	// 6. Explicitly disabled trusted proxies: "none"
+	nonePrefixes, err := ParseTrustedProxies("none")
+	if err != nil {
+		t.Fatalf("Failed to parse 'none' trusted proxies: %v", err)
+	}
+	noneLimiter := NewIPRateLimiter(64, nonePrefixes)
+
+	reqNone := httptest.NewRequest("GET", "http://example.com/ws", nil)
+	reqNone.RemoteAddr = "127.0.0.1:9999"
+	reqNone.Header.Set("X-Forwarded-For", "8.8.8.8")
+
+	got = noneLimiter.GetClientIP(reqNone)
+	if got != "127.0.0.1" {
+		t.Errorf("Expected 'none' trusted proxies to reject loopback XFF and return socket IP 127.0.0.1, got %q", got)
+	}
+}

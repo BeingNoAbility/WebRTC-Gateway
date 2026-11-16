@@ -192,6 +192,7 @@ The Agent supports both command-line flags and environment variables:
 | `-secret` | `SECRET` | `""` | Optional global master secret token to restrict Agent registrations |
 | `-static` | `STATIC_DIR` | `./web/dist` | Custom static web directory (defaults to embedded DistFS) |
 | `-max-ip-conns` | `MAX_IP_CONNS` | `64` | Maximum concurrent WebSocket connections per IP address |
+| `-trusted-proxies` | `TRUSTED_PROXIES` | `""` (private CIDRs) | Comma-separated trusted proxy CIDRs/IPs (set `none` to disable proxy headers) |
 | `-metrics-addr` | `METRICS_ADDR` | `""` | Optional dedicated Prometheus `/metrics` address (default served on `/metrics`) |
 
 ---

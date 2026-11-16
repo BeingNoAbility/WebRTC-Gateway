@@ -190,6 +190,7 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-secret` | `SECRET` | `""` | 可选的服务端全局预共享密钥，仅允许匹配口令的 Agent 注册 |
 | `-static` | `STATIC_DIR` | `./web/dist` | 静态网页资产目录（默认优先使用二进制内置嵌入的 DistFS） |
 | `-max-ip-conns` | `MAX_IP_CONNS` | `64` | 单个 IP 允许的最大并发 WebSocket 握手连接数（防 DoS 耗尽套接字） |
+| `-trusted-proxies` | `TRUSTED_PROXIES` | `""` (默认私网) | 受信代理 CIDR 列表（默认信任回环及 RFC1918 私网；填 `none` 禁用代理头信任） |
 | `-metrics-addr` | `METRICS_ADDR` | `""` | 可选的专用 Prometheus 监控导出地址（如 `:9090`，默认直接复用主服务 `/metrics`） |
 
 ---
