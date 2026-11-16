@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.3.0] - 2026-11-16
+
+### Added
+- **WebRTC Standard ICE Restart (Mobile Roaming Self-Healing)**: Implemented two-stage self-healing pipeline for network handoffs (e.g. Wi-Fi to 5G cellular, AP roaming). Seamlessly reconnects broken signaling sockets and renegotiates in-place on existing RTCPeerConnections with `iceRestart: true`.
+- **Agent Teardown Grace Window**: Agent introduces a 5-second grace window upon connection disruption instead of immediately destructing connections. If an ICE Restart offer arrives within 5 seconds, DataChannels, Mux multiplexers, active streams, and session cookies are preserved 100% without user page reloads.
+- **Stateless HMAC-SHA256 Signed Share Links**: Pure mathematical zero-database authorization scheme (`#nodeId?exp=timestamp&sign=hex_hmac`). Allows temporary access to protected nodes without exposing permanent master secrets. Naturally expires after expiration timestamp.
+- **1-Click Share Link Generator in Web UI**: Interactive generator in settings modal supporting 1h, 6h, 24h, 7d, 30d durations using browser `crypto.subtle` HMAC-SHA256.
+- **CLI Share Link Generator**: Added `-sign-link <duration>` and `-portal-url <url>` flags to `agent` binary to easily generate temporary shareable links from the command line.
+- **Hash Parameter Retention**: Enhanced route synchronization engine to preserve temporary share signatures (`exp` and `sign`) across iframe sub-route navigation.
+
+---
+
 ## [v1.2.0] - 2026-11-16
 
 ### Added

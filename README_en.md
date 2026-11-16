@@ -56,6 +56,8 @@ This project is built upon **WebRTC RTCDataChannel (SCTP) + In-Browser Service W
 
 - 🚀 **True Zero-Client Experience**: Visitors only need a modern browser on a desktop or phone. Open the URL to access private intranet services immediately.
 - ⚡ **P2P Direct Line Speed**: Powered by WebRTC ICE/STUN NAT traversal. Enjoy full upstream speeds of home gigabit broadband (verified LAN RTT of 1~3ms; cross-ISP P2P utilizes full broadband uplink without third-party throttling).
+- 🔄 **WebRTC Standard ICE Restart (Mobile Roaming Self-Healing)**: When devices switch networks (e.g. Wi-Fi to 5G cellular, AP roaming, or elevator signal restoration), the client automatically reconnects the signaling socket and negotiates an in-place ICE Restart. Streaming media, WebSockets, and page sessions continue without reloading.
+- 🔗 **Stateless HMAC-SHA256 Time-Limited Share Links**: Pure mathematical zero-database authorization. Generate temporary shareable links (`#nodeId?exp=xxx&sign=yyy`) with 1-click in the Web UI or CLI. Mathematically expires when elapsed without leaking master credentials.
 - 🔒 **End-to-End Native Encryption**: Transport layer enforces DTLS-SRTP asymmetric negotiation and strong cryptography. The signaling broker only routes metadata; relay nodes cannot decrypt or inspect application traffic.
 - 🌐 **Multi-Node & Subdomain Awareness**: Run multiple machines and services simultaneously. Route seamlessly via `<nodeId>.p2p.domain.com`, `#nodeId`, or interactive settings modal.
 - 🧰 **Transparent Web Protocol Stack Virtualization**:
@@ -169,6 +171,8 @@ The Agent supports both command-line flags and environment variables:
 | `-turn-user` | `TURN_USER` | `""` | Optional TURN relay authentication username |
 | `-turn-pass` | `TURN_PASS` | `""` | Optional TURN relay authentication credential / password |
 | `-stun-servers` | `STUN_SERVERS` | `""` | Optional custom comma-separated STUN server list |
+| `-sign-link` | - | `0` | Generate a temporary stateless share link with expiration (e.g. `1h`, `24h`, `7d`) and exit |
+| `-portal-url` | - | `https://your-portal-domain.com` | Base URL of Web Portal used for `-sign-link` generation |
 
 ---
 
@@ -198,6 +202,15 @@ The Agent supports both command-line flags and environment variables:
      - When an Agent first registers a `node_id`, it binds its secret with the signaling server;
      - Rogue agents cannot overwrite or hijack an existing online node without providing the matching secret;
      - The signaling server can also enforce `-secret` cluster-wide master tokens.
+- **Stateless HMAC-SHA256 Time-Limited Sharing**:
+  - Zero database, zero Redis, zero server-side revocation tables required;
+  - Pure mathematical validation: `sign = HMAC-SHA256(nodeId + ":" + exp, master_secret)`;
+  - When a visitor opens `#nodeId?exp=xxx&sign=yyy`, the Agent validates freshness and HMAC locally in constant time;
+  - Web console provides 1-click generation for 1h, 6h, 24h, 7d, 30d durations; CLI supports `./agent -secret xxx -sign-link 24h`.
+- **Connection Resilience & Mobile Roaming Self-Healing (WebRTC ICE Restart)**:
+  - When mobile devices switch between Wi-Fi and 5G cellular or roaming APs, a two-stage pipeline triggers automatically;
+  - Re-establishes broken signaling sockets and renegotiates in-place on the existing `RTCPeerConnection` with `iceRestart: true`;
+  - Agent introduces a 5-second grace window, preserving the DataChannel and Mux state without reloading the inner app.
 - **Session Isolation**: Each visitor browser session is allocated isolated channel IDs and CookieJars.
 
 ---

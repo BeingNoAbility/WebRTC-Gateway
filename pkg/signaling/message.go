@@ -25,6 +25,9 @@ type Message struct {
 	Role           string                     `json:"role,omitempty"` // "agent" or "client"
 	Secret         string                     `json:"secret,omitempty"`
 	RequiresSecret bool                       `json:"requires_secret,omitempty"`
+	IceRestart     bool                       `json:"ice_restart,omitempty"`
+	Exp            int64                      `json:"exp,omitempty"`  // Share link expiration timestamp (unix seconds)
+	Sign           string                     `json:"sign,omitempty"` // HMAC-SHA256 signature for temporary share
 	SDP            *webrtc.SessionDescription `json:"sdp,omitempty"`
 	Candidate      *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
 	Error          string                     `json:"error,omitempty"`

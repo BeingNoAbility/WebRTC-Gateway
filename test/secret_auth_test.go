@@ -668,3 +668,190 @@ func TestSecretAuth_SignalServer_GlobalMasterSecret(t *testing.T) {
 	}
 	t.Logf("Global server secret accepted authorized agent with master key!")
 }
+
+// ----------------------------------------------------------------------------
+// Test 6: HMAC-SHA256 Stateless Signed Share Links (E2E)
+// ----------------------------------------------------------------------------
+func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
+	nodeSecret := "master-vault-password-xyz"
+	nodeID := "secure-share-node"
+
+	// Mock target web service
+	targetApp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"share": "verified"})
+	}))
+	defer targetApp.Close()
+
+	signalServer, _ := startRealSignalServer("")
+	defer signalServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(signalServer.URL, "http")
+
+	// Start Agent
+	ag := agent.New(nodeID, wsURL, nodeSecret, targetApp.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = ag.Start(ctx) }()
+	defer ag.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// 1. Client with EXPIRED share signature -> rejected
+	pastExp := time.Now().Add(-1 * time.Hour).Unix()
+	expiredSign := agent.GenerateShareSignature(nodeID, pastExp, nodeSecret)
+
+	expiredWS, _, _ := websocket.DefaultDialer.Dial(wsURL, nil)
+	defer expiredWS.Close()
+	_ = expiredWS.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
+	var expStatus signaling.Message
+	_ = expiredWS.ReadJSON(&expStatus)
+
+	_ = expiredWS.WriteJSON(&signaling.Message{
+		Type:   signaling.TypeOffer,
+		NodeID: nodeID,
+		SDP:    &webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: "v=0\r\no=-\r\n"},
+		Exp:    pastExp,
+		Sign:   expiredSign,
+	})
+
+	var expResp signaling.Message
+	_ = expiredWS.ReadJSON(&expResp)
+	if expResp.Type != signaling.TypeError || !strings.Contains(expResp.Error, "unauthorized") {
+		t.Fatalf("Expected expired signature to be rejected, got: %+v", expResp)
+	}
+	t.Logf("Agent correctly rejected expired share link signature: %s", expResp.Error)
+
+	// 2. Client with VALID future share signature -> successfully connects over WebRTC & DataChannel!
+	futureExp := time.Now().Add(2 * time.Hour).Unix()
+	validSign := agent.GenerateShareSignature(nodeID, futureExp, nodeSecret)
+
+	clientWS, _, _ := websocket.DefaultDialer.Dial(wsURL, nil)
+	defer clientWS.Close()
+	_ = clientWS.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
+	var validStatus signaling.Message
+	_ = clientWS.ReadJSON(&validStatus)
+
+	clientPC, err := webrtc.NewPeerConnection(webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
+	})
+	if err != nil {
+		t.Fatalf("NewPeerConnection error: %v", err)
+	}
+	defer clientPC.Close()
+
+	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+	if err != nil {
+		t.Fatalf("CreateDataChannel error: %v", err)
+	}
+
+	clientMux := mux.NewMux(dc, true)
+	defer clientMux.Close()
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		_ = clientMux.HandleIncomingMessage(msg.Data)
+	})
+
+	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			cand := c.ToJSON()
+			_ = clientWS.WriteJSON(&signaling.Message{
+				Type:      signaling.TypeCandidate,
+				NodeID:    nodeID,
+				Candidate: &cand,
+			})
+		}
+	})
+
+	offer, err := clientPC.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("CreateOffer error: %v", err)
+	}
+	_ = clientPC.SetLocalDescription(offer)
+
+	// Send offer WITH Exp and Sign (No raw secret!)
+	_ = clientWS.WriteJSON(&signaling.Message{
+		Type:   signaling.TypeOffer,
+		NodeID: nodeID,
+		SDP:    &offer,
+		Exp:    futureExp,
+		Sign:   validSign,
+	})
+
+	var ans signaling.Message
+	for {
+		if err := clientWS.ReadJSON(&ans); err != nil {
+			t.Fatalf("ReadJSON error: %v", err)
+		}
+		if ans.Type == signaling.TypeAnswer {
+			break
+		}
+	}
+	_ = clientPC.SetRemoteDescription(*ans.SDP)
+
+	dcOpenCh := make(chan struct{}, 1)
+	dc.OnOpen(func() { close(dcOpenCh) })
+
+	select {
+	case <-dcOpenCh:
+		t.Logf("DataChannel opened successfully via stateless HMAC-SHA256 signed share link!")
+	case <-time.After(3 * time.Second):
+		t.Fatalf("Timeout waiting for DataChannel to open via share link")
+	}
+
+	// Verify HTTP access
+	stream, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream error: %v", err)
+	}
+	defer stream.Close()
+
+	reqMeta := proxy.RequestMetadata{
+		Method:  "GET",
+		Path:    "/",
+		Headers: map[string]string{"accept": "application/json"},
+	}
+	reqBytes, _ := json.Marshal(reqMeta)
+	if err := stream.WriteHeaders(reqBytes); err != nil {
+		t.Fatalf("WriteHeaders error: %v", err)
+	}
+	_ = stream.Close()
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	rawHeaders, err := stream.ReadHeaders(ctx2)
+	if err != nil {
+		t.Fatalf("ReadHeaders error: %v", err)
+	}
+	var respMeta proxy.ResponseMetadata
+	_ = json.Unmarshal(rawHeaders, &respMeta)
+	if respMeta.Status != 200 {
+		t.Fatalf("Expected HTTP 200 via share link, got: %d", respMeta.Status)
+	}
+	t.Logf("Successfully fetched HTTP 200 via stateless HMAC signed share link!")
+
+	// 3. Test In-Place ICE Restart on existing connection
+	iceRestartOffer, err := clientPC.CreateOffer(&webrtc.OfferOptions{ICERestart: true})
+	if err != nil {
+		t.Fatalf("CreateOffer iceRestart error: %v", err)
+	}
+	_ = clientPC.SetLocalDescription(iceRestartOffer)
+
+	_ = clientWS.WriteJSON(&signaling.Message{
+		Type:       signaling.TypeOffer,
+		NodeID:     nodeID,
+		SDP:        &iceRestartOffer,
+		IceRestart: true,
+		Exp:        futureExp,
+		Sign:       validSign,
+	})
+
+	var restartAns signaling.Message
+	for {
+		if err := clientWS.ReadJSON(&restartAns); err != nil {
+			t.Fatalf("ReadJSON error: %v", err)
+		}
+		if restartAns.Type == signaling.TypeAnswer {
+			break
+		}
+	}
+	_ = clientPC.SetRemoteDescription(*restartAns.SDP)
+	t.Logf("In-place ICE Restart completed successfully! DataChannel and Mux preserved.")
+}

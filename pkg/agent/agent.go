@@ -3,9 +3,13 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -38,9 +42,11 @@ type Agent struct {
 	httpProxy     *proxy.HTTPProxy
 	wsProxy       *proxy.WSProxy
 
-	webrtcConfig webrtc.Configuration
-	activeConns  map[string]*webrtc.PeerConnection
-	connMu       sync.Mutex
+	webrtcConfig     webrtc.Configuration
+	activeConns      map[string]*webrtc.PeerConnection
+	connMu           sync.Mutex
+	pendingTeardowns map[string]*time.Timer
+	pendingMu        sync.Mutex
 }
 
 func New(nodeID, signalURL, secret, target string) *Agent {
@@ -72,7 +78,8 @@ func New(nodeID, signalURL, secret, target string) *Agent {
 				{URLs: []string{"stun:stun.l.google.com:19302"}},
 			},
 		},
-		activeConns: make(map[string]*webrtc.PeerConnection),
+		activeConns:      make(map[string]*webrtc.PeerConnection),
+		pendingTeardowns: make(map[string]*time.Timer),
 	}
 }
 
@@ -155,6 +162,97 @@ func (a *Agent) sendSignal(msg *signaling.Message) error {
 	return a.wsConn.WriteJSON(msg)
 }
 
+// GenerateShareSignature calculates an HMAC-SHA256 signature for a temporary share link.
+func GenerateShareSignature(nodeID string, exp int64, secret string) string {
+	data := fmt.Sprintf("%s:%d", nodeID, exp)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(data))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// GenerateShareLink formats a ready-to-share URL with HMAC signature.
+func GenerateShareLink(baseURL, nodeID, secret string, duration time.Duration) string {
+	if secret == "" {
+		return fmt.Sprintf("%s#%s", strings.TrimRight(baseURL, "/"), nodeID)
+	}
+	exp := time.Now().Add(duration).Unix()
+	sign := GenerateShareSignature(nodeID, exp, secret)
+	return fmt.Sprintf("%s/#%s?exp=%d&sign=%s", strings.TrimRight(baseURL, "/"), nodeID, exp, sign)
+}
+
+// VerifyAuth validates whether a client connection request is authorized.
+// It supports both direct master secret tokens and time-limited HMAC-SHA256 signatures.
+func (a *Agent) VerifyAuth(nodeID, masterSecret, reqSecret string, exp int64, sign string) bool {
+	if masterSecret == "" {
+		return true // No authentication configured on agent
+	}
+
+	// 1. Direct master secret token verification
+	if reqSecret != "" && subtle.ConstantTimeCompare([]byte(reqSecret), []byte(masterSecret)) == 1 {
+		return true
+	}
+
+	// 2. Stateless HMAC-SHA256 signed temporary link verification
+	if sign != "" && exp > 0 {
+		now := time.Now().Unix()
+		// Allow 60 seconds clock skew tolerance
+		if now > exp+60 {
+			log.Printf("[Agent] Share signature expired: exp=%d, now=%d", exp, now)
+			return false
+		}
+		expectedSign := GenerateShareSignature(nodeID, exp, masterSecret)
+		if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedSign))) == 1 {
+			return true
+		}
+		log.Printf("[Agent] Share signature mismatch for node %s", nodeID)
+		return false
+	}
+
+	return false
+}
+
+func (a *Agent) schedulePendingTeardown(sessionID, cookieSession string, pc *webrtc.PeerConnection) {
+	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
+
+	if timer, exists := a.pendingTeardowns[sessionID]; exists {
+		timer.Stop()
+	}
+
+	a.pendingTeardowns[sessionID] = time.AfterFunc(5*time.Second, func() {
+		a.pendingMu.Lock()
+		delete(a.pendingTeardowns, sessionID)
+		a.pendingMu.Unlock()
+
+		log.Printf("[Agent] [Session %s] Grace period expired (5s), tearing down connection", sessionID)
+		a.teardownSession(sessionID, cookieSession, pc)
+	})
+	log.Printf("[Agent] [Session %s] Connection degraded/disconnected, started 5s grace period for ICE Restart", sessionID)
+}
+
+func (a *Agent) cancelPendingTeardown(sessionID string) {
+	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
+	if timer, exists := a.pendingTeardowns[sessionID]; exists {
+		timer.Stop()
+		delete(a.pendingTeardowns, sessionID)
+		log.Printf("[Agent] [Session %s] Cancelled pending teardown (reconnected or ICE Restart in progress)", sessionID)
+	}
+}
+
+func (a *Agent) teardownSession(sessionID, cookieSession string, pc *webrtc.PeerConnection) {
+	a.connMu.Lock()
+	currPC, exists := a.activeConns[sessionID]
+	if exists && (currPC == pc || pc == nil) {
+		delete(a.activeConns, sessionID)
+	}
+	a.connMu.Unlock()
+	a.cookieManager.RemoveSession(cookieSession)
+	if pc != nil {
+		_ = pc.Close()
+	}
+}
+
 // Close shuts down all active network connections and WebRTC peer connections.
 func (a *Agent) Close() {
 	a.wsMu.Lock()
@@ -163,6 +261,13 @@ func (a *Agent) Close() {
 		a.wsConn = nil
 	}
 	a.wsMu.Unlock()
+
+	a.pendingMu.Lock()
+	for id, timer := range a.pendingTeardowns {
+		timer.Stop()
+		delete(a.pendingTeardowns, id)
+	}
+	a.pendingMu.Unlock()
 
 	a.connMu.Lock()
 	for id, pc := range a.activeConns {
@@ -268,18 +373,18 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 			log.Printf("[Agent] Server confirmed registration for node: %s", msg.NodeID)
 
 		case signaling.TypeOffer:
-			log.Printf("[Agent] Received Offer from client session=%s", msg.SessionID)
-			if a.Secret != "" && subtle.ConstantTimeCompare([]byte(msg.Secret), []byte(a.Secret)) != 1 {
-				log.Printf("[Agent] Rejected unauthorized Offer for session=%s (secret mismatch or missing)", msg.SessionID)
+			log.Printf("[Agent] Received Offer from client session=%s (ice_restart=%v, exp=%d)", msg.SessionID, msg.IceRestart, msg.Exp)
+			if !a.VerifyAuth(a.NodeID, a.Secret, msg.Secret, msg.Exp, msg.Sign) {
+				log.Printf("[Agent] Rejected unauthorized Offer for session=%s (invalid secret or expired/invalid signature)", msg.SessionID)
 				_ = a.sendSignal(&signaling.Message{
 					Type:      signaling.TypeError,
 					NodeID:    a.NodeID,
 					SessionID: msg.SessionID,
-					Error:     "unauthorized: invalid or missing secret token",
+					Error:     "unauthorized: invalid secret or expired/invalid share signature",
 				})
 				continue
 			}
-			go a.handleOffer(msg.SessionID, msg.SDP, msg.ClientToken)
+			go a.handleOffer(msg.SessionID, msg.SDP, msg.ClientToken, msg.IceRestart)
 
 		case signaling.TypeCandidate:
 			a.handleRemoteCandidate(msg.SessionID, msg.Candidate)
@@ -290,10 +395,45 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
-func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription, clientToken string) {
+func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription, clientToken string, iceRestart bool) {
 	cookieSession := sessionID
 	if clientToken != "" {
 		cookieSession = clientToken
+	}
+
+	a.cancelPendingTeardown(sessionID)
+
+	a.connMu.Lock()
+	existingPC, exists := a.activeConns[sessionID]
+	a.connMu.Unlock()
+
+	// In-place ICE Restart on existing PeerConnection
+	if iceRestart && exists && existingPC != nil && existingPC.ConnectionState() != webrtc.PeerConnectionStateClosed {
+		log.Printf("[Agent] [Session %s] Processing in-place ICE Restart on existing PeerConnection", sessionID)
+		if err := existingPC.SetRemoteDescription(*sdp); err != nil {
+			log.Printf("[Agent] [Session %s] ICE Restart SetRemoteDescription error: %v, falling back to new PC", sessionID, err)
+		} else {
+			answer, err := existingPC.CreateAnswer(nil)
+			if err != nil {
+				log.Printf("[Agent] [Session %s] ICE Restart CreateAnswer error: %v", sessionID, err)
+			} else if err := existingPC.SetLocalDescription(answer); err != nil {
+				log.Printf("[Agent] [Session %s] ICE Restart SetLocalDescription error: %v", sessionID, err)
+			} else {
+				_ = a.sendSignal(&signaling.Message{
+					Type:      signaling.TypeAnswer,
+					NodeID:    a.NodeID,
+					SessionID: sessionID,
+					SDP:       &answer,
+				})
+				log.Printf("[Agent] [Session %s] Sent in-place ICE Restart Answer to client", sessionID)
+				return
+			}
+		}
+	}
+
+	// Close old PC if replacing session
+	if exists && existingPC != nil {
+		_ = existingPC.Close()
 	}
 
 	pc, err := webrtc.NewPeerConnection(a.webrtcConfig)
@@ -317,23 +457,25 @@ func (a *Agent) handleOffer(sessionID string, sdp *webrtc.SessionDescription, cl
 
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Printf("[Agent] [Session %s] ICE State: %s", sessionID, state.String())
-		if state == webrtc.ICEConnectionStateFailed || state == webrtc.ICEConnectionStateClosed {
-			a.connMu.Lock()
-			delete(a.activeConns, sessionID)
-			a.connMu.Unlock()
-			a.cookieManager.RemoveSession(cookieSession)
-			_ = pc.Close()
+		if state == webrtc.ICEConnectionStateConnected || state == webrtc.ICEConnectionStateCompleted {
+			a.cancelPendingTeardown(sessionID)
+		} else if state == webrtc.ICEConnectionStateDisconnected || state == webrtc.ICEConnectionStateFailed {
+			a.schedulePendingTeardown(sessionID, cookieSession, pc)
+		} else if state == webrtc.ICEConnectionStateClosed {
+			a.cancelPendingTeardown(sessionID)
+			a.teardownSession(sessionID, cookieSession, pc)
 		}
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("[Agent] [Session %s] PeerConnection State: %s", sessionID, state.String())
-		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
-			a.connMu.Lock()
-			delete(a.activeConns, sessionID)
-			a.connMu.Unlock()
-			a.cookieManager.RemoveSession(cookieSession)
-			_ = pc.Close()
+		if state == webrtc.PeerConnectionStateConnected {
+			a.cancelPendingTeardown(sessionID)
+		} else if state == webrtc.PeerConnectionStateDisconnected || state == webrtc.PeerConnectionStateFailed {
+			a.schedulePendingTeardown(sessionID, cookieSession, pc)
+		} else if state == webrtc.PeerConnectionStateClosed {
+			a.cancelPendingTeardown(sessionID)
+			a.teardownSession(sessionID, cookieSession, pc)
 		}
 	})
 

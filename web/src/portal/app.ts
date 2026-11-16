@@ -5,10 +5,30 @@ const DEFAULT_SIGNAL_URL = (typeof window !== 'undefined' && window.location && 
   ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`
   : 'ws://127.0.0.1:8888/ws';
 
+async function computeHMACSHA256Hex(keyStr: string, message: string): Promise<string> {
+  const enc = new TextEncoder();
+  const keyData = enc.encode(keyStr);
+  const msgData = enc.encode(message);
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    keyData,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', cryptoKey, msgData);
+  const hashArray = Array.from(new Uint8Array(signature));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 class PortalApp {
   private peerId: string;
   private signalUrl: string;
   private secret: string = '';
+  private shareExp: number = 0;
+  private shareSign: string = '';
+  private isIceRestarting: boolean = false;
+  private iceRestartTimer: any = null;
   private clientToken: string = '';
   private initialSubpath: string = '/';
   private ws: WebSocket | null = null;
@@ -38,6 +58,8 @@ class PortalApp {
     this.peerId = config.peerId;
     this.signalUrl = config.signalUrl;
     this.secret = config.secret;
+    this.shareExp = config.exp || 0;
+    this.shareSign = config.sign || '';
     this.initialSubpath = config.path || '/';
 
     // Long-lived client token for persisting HttpOnly sessions across page reloads (F5)
@@ -87,6 +109,9 @@ class PortalApp {
       const hashParams = new URLSearchParams();
       if (this.secret) {
         hashParams.set('secret', this.secret);
+      } else if (this.shareSign && this.shareExp) {
+        hashParams.set('exp', this.shareExp.toString());
+        hashParams.set('sign', this.shareSign);
       }
       if (subPath && subPath !== '/') {
         hashParams.set('path', subPath);
@@ -169,7 +194,14 @@ class PortalApp {
   }
 
   // Resolves configuration with priority: Query -> Hash (#nodeId) -> Explicit .p2p. Subdomain -> Stored Peer -> Subdomain -> Built-in Defaults
-  private resolveInitialConfig(): { peerId: string; signalUrl: string; secret: string; path: string } {
+  private resolveInitialConfig(): {
+    peerId: string;
+    signalUrl: string;
+    secret: string;
+    path: string;
+    exp?: number;
+    sign?: string;
+  } {
     const params = new URLSearchParams(window.location.search);
 
     // 1. Peer ID and Secret resolution:
@@ -177,6 +209,8 @@ class PortalApp {
     let peerId = params.get('peer') || params.get('node');
     let secret = '';
     let initialPath = '/';
+    let exp = 0;
+    let sign = '';
 
     // Parse path from query if present and safe
     const queryPath = params.get('path');
@@ -198,16 +232,20 @@ class PortalApp {
       } catch {}
     }
 
-    // Priority 2: URL hash (#nodeId or #nodeId?secret=xxx&path=/subpath)
-    if (!peerId && window.location.hash) {
+    // Priority 2: URL hash (#nodeId or #nodeId?secret=xxx&exp=xxx&sign=yyy&path=/subpath)
+    if (window.location.hash) {
       const rawHash = window.location.hash.replace(/^#\/?/, '').trim();
       if (rawHash) {
         const parts = rawHash.split(/[?&]/);
-        peerId = parts[0];
+        if (!peerId) peerId = parts[0];
         for (let i = 1; i < parts.length; i++) {
           const [k, v] = parts[i].split('=');
           if ((k === 'secret' || k === 'token') && v) {
             secret = decodeURIComponent(v);
+          } else if (k === 'exp' && v) {
+            exp = parseInt(decodeURIComponent(v), 10) || 0;
+          } else if (k === 'sign' && v) {
+            sign = decodeURIComponent(v);
           } else if (k === 'path' && v) {
             const dec = decodeURIComponent(v);
             if (dec.startsWith('/') && !dec.startsWith('//') && !dec.toLowerCase().includes('javascript:')) {
@@ -278,7 +316,7 @@ class PortalApp {
       }
     } catch {}
 
-    return { peerId, signalUrl, secret, path: initialPath };
+    return { peerId, signalUrl, secret, path: initialPath, exp, sign };
   }
 
   private log(msg: string) {
@@ -327,29 +365,42 @@ class PortalApp {
       this.openSettingsModal();
     });
 
-    // Listen to hash changes (e.g. #linux_node -> #win_node or #nodeId?secret=xxx)
+    // Listen to hash changes (e.g. #linux_node -> #win_node or #nodeId?secret=xxx or #nodeId?exp=xxx&sign=yyy)
     window.addEventListener('hashchange', () => {
       const rawHash = window.location.hash.replace(/^#\/?/, '').trim();
       if (rawHash) {
         const parts = rawHash.split(/[?&]/);
         const newHash = parts[0];
         let newSecret = '';
+        let newExp = 0;
+        let newSign = '';
         for (let i = 1; i < parts.length; i++) {
           const [k, v] = parts[i].split('=');
           if ((k === 'secret' || k === 'token') && v) {
             newSecret = decodeURIComponent(v);
+          } else if (k === 'exp' && v) {
+            newExp = parseInt(decodeURIComponent(v), 10) || 0;
+          } else if (k === 'sign' && v) {
+            newSign = decodeURIComponent(v);
           }
         }
-        if (newHash && (newHash !== this.peerId || (newSecret && newSecret !== this.secret))) {
+        if (
+          newHash &&
+          (newHash !== this.peerId ||
+            (newSecret && newSecret !== this.secret) ||
+            (newSign && newSign !== this.shareSign))
+        ) {
           this.log(`URL hash changed to #${rawHash}, switching peer...`);
           this.peerId = newHash;
+          this.shareExp = newExp;
+          this.shareSign = newSign;
           if (newSecret) {
             this.secret = newSecret;
             try {
               sessionStorage.setItem('p2p_secret', newSecret);
               localStorage.setItem('p2p_secret_' + newHash, newSecret);
             } catch {}
-          } else {
+          } else if (!newSign) {
             this.secret = sessionStorage.getItem('p2p_secret') || localStorage.getItem('p2p_secret_' + newHash) || '';
           }
           try {
@@ -447,7 +498,7 @@ class PortalApp {
         }
         if (msg.status === 'online') {
           this.hideOfflinePrompt();
-          if (msg.requires_secret && !this.secret) {
+          if (msg.requires_secret && !this.secret && !this.shareSign) {
             this.log(`Node [${this.peerId}] requires an access token (secret).`);
             if (this.signalVal) this.signalVal.textContent = 'Auth Required';
             this.showAuthPrompt(this.peerId);
@@ -484,7 +535,10 @@ class PortalApp {
           this.log(`Access rejected by node: ${msg.error}`);
           if (this.signalVal) this.signalVal.textContent = 'Auth Failed (401)';
           this.updateConnState('disconnected');
-          this.showAuthPrompt(this.peerId, '访问口令不正确或缺失，请重新输入');
+          const promptMsg = this.shareSign
+            ? '分享链接已失效或签名不匹配，请输入访问口令'
+            : '访问口令不正确或缺失，请重新输入';
+          this.showAuthPrompt(this.peerId, promptMsg);
         }
         break;
     }
@@ -542,9 +596,40 @@ class PortalApp {
     };
 
     this.pc.oniceconnectionstatechange = () => {
-      this.log(`ICE Connection State: ${this.pc?.iceConnectionState}`);
-      if (this.pc?.iceConnectionState === 'disconnected' || this.pc?.iceConnectionState === 'failed') {
-        this.updateConnState('disconnected');
+      const state = this.pc?.iceConnectionState;
+      this.log(`ICE Connection State: ${state}`);
+      if (state === 'connected' || state === 'completed') {
+        if (this.isIceRestarting) {
+          this.log('ICE Restart succeeded! PeerConnection fully recovered with 0 session loss.');
+          this.isIceRestarting = false;
+          if (this.iceRestartTimer) clearTimeout(this.iceRestartTimer);
+        }
+        this.updateConnState('connected');
+      } else if (state === 'disconnected') {
+        this.log('ICE connection disconnected (transient or network roaming). Scheduling ICE Restart...');
+        this.updateConnState('connecting');
+        setTimeout(() => {
+          if (this.pc?.iceConnectionState === 'disconnected' || this.pc?.iceConnectionState === 'failed') {
+            this.triggerIceRestart();
+          }
+        }, 1200);
+      } else if (state === 'failed') {
+        this.log('ICE connection failed! Triggering immediate ICE Restart...');
+        this.triggerIceRestart();
+      }
+    };
+
+    this.pc.onconnectionstatechange = () => {
+      const state = this.pc?.connectionState;
+      this.log(`PeerConnection State: ${state}`);
+      if (state === 'connected') {
+        if (this.isIceRestarting) {
+          this.isIceRestarting = false;
+          if (this.iceRestartTimer) clearTimeout(this.iceRestartTimer);
+        }
+        this.updateConnState('connected');
+      } else if (state === 'failed') {
+        this.triggerIceRestart();
       }
     };
 
@@ -567,6 +652,8 @@ class PortalApp {
         sdp: offer,
         secret: this.secret,
         client_token: this.clientToken,
+        exp: this.shareExp || undefined,
+        sign: this.shareSign || undefined,
       })
     );
   }
@@ -856,6 +943,27 @@ class PortalApp {
             <input id="inputTurnPass" type="password" placeholder="Password" style="flex: 1; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-family: monospace;" />
           </div>
         </div>
+        <div style="margin-bottom: 20px; border-top: 1px solid #30363d; padding-top: 16px;">
+          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">🔗 限时安全分享链接 (Stateless Signed Share Link)</label>
+          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">基于 HMAC-SHA256 纯数学时效签名，无需对方输入密钥，到期自动失效。</div>
+          <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+            <select id="selShareDuration" style="flex: 1; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 10px; border-radius: 6px; font-size: 12px;">
+              <option value="3600">有效 1 小时 (1 Hour)</option>
+              <option value="21600">有效 6 小时 (6 Hours)</option>
+              <option value="86400" selected>有效 24 小时 (1 Day)</option>
+              <option value="604800">有效 7 天 (7 Days)</option>
+              <option value="2592000">有效 30 天 (30 Days)</option>
+            </select>
+            <button id="btnGenShareLink" type="button" style="background: #238636; color: #ffffff; border: none; padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;">生成链接</button>
+          </div>
+          <div id="shareLinkContainer" style="display: none; flex-direction: column; gap: 6px;">
+            <div style="display: flex; gap: 6px;">
+              <input id="inputShareLink" type="text" readonly style="flex: 1; background: #0d1117; border: 1px solid #238636; color: #7ee787; padding: 6px 10px; border-radius: 6px; font-size: 11px; font-family: monospace;" />
+              <button id="btnCopyShareLink" type="button" style="background: #21262d; border: 1px solid #30363d; color: #58a6ff; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;">复制</button>
+            </div>
+            <div id="shareCopyTip" style="font-size: 11px; color: #3fb950; display: none;">✓ 已复制到剪贴板！可以直接发送给他人访问。</div>
+          </div>
+        </div>
         <div style="display: flex; gap: 10px; justify-content: flex-end;">
           <button id="btnToggleDebugView" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 14px; border-radius: 6px; font-size: 13px; cursor: pointer;">Toggle Debug View</button>
           <button id="btnSaveReconnect" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;">Save & Connect</button>
@@ -951,6 +1059,74 @@ class PortalApp {
       this.hideOfflinePrompt();
       this.hideAuthPrompt();
       this.reconnect();
+    });
+
+    document.getElementById('btnGenShareLink')?.addEventListener('click', async () => {
+      const inputNode = document.getElementById('inputNodeId') as HTMLInputElement;
+      const inputSecret = document.getElementById('inputSecret') as HTMLInputElement;
+      const selDuration = document.getElementById('selShareDuration') as HTMLSelectElement;
+      const container = document.getElementById('shareLinkContainer');
+      const inputLink = document.getElementById('inputShareLink') as HTMLInputElement;
+      const tip = document.getElementById('shareCopyTip');
+
+      const targetNode = inputNode?.value.trim() || this.peerId;
+      const secretKey = inputSecret?.value.trim() || this.secret;
+      const durationSec = parseInt(selDuration?.value || '86400', 10);
+
+      const base = window.location.origin + window.location.pathname;
+
+      if (!secretKey) {
+        // Node has no secret configured
+        const directLink = `${base}#${targetNode}`;
+        if (inputLink) inputLink.value = directLink;
+        if (container) container.style.display = 'flex';
+        return;
+      }
+
+      try {
+        const exp = Math.floor(Date.now() / 1000) + durationSec;
+        const payload = `${targetNode}:${exp}`;
+        const sign = await computeHMACSHA256Hex(secretKey, payload);
+        const signedLink = `${base}#${targetNode}?exp=${exp}&sign=${sign}`;
+
+        if (inputLink) {
+          inputLink.value = signedLink;
+          inputLink.select();
+        }
+        if (container) {
+          container.style.display = 'flex';
+        }
+        if (tip) {
+          tip.style.display = 'none';
+        }
+      } catch (err: any) {
+        alert('生成签名链接失败: ' + err.message);
+      }
+    });
+
+    document.getElementById('btnCopyShareLink')?.addEventListener('click', async () => {
+      const inputLink = document.getElementById('inputShareLink') as HTMLInputElement;
+      const tip = document.getElementById('shareCopyTip');
+      if (inputLink && inputLink.value) {
+        try {
+          await navigator.clipboard.writeText(inputLink.value);
+          if (tip) {
+            tip.style.display = 'block';
+            setTimeout(() => {
+              if (tip) tip.style.display = 'none';
+            }, 3000);
+          }
+        } catch {
+          inputLink.select();
+          document.execCommand('copy');
+          if (tip) {
+            tip.style.display = 'block';
+            setTimeout(() => {
+              if (tip) tip.style.display = 'none';
+            }, 3000);
+          }
+        }
+      }
     });
   }
 
@@ -1099,11 +1275,136 @@ class PortalApp {
     if (overlay) overlay.remove();
   }
 
+  // Two-Stage ICE Restart self-healing pipeline for roaming / network switches
+  private async triggerIceRestart() {
+    if (this.isIceRestarting) return;
+    if (!this.pc || this.pc.signalingState === 'closed') {
+      this.reconnect();
+      return;
+    }
+
+    this.isIceRestarting = true;
+    this.log('Network interruption detected. Initiating WebRTC ICE Restart self-healing...');
+    this.updateConnState('connecting');
+
+    // 6-second fallback grace window: if ICE restart does not recover within 6s, fallback to full reconnect
+    if (this.iceRestartTimer) clearTimeout(this.iceRestartTimer);
+    this.iceRestartTimer = setTimeout(() => {
+      if (this.isIceRestarting) {
+        this.log('ICE Restart grace window timed out (6s). Falling back to full session reconnection...');
+        this.isIceRestarting = false;
+        this.reconnect();
+      }
+    }, 6000);
+
+    try {
+      // Stage 1: Ensure signaling channel WebSocket is alive
+      await this.ensureSignalingConnected();
+
+      // Stage 2: In-place ICE Restart Offer on existing RTCPeerConnection
+      this.log('Generating in-place ICE Restart Offer...');
+      const offer = await this.pc.createOffer({ iceRestart: true });
+      await this.pc.setLocalDescription(offer);
+
+      this.log('Transmitting ICE Restart Offer to Agent via Signaling...');
+      this.ws?.send(
+        JSON.stringify({
+          type: 'offer',
+          node_id: this.peerId,
+          sdp: offer,
+          secret: this.secret,
+          client_token: this.clientToken,
+          ice_restart: true,
+          exp: this.shareExp || undefined,
+          sign: this.shareSign || undefined,
+        })
+      );
+    } catch (err: any) {
+      this.log(`ICE Restart initiation failed: ${err.message}. Falling back to full reconnect.`);
+      if (this.iceRestartTimer) clearTimeout(this.iceRestartTimer);
+      this.isIceRestarting = false;
+      this.reconnect();
+    }
+  }
+
+  private ensureSignalingConnected(): Promise<void> {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Signaling reconnect timeout'));
+      }, 4000);
+
+      try {
+        if (this.ws) {
+          try { this.ws.close(); } catch {}
+          this.ws = null;
+        }
+        this.log(`Re-establishing signaling WebSocket to ${this.signalUrl}...`);
+        this.ws = new WebSocket(this.signalUrl);
+
+        this.ws.onopen = () => {
+          clearTimeout(timeout);
+          this.log('Signaling WebSocket reconnected for ICE Restart. Re-joining room...');
+          this.ws?.send(
+            JSON.stringify({
+              type: 'join',
+              node_id: this.peerId,
+              secret: this.secret,
+            })
+          );
+          resolve();
+        };
+
+        this.ws.onmessage = async (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            await this.handleSignalMessage(msg);
+          } catch (err: any) {
+            this.log(`Signaling parse error: ${err.message}`);
+          }
+        };
+
+        this.ws.onerror = () => {
+          clearTimeout(timeout);
+          reject(new Error('Signaling WebSocket connection failed'));
+        };
+
+        this.ws.onclose = () => {
+          this.log('Signaling WebSocket closed.');
+        };
+      } catch (e) {
+        clearTimeout(timeout);
+        reject(e);
+      }
+    });
+  }
+
   private reconnect() {
     this.hideOfflinePrompt();
     this.hideAuthPrompt();
+    this.isIceRestarting = false;
+    if (this.iceRestartTimer) {
+      clearTimeout(this.iceRestartTimer);
+      this.iceRestartTimer = null;
+    }
+
     this.log(`Reconnecting to node [${this.peerId}] via ${this.signalUrl}...`);
-    window.location.hash = this.peerId;
+
+    const hashParams = new URLSearchParams();
+    if (this.secret) {
+      hashParams.set('secret', this.secret);
+    } else if (this.shareSign && this.shareExp) {
+      hashParams.set('exp', this.shareExp.toString());
+      hashParams.set('sign', this.shareSign);
+    }
+    const qs = hashParams.toString();
+    const targetHash = '#' + this.peerId + (qs ? '?' + qs : '');
+    if (window.location.hash !== targetHash) {
+      window.location.hash = targetHash;
+    }
+
     if (this.peerVal) this.peerVal.textContent = this.peerId;
     if (this.signalVal) this.signalVal.textContent = this.signalUrl;
 

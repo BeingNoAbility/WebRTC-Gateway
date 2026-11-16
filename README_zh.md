@@ -55,6 +55,8 @@
 
 - 🚀 **真正的零客户端 (Zero-Client)**：访客只要有一台带有现代浏览器的电脑或手机，点开 URL 即可直达内网应用。
 - ⚡ **P2P 点对点极速直连**：基于标准 WebRTC ICE/STUN 打洞，家庭千兆宽带能跑多快就跑多快（实测内网/局域网 RTT 1~3ms，跨运营商直连跑满宽带上行），完全脱离云中继带宽限制。
+- 🔄 **WebRTC 标准 ICE Restart（移动漫游自愈）**：在手机或笔记本网络突变（Wi-Fi 切换 5G 蜂窝网络、AP 漫游、弱网恢复）时，自动触发信令保活与 in-place ICE Restart 双阶段重协商，无需刷新浏览器页面，正在播放的视频与底层长连接不中断。
+- 🔗 **HMAC-SHA256 无状态时效安全分享**：纯数学自包含签名，零中心化数据库依赖。支持在 Web 控制台或 CLI 中一键生成限时免密分享链接（`#nodeId?exp=xxx&sign=yyy`），到期自动失效，免向访客透露主口令。
 - 🔒 **端到端原生加密**：传输层采用 WebRTC 强制的 DTLS-SRTP 军工级非对称协商与强加密，信令服务仅撮合网络拓扑，中继节点不可见、无法解密任何业务数据。
 - 🌐 **多节点与子域名智能感知**：支持多台机器/多个服务并发在线，通过 `<nodeId>.p2p.domain.com`、`#nodeId` 或前端可视化设置弹窗秒级切换。
 - 🧰 **全类型 Web 协议透明透传**：
@@ -169,6 +171,8 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-turn-user` | `TURN_USER` | `""` | 可选的 TURN 中继认证用户名 |
 | `-turn-pass` | `TURN_PASS` | `""` | 可选的 TURN 中继认证密码 |
 | `-stun-servers` | `STUN_SERVERS` | `""` | 可选的自定义 STUN 服务器列表（英文逗号分隔） |
+| `-sign-link` | - | `0` | 生成指定有效期的无状态安全分享链接（如 `1h`、`24h`、`7d`）并退出 |
+| `-portal-url` | - | `https://your-portal-domain.com` | 为 `-sign-link` 指定 Web 门户的基准访问地址 |
 
 ### 6. 一体化服务端 (Signal Server) 命令行参数全量说明
 
@@ -196,6 +200,15 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
      - Agent 首次在信令服务上注册 `node_id` 时自动绑定密钥；
      - 任何其他非法 Agent 尝试抢注或顶替该 `node_id` 时，若未提供匹配的口令将被信令服务器直接拒之门外；
      - 支持服务端配置 `-secret` 全局集群准入密钥。
+- **无状态时效分享链接 (Stateless HMAC-SHA256 Sharing)**：
+  - 无需数据库、无需 Redis、无需服务器记录撤销表；
+  - 纯数学签名验证：`sign = HMAC-SHA256(nodeId + ":" + exp, master_secret)`；
+  - 访客在浏览器打开 `#nodeId?exp=xxx&sign=yyy` 时，Agent 本地以毫秒级验证时效与签名，到期后数学上天然失效；
+  - Web 控制台支持一键选择 1 小时、6 小时、24 小时、7 天、30 天生成专属分享链接并一键复制；CLI 亦支持 `./agent -secret xxx -sign-link 24h` 极速生成。
+- **连接韧性与移动漫游自愈 (WebRTC ICE Restart)**：
+  - 当手机或笔记本在 Wi-Fi 和蜂窝移动网络之间漫游切换时，系统启动两阶段自愈流水线；
+  - 自动快速重建断开的信令套接字，并在原 PeerConnection 上发起带有 `iceRestart: true` 的重协商；
+  - Agent 提供 5 秒断网宽限期（Grace Window），免除销毁连接，应用层 DataChannel、长连接与内网页面会话 100% 保持。
 - **独立会话隔离**：每个浏览器会话拥有独立的虚拟连接通道与服务端 CookieJar，防止不同访客之间的登录态串号。
 
 ---

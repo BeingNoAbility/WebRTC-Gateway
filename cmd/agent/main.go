@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"webrtc-gateway/pkg/agent"
 )
@@ -45,7 +47,28 @@ func main() {
 	turnUser := flag.String("turn-user", defaultTurnUser, "Optional TURN relay username (env: TURN_USER)")
 	turnPass := flag.String("turn-pass", defaultTurnPass, "Optional TURN relay password / credential (env: TURN_PASS)")
 	stunServers := flag.String("stun-servers", defaultStunServers, "Optional comma-separated custom STUN servers (env: STUN_SERVERS)")
+	shareDuration := flag.Duration("sign-link", 0, "Generate a temporary signed share link with the given expiration duration (e.g. 1h, 24h, 7d) and exit")
+	portalURL := flag.String("portal-url", "https://your-portal-domain.com", "Base URL of the Web Portal for -sign-link generation")
 	flag.Parse()
+
+	// If -sign-link was requested, generate the temporary link and exit
+	if *shareDuration > 0 {
+		if *secret == "" {
+			log.Fatalf("[Error] -secret is required to generate signed share links.")
+		}
+		exp := time.Now().Add(*shareDuration).Unix()
+		sign := agent.GenerateShareSignature(*nodeID, exp, *secret)
+		base := strings.TrimRight(*portalURL, "/")
+		link := fmt.Sprintf("%s/#%s?exp=%d&sign=%s", base, *nodeID, exp, sign)
+		log.Printf("==================================================")
+		log.Printf("  Temporary Stateless Signed Share Link")
+		log.Printf("  Node ID:    %s", *nodeID)
+		log.Printf("  Expires:    %s (in %v)", time.Unix(exp, 0).Format("2006-01-02 15:04:05 MST"), *shareDuration)
+		log.Printf("  Link:       %s", link)
+		log.Printf("==================================================")
+		fmt.Println(link)
+		os.Exit(0)
+	}
 
 	log.Printf("==================================================")
 	log.Printf("  Zero-Client P2P WebRTC Gateway Agent (Go Daemon)")
