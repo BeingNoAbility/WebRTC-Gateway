@@ -2132,10 +2132,6 @@ class PortalApp {
     if (this.appFrame) {
       this.appFrame.style.display = 'none';
     }
-    if (this.mediaContainer) {
-      this.mediaContainer.remove();
-      this.mediaContainer = null;
-    }
     if (this.vaultContainer) {
       this.vaultContainer.remove();
       this.vaultContainer = null;
@@ -2381,7 +2377,7 @@ class PortalApp {
           await fileStream.close();
           fileStream = null;
         } else {
-          const finalBlob = new Blob(chunks, { type: contentType });
+          const finalBlob = new Blob(chunks as unknown as BlobPart[], { type: contentType });
           this.triggerBlobDownload(finalBlob, opts.fileName);
         }
 

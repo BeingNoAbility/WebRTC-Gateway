@@ -1,33 +1,31 @@
 # WebRTC Gateway Release Notes
 
-## [v1.8.1] - 2026-11-17
+## [v1.9.0] - 2026-11-17
 
-### 🔒 紧急安全加固与通用防御架构收敛 (Emergency Security Hardening & Universal Defense Architecture)
+### 🚀 架构韧性与工程规范演进 (Architecture Resilience & Engineering Standardization)
 
-本版本为 **P0 级紧急安全补丁与通用架构收敛版本**。经独立代码审计研判，系统摒弃特例打补丁思维，从架构契约、安全边界与状态机层面进行了彻底的泛化治理：
+本版本为 **v1.9.0 架构韧性与工程规范演进版本**。聚焦于多标签页并发体验、脚本注入边界严密性、前端编译门禁与协议标准对齐：
 
-- **Portal 控制台 DOM XSS 彻底根除 (P0-2)**：
-  - 建立强正向字符集门禁（`/^[a-zA-Z0-9._-]{1,64}$/`），对 6 大入口来源进行格式清洗，非规范字符直接拒绝并降级兜底；
-  - 弹窗与调试视图彻底废除模板字符串裸拼，全面改用标准 DOM API 属性设值（`input.value = ...`）与通用 HTML 实体转义。
-- **全链路切断 Secret 口令泄露通道 (P0-3)**：
-  - 回归最小特权架构契约（PoLP），物理拔除 Service Worker 对代理 HTML 页面的 `window.__P2P_SECRET__` 注入；
-  - 移除 URL Query 中 `?secret=` 的拼接泄漏；移除信令 `join` 报文及 iframe 间无序广播的口令字段。
-- **`/--p2p-proxy/` 跨站代发全面收敛至显式白名单 (P0-4)**：
-  - 彻底废除基于后缀模糊匹配（`.mp4` 参数绕过）及关键字匹配的启发式规则；
-  - 默认仅允许同源及根域名子域代理，新增 `-allowed-proxy-domains` 通配符白名单配置，实现通用且安全的外链多媒体与图床直连；
-  - 解耦信令代理与后端反代，`-proxy` 严格限定于信令外出通道。
-- **信令端前置熔断暴破封禁与敏感端点收敛 (P0-5)**：
-  - 在信令服务握手阶段实行 `IsLocked` 滑动窗口硬性阻断，封禁期间瞬时切断握手；
-  - 彻底移除 Cloudflare Worker 未鉴权的 `list_nodes` 节点枚举端点。
-- **边缘信令代码权威源归一 (P0-1)**：
-  - 物理删除 `web/worker.js`，统一以 `edge/cloudflare-worker/worker.js` 为单一权威源，杜绝版本分叉隐患。
-- **Agent 并发活跃连接竞态消除 (P1-1)**：
-  - 将 `activePeers` 的原子状态同步全面纳入 `connMu.Lock()` 保护临界区，消除极端网络震荡下的 Data Race。
+- **Service Worker 多标签页会话隔离 (Task 1 / P1-2)**：
+  - 彻底解耦 Service Worker 全局单例通信信道与单例目标源，建立多租户/多会话状态机 `sessions` 与 `iframeToPortalMap`；
+  - 引入基于 `FetchEvent` 导航生命周期的父子 Client ID 级联映射机制（利用 `event.clientId` 与 `event.resultingClientId`），精准追踪外层 Portal 标签页与内嵌 iframe 的血缘关系；
+  - 完美支持在同一网关域名下并发打开多个标签页分别访问不同的穿透节点，彻底杜绝节点 ID 串台、MessageChannel 信道踩踏与代理目标源污染。
+- **Worker 脚本精准过滤与 UTF-8 流解码防护 (Task 2 / P1-4)**：
+  - 彻底废除 `url.pathname.includes('/worker')` 模糊匹配，根除后端业务 API 路由（如 `/api/worker/tasks`、`/worker/status.json`）被误注入 `importScripts` 导致 JSON 损坏的隐患；
+  - 严格限定仅对 `request.destination === 'worker' || request.destination === 'sharedworker' || /(?:\.worker|_worker)\.js$/i` 且 `Content-Type` 为 `javascript` 的真实脚本注入补丁；
+  - HTML 流式虚拟化注入器引入 `TextDecoder('utf-8', { stream: true })` 与安全刷新逻辑，彻底消除跨 chunk 多字节中文字符与 Emoji 边界截断乱码。
+- **前端工程 TypeScript 严格类型门禁 (Task 3 / P2-1)**：
+  - 清理 `PortalApp` 中遗留的未声明悬挂属性 `mediaContainer` 悬空引用；
+  - 订正 `PatchedWebSocket.readyState` 联合字面量类型与 `P2PMux.sendRaw` 缓冲区类型，全面通过 `tsc --noEmit` 严格检查；
+  - `package.json` 正式确立 `"typecheck": "tsc --noEmit"`，将类型编译门禁深度集成至 `npm run build` 前置流程，杜绝未定型代码流入构建产物。
+- **规范校准与协议对齐 (Task 4 / P2-4 & ws_proxy)**：
+  - 校正 `configs/server.example.yaml` 中 `tls_auto` 的释义，明确其为本地/局域网 Secure Context 专用的内存自签 ECDSA 证书；
+  - 订正 `pkg/proxy/ws_proxy.go` 中的 `X-Forwarded-Proto` 头注入逻辑，根据后端实际协议（`http`/`ws` 注入 `ws`，`https`/`wss` 注入 `wss`）动态对齐，与 `http_proxy.go` 保持严格规范一致。
 
 ---
 
 ### 📦 资产下载与快速验证
 - 预编译二进制跨平台支持：Linux (amd64 / arm64)、Windows (amd64 / arm64)、macOS Darwin (amd64 / Apple Silicon arm64)。
 - 多架构 Docker 镜像已同步发布至 GitHub Container Registry (`ghcr.io`)：
-  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.8.1` (`latest`)
-  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.8.1` (`latest`)
+  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.9.0` (`latest`)
+  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.9.0` (`latest`)

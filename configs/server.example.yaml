@@ -21,7 +21,7 @@ static: ""
 tls_cert: ""
 tls_key: ""
 
-# Enable automatic Let's Encrypt ACME HTTPS certificates (requires valid public domain on port 80/443)
+# Automatically generate an in-memory self-signed ECDSA certificate for HTTPS (enables Service Worker Secure Context on LAN/test environments)
 tls_auto: false
 
 # Anti-DDoS / Rate Limiter: Maximum concurrent WebSocket connections allowed per client IP

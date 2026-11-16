@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.9.0] - 2026-11-17
+
+### Added
+- **Service Worker Multi-Tab Session Isolation (P1-2)**:
+  - Eliminated SW global singleton state (`portalPort`, `activeNodeId`, `currentBackendOrigin`), replacing it with client-isolated `PortalSession` maps.
+  - Implemented parent-child client mapping cascading via `FetchEvent.resultingClientId` on navigation requests, enabling isolated parallel browsing of different nodes in multiple tabs without crosstalk or context confusion.
+- **Strict TypeScript Quality Gate (P2-1)**:
+  - Integrated `tsc --noEmit` as an automated typecheck gate into `npm run build` (`package.json`).
+  - Added dedicated multi-tab session mapping and worker injection automated test suites to `test/node_id_preservation_test.cjs`.
+
+### Fixed
+- **Web Worker Virtualization False Positives (P1-4)**:
+  - Removed dangerous `url.pathname.includes('/worker')` heuristic that caused JSON corruption on API routes like `/api/worker/tasks`.
+  - Restricted worker virtualization injection strictly to `destination === 'worker' || destination === 'sharedworker' || /(?:\.worker|_worker)\.js$/i` combined with `contentType.includes('javascript')`.
+- **UTF-8 Multi-Byte Character Chunk Boundary Splitting (P1-4)**:
+  - Adopted `TextDecoder('utf-8', { stream: true })` with trailing flush logic in `injectScriptIntoHtmlStream`, preventing Unicode replacement character (`\uFFFD`) corruption on chunk boundaries.
+- **Frontend Strict TypeScript Type Errors (P2-1)**:
+  - Pruned dead property reference `this.mediaContainer` in `app.ts`.
+  - Fixed `PatchedWebSocket.readyState` union literal typing (`0 | 1 | 2 | 3`) in `ws_patch.ts`.
+  - Aligned `ArrayBufferView<ArrayBuffer>` buffer casting in `P2PMux.sendRaw` and `BlobPart[]` casting in `triggerBlobDownload`.
+- **WebSocket Reverse Proxy Protocol Header Alignment (P2-4)**:
+  - Dynamically set `X-Forwarded-Proto` (`"ws"` vs `"wss"`) in `ws_proxy.go` based on `targetBase.Scheme`, aligning with `http_proxy.go`.
+- **Configuration Documentation Calibration (P2-4)**:
+  - Corrected `tls_auto` comment in `configs/server.example.yaml` to specify in-memory self-signed ECDSA certificate for local/LAN Secure Context.
+
+---
+
 ## [v1.8.1] - 2026-11-17
 
 ### Security

@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-declare const self: ServiceWorkerGlobalScope;
+const sw = self as unknown as ServiceWorkerGlobalScope;
 
 const BYPASS_PATHS = [
   '/portal.js',
@@ -13,43 +13,129 @@ const BYPASS_PATHS = [
   '/favicon.svg',
 ];
 
-self.addEventListener('install', (event: ExtendableEvent) => {
-  event.waitUntil(self.skipWaiting());
+sw.addEventListener('install', (event: ExtendableEvent) => {
+  event.waitUntil(sw.skipWaiting());
 });
 
-self.addEventListener('activate', (event: ExtendableEvent) => {
-  event.waitUntil(self.clients.claim());
+sw.addEventListener('activate', (event: ExtendableEvent) => {
+  event.waitUntil(sw.clients.claim());
 });
 
-// Dedicated communication channel to top-level portal window
-let portalPort: MessagePort | null = null;
-let activePortalClientId: string | null = null;
-let activeNodeId: string | null = null;
-let currentBackendOrigin: string | null = null;
-let currentBackendRootDomain: string | null = null;
+// Dedicated multi-tab session management: isolate node ID, ports, and origins per portal tab
+interface PortalSession {
+  clientId: string;
+  port: MessagePort | null;
+  nodeId: string;
+  backendOrigin?: string;
+  backendRootDomain?: string;
+  lastActive: number;
+}
 
-self.addEventListener('message', (event: ExtendableMessageEvent) => {
+const sessions = new Map<string, PortalSession>();
+const iframeToPortalMap = new Map<string, string>();
+let lastActiveSession: PortalSession | null = null;
+
+sw.addEventListener('message', (event: ExtendableMessageEvent) => {
   const data = event.data;
+  const sourceClient = event.source as Client | null;
+  const clientId = sourceClient?.id;
+
   if (data?.type === 'PORTAL_ATTACH') {
-    if (data.peerId) activeNodeId = data.peerId;
-    if (event.ports && event.ports[0]) {
-      portalPort = event.ports[0];
-      if (event.source) {
-        activePortalClientId = (event.source as Client).id;
+    const port = event.ports && event.ports[0];
+    const peerId = data.peerId || '';
+    if (clientId) {
+      let session = sessions.get(clientId);
+      if (!session) {
+        session = {
+          clientId,
+          port: port || null,
+          nodeId: peerId,
+          lastActive: Date.now(),
+        };
+        sessions.set(clientId, session);
+      } else {
+        if (port) session.port = port;
+        if (peerId) session.nodeId = peerId;
+        session.lastActive = Date.now();
       }
+      lastActiveSession = session;
+    } else if (port) {
+      const anonId = 'anon_' + Math.random().toString(36).substring(2);
+      const session: PortalSession = {
+        clientId: anonId,
+        port,
+        nodeId: peerId,
+        lastActive: Date.now(),
+      };
+      sessions.set(anonId, session);
+      lastActiveSession = session;
     }
   } else if (data?.type === 'NODE_CHANGE') {
-    if (data.peerId) activeNodeId = data.peerId;
+    const peerId = data.peerId || '';
+    if (clientId && sessions.has(clientId)) {
+      const session = sessions.get(clientId)!;
+      session.nodeId = peerId;
+      session.lastActive = Date.now();
+      lastActiveSession = session;
+    } else if (lastActiveSession) {
+      lastActiveSession.nodeId = peerId;
+      lastActiveSession.lastActive = Date.now();
+    }
   }
 });
 
+// Resolve the owning PortalSession for a given client ID (mapping iframes back to their parent portal tab)
+function resolveSession(clientId: string): PortalSession | null {
+  // 1. Direct match in iframeToPortalMap (subresources or navigations originating from a child iframe)
+  if (clientId && iframeToPortalMap.has(clientId)) {
+    const portalId = iframeToPortalMap.get(clientId)!;
+    const session = sessions.get(portalId);
+    if (session) {
+      session.lastActive = Date.now();
+      return session;
+    }
+  }
+
+  // 2. Direct match in sessions (requests initiated directly by a top-level portal tab)
+  if (clientId && sessions.has(clientId)) {
+    const session = sessions.get(clientId)!;
+    session.lastActive = Date.now();
+    return session;
+  }
+
+  // 3. Fallback: if only one portal session exists, use it
+  if (sessions.size === 1) {
+    const session = sessions.values().next().value;
+    if (session) {
+      session.lastActive = Date.now();
+      return session;
+    }
+  }
+
+  // 4. Fallback: select the most recently active portal session
+  if (sessions.size > 1) {
+    let best: PortalSession | null = null;
+    for (const s of sessions.values()) {
+      if (!best || s.lastActive > best.lastActive) {
+        best = s;
+      }
+    }
+    if (best) {
+      best.lastActive = Date.now();
+      return best;
+    }
+  }
+
+  return lastActiveSession;
+}
+
 // Helper to find the active top-level portal window client (never selects an iframe)
-async function getPortalClient(): Promise<Client | null> {
-  if (activePortalClientId) {
-    const client = await self.clients.get(activePortalClientId);
+async function getPortalClient(preferredClientId?: string): Promise<Client | null> {
+  if (preferredClientId) {
+    const client = await sw.clients.get(preferredClientId);
     if (client) return client;
   }
-  const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  const allClients = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
   // 1. Strictly prioritize top-level browsing context (the portal shell)
   for (const client of allClients) {
     const wc = client as WindowClient;
@@ -66,12 +152,28 @@ async function getPortalClient(): Promise<Client | null> {
   return allClients.length > 0 ? allClients[0] : null;
 }
 
-self.addEventListener('fetch', (event: FetchEvent) => {
-  const url = new URL(event.request.url);
+sw.addEventListener('fetch', (event: FetchEvent) => {
+  const request = event.request;
+  const url = new URL(request.url);
+
+  // Maintain parent-child client mapping across iframe navigation cascade
+  if (request.mode === 'navigate' && event.resultingClientId) {
+    if (event.clientId && sessions.has(event.clientId)) {
+      iframeToPortalMap.set(event.resultingClientId, event.clientId);
+    } else if (event.clientId && iframeToPortalMap.has(event.clientId)) {
+      const parentPortalId = iframeToPortalMap.get(event.clientId)!;
+      iframeToPortalMap.set(event.resultingClientId, parentPortalId);
+    }
+  }
+
+  const session = resolveSession(event.clientId);
 
   // 1. Check bypass rules:
   // Tunnel same-origin requests, proxy paths (/--p2p-proxy/), backend origin, sibling subdomains, and media streams
   const isProxyPath = url.pathname.startsWith('/--p2p-proxy/');
+  const currentBackendOrigin = session?.backendOrigin;
+  const currentBackendRootDomain = session?.backendRootDomain;
+
   const isTargetOrigin = currentBackendOrigin && url.origin === currentBackendOrigin;
   const isSiblingDomain = currentBackendRootDomain && (
     url.hostname === currentBackendRootDomain ||
@@ -88,7 +190,7 @@ self.addEventListener('fetch', (event: FetchEvent) => {
                   lowerPath.includes('.flac') || lowerPath.includes('.aac') || lowerPath.includes('.m4a') ||
                   lowerPath.includes('/upgcxcode/');
 
-  if (url.origin !== self.location.origin && !isProxyPath && !isTargetOrigin && !isSiblingDomain && !isRelatedBrand && !isMedia) {
+  if (url.origin !== sw.location.origin && !isProxyPath && !isTargetOrigin && !isSiblingDomain && !isRelatedBrand && !isMedia) {
     return; // Bypass truly external cross-origin requests
   }
 
@@ -102,17 +204,17 @@ self.addEventListener('fetch', (event: FetchEvent) => {
   // Bypass initial portal entry page:
   // ONLY top-level document navigations to root path bypass SW to load the portal index.html.
   // Video, audio, subresources, and Range requests to '/' or any other path are intercepted and tunneled.
-  const isTopLevelDocNav = event.request.mode === 'navigate' &&
-                           (event.request.destination === 'document' || event.request.destination === '') &&
-                           (event.request.headers.get('accept') || '').includes('text/html');
+  const isTopLevelDocNav = request.mode === 'navigate' &&
+                           (request.destination === 'document' || request.destination === '') &&
+                           (request.headers.get('accept') || '').includes('text/html');
   if ((url.pathname === '/' || url.pathname === '/index.html') && isTopLevelDocNav) {
     return;
   }
 
-  event.respondWith(handleTunneledRequest(event.request));
+  event.respondWith(handleTunneledRequest(request, session));
 });
 
-async function handleTunneledRequest(request: Request): Promise<Response> {
+async function handleTunneledRequest(request: Request, session: PortalSession | null): Promise<Response> {
   const messageChannel = new MessageChannel();
   const port = messageChannel.port1;
 
@@ -126,7 +228,7 @@ async function handleTunneledRequest(request: Request): Promise<Response> {
   let path = url.pathname + url.search;
 
   // If request targets a sibling domain directly, route via /--p2p-proxy/<host>/<path>
-  if (url.origin !== self.location.origin) {
+  if (url.origin !== sw.location.origin) {
     path = `/--p2p-proxy/${url.host}${url.pathname}${url.search}`;
     headers['x-p2p-dest-host'] = url.host;
   }
@@ -144,17 +246,19 @@ async function handleTunneledRequest(request: Request): Promise<Response> {
     destination: request.destination,
   };
 
-  // Dispatch request to Portal Shell: prioritize dedicated portalPort, fallback to client.postMessage
-  if (portalPort) {
+  // Dispatch request to Portal Shell: prioritize dedicated portalPort for this session
+  let dispatched = false;
+  if (session && session.port) {
     try {
-      portalPort.postMessage(initMsg, [messageChannel.port2]);
+      session.port.postMessage(initMsg, [messageChannel.port2]);
+      dispatched = true;
     } catch {
-      portalPort = null; // Channel broken, fallback to getPortalClient
+      session.port = null;
     }
   }
 
-  if (!portalPort) {
-    const client = await getPortalClient();
+  if (!dispatched) {
+    const client = await getPortalClient(session?.clientId);
     if (!client) {
       if (url.pathname === '/' || request.destination === 'document') {
         return fetch(request);
@@ -219,20 +323,22 @@ async function handleTunneledRequest(request: Request): Promise<Response> {
       if (msg.type === 'RESP_START') {
         clearTimeout(timeout);
 
-        if (msg.headers?.['x-p2p-target-origin']) {
-          currentBackendOrigin = msg.headers['x-p2p-target-origin'];
-        }
-        if (msg.headers?.['x-p2p-target-root-domain']) {
-          currentBackendRootDomain = msg.headers['x-p2p-target-root-domain'];
+        if (session) {
+          if (msg.headers?.['x-p2p-target-origin']) {
+            session.backendOrigin = msg.headers['x-p2p-target-origin'];
+          }
+          if (msg.headers?.['x-p2p-target-root-domain']) {
+            session.backendRootDomain = msg.headers['x-p2p-target-root-domain'];
+          }
         }
 
         const contentType = (msg.headers?.['content-type'] || '').toLowerCase();
         const isHtml = contentType.includes('text/html');
-        const isWorker = request.destination === 'worker' ||
-                         request.destination === 'sharedworker' ||
-                         url.pathname.endsWith('.worker.js') ||
-                         url.pathname.endsWith('_worker.js') ||
-                         url.pathname.includes('/worker');
+        // Task 2: Worker script injection strict precision check
+        const isWorker = (request.destination === 'worker' ||
+                          request.destination === 'sharedworker' ||
+                          /(?:\.worker|_worker)\.js$/i.test(url.pathname)) &&
+                         contentType.includes('javascript');
 
         const respHeaders = new Headers();
         if (msg.headers) {
@@ -253,7 +359,7 @@ async function handleTunneledRequest(request: Request): Promise<Response> {
         // Enforce no-referrer policy so external image CDNs with anti-hotlink protection (e.g. Bilibili hdslb.com) succeed
         respHeaders.set('referrer-policy', 'no-referrer');
         // Ensure browser allows controlled browsing context to consume responses without CORS blocks
-        respHeaders.set('access-control-allow-origin', self.location.origin);
+        respHeaders.set('access-control-allow-origin', sw.location.origin);
         respHeaders.set('access-control-allow-credentials', 'true');
 
         // Create ReadableStream for response body
@@ -292,7 +398,7 @@ async function handleTunneledRequest(request: Request): Promise<Response> {
         let finalStream: ReadableStream<Uint8Array> = stream;
         if (!isNullBodyStatus) {
           if (isHtml) {
-            finalStream = injectScriptIntoHtmlStream(stream);
+            finalStream = injectScriptIntoHtmlStream(stream, session);
           } else if (isWorker) {
             finalStream = injectScriptIntoWorkerStream(stream);
           }
@@ -321,15 +427,22 @@ async function handleTunneledRequest(request: Request): Promise<Response> {
 }
 
 // Injects <script src="/patch.js"></script> and <meta name="referrer" content="no-referrer"> into the first chunk of HTML stream
-function injectScriptIntoHtmlStream(inputStream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+function injectScriptIntoHtmlStream(
+  inputStream: ReadableStream<Uint8Array>,
+  session: PortalSession | null
+): ReadableStream<Uint8Array> {
   const reader = inputStream.getReader();
   const metaReferrer = '<meta name="referrer" content="no-referrer">';
+  const activeNodeId = session?.nodeId || '';
+  const currentBackendOrigin = session?.backendOrigin || '';
+  const currentBackendRootDomain = session?.backendRootDomain || '';
+
   const contextTag = `<script>` +
-    `window.__P2P_NODE_ID__ = ${JSON.stringify(activeNodeId || '')};` +
-    `window.__P2P_PORTAL_ORIGIN__ = ${JSON.stringify(self.location.origin)};` +
+    `window.__P2P_NODE_ID__ = ${JSON.stringify(activeNodeId)};` +
+    `window.__P2P_PORTAL_ORIGIN__ = ${JSON.stringify(sw.location.origin)};` +
     `</script>`;
   const originTag = currentBackendOrigin
-    ? `<script>window.__P2P_TARGET_ORIGIN__ = ${JSON.stringify(currentBackendOrigin)};window.__P2P_TARGET_ROOT_DOMAIN__ = ${JSON.stringify(currentBackendRootDomain || '')};</script>`
+    ? `<script>window.__P2P_TARGET_ORIGIN__ = ${JSON.stringify(currentBackendOrigin)};window.__P2P_TARGET_ROOT_DOMAIN__ = ${JSON.stringify(currentBackendRootDomain)};</script>`
     : '';
   const patchScript = `${metaReferrer}${contextTag}${originTag}<script src="/patch.js"></script>`;
   let injected = false;
@@ -346,7 +459,10 @@ function injectScriptIntoHtmlStream(inputStream: ReadableStream<Uint8Array>): Re
 
       if (!injected && value) {
         injected = true;
-        let text = decoder.decode(value);
+        let text = decoder.decode(value, { stream: true });
+        const flushed = decoder.decode();
+        if (flushed) text += flushed;
+
         // Strip any existing restrictive meta referrer tags to ensure no-referrer takes precedence
         text = text.replace(/<meta\s+name=["']referrer["'][^>]*>/gi, '');
         let modified = text;

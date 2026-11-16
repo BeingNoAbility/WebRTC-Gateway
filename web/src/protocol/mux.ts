@@ -214,7 +214,7 @@ export class P2PMux {
     if (this.dc.readyState !== 'open') {
       throw new Error(`DataChannel not open (readyState: ${this.dc.readyState})`);
     }
-    this.dc.send(data);
+    this.dc.send(data as unknown as ArrayBufferView<ArrayBuffer>);
   }
 
   public async sendRawAsync(data: Uint8Array): Promise<void> {
@@ -243,7 +243,7 @@ export class P2PMux {
         });
       }
 
-      this.dc.send(data);
+      this.dc.send(data as unknown as ArrayBufferView<ArrayBuffer>);
     };
 
     this.sendQueue = this.sendQueue.then(task, task);

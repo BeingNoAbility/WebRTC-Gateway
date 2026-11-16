@@ -623,7 +623,7 @@ func TestHTTPProxy_ClientIP_ForwardingAndAntiSpoofing(t *testing.T) {
 
 // 9. Test WebSocket Proxy Client IP Forwarding, Anti-Spoofing and Fallback
 func TestWSProxy_ClientIP_ForwardingAndAntiSpoofing(t *testing.T) {
-	var receivedXFF, receivedXRealIP string
+	var receivedXFF, receivedXRealIP, receivedXProto string
 	var upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
@@ -631,6 +631,7 @@ func TestWSProxy_ClientIP_ForwardingAndAntiSpoofing(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedXFF = r.Header.Get("X-Forwarded-For")
 		receivedXRealIP = r.Header.Get("X-Real-IP")
+		receivedXProto = r.Header.Get("X-Forwarded-Proto")
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
@@ -733,6 +734,9 @@ func TestWSProxy_ClientIP_ForwardingAndAntiSpoofing(t *testing.T) {
 			}
 			if receivedXRealIP != tc.expectedXReal {
 				t.Errorf("WS X-Real-IP mismatch: expected %q, got %q", tc.expectedXReal, receivedXRealIP)
+			}
+			if receivedXProto != "ws" {
+				t.Errorf("WS X-Forwarded-Proto mismatch: expected \"ws\", got %q", receivedXProto)
 			}
 		})
 	}

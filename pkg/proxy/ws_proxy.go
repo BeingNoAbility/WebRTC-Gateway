@@ -236,7 +236,11 @@ func (wp *WSProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream) 
 	}
 	dialHeaders.Set("X-Forwarded-For", finalClientIP)
 	dialHeaders.Set("X-Real-IP", finalClientIP)
-	dialHeaders.Set("X-Forwarded-Proto", "wss")
+	wsProto := "ws"
+	if wp.targetBase.Scheme == "https" || wp.targetBase.Scheme == "wss" {
+		wsProto = "wss"
+	}
+	dialHeaders.Set("X-Forwarded-Proto", wsProto)
 	dialHeaders.Set("Referer", wp.targetBase.Scheme+"://"+wp.targetBase.Host+"/")
 
 	// Prepare dialer with subprotocols if specified

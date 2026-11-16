@@ -4,7 +4,8 @@
   "description": "Zero-Client WebRTC P2P Gateway Web Portal & Service Worker",
   "main": "index.js",
   "scripts": {
-    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && node esbuild.config.mjs",
     "deploy:cloudflare": "npm run build && wrangler deploy",
     "test": "node ../test/test_subdomain_logic.cjs && node ../test/node_id_preservation_test.cjs && node ../test/test_vault_download.cjs"
   },

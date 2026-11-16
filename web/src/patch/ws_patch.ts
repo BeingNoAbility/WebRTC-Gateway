@@ -718,7 +718,7 @@
       public readonly CLOSED = 3;
 
       public url: string;
-      public readyState: number = PatchedWebSocket.CONNECTING;
+      public readyState: 0 | 1 | 2 | 3 = PatchedWebSocket.CONNECTING;
       public bufferedAmount: number = 0;
       public extensions: string = '';
       public protocol: string = '';

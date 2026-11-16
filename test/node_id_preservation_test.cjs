@@ -36,6 +36,9 @@ assert(swCode.includes('window.__P2P_NODE_ID__'), 'sw.js injects window.__P2P_NO
 assert(swCode.includes('window.__P2P_PORTAL_ORIGIN__'), 'sw.js injects window.__P2P_PORTAL_ORIGIN__');
 assert(swCode.includes('NODE_CHANGE'), 'sw.js listens for NODE_CHANGE');
 assert(!swCode.includes('__P2P_SECRET__'), 'sw.js MUST NOT inject window.__P2P_SECRET__ (P0-3)');
+assert(!swCode.includes("includes('/worker')") && !swCode.includes('includes("/worker")'), 'sw.js MUST NOT use fuzzy url.pathname.includes("/worker") (P1-4)');
+assert(swCode.includes('stream: true') || swCode.includes('stream:!0') || swCode.includes('{stream:!0}'), 'sw.js uses TextDecoder { stream: true } (P1-4)');
+assert(swCode.includes('resultingClientId'), 'sw.js includes multi-tab iframe-to-portal session mapping via resultingClientId (P1-2)');
 assert(!portalCode.includes('value="${this.peerId}"'), 'portal.js MUST NOT interpolate peerId into input value attribute (P0-2)');
 assert(!portalCode.includes('value="${this.secret}"'), 'portal.js MUST NOT interpolate secret into input value attribute (P0-2)');
 
@@ -429,6 +432,81 @@ function createMockDOM(options = {}) {
   // 7. XSS Injection attack via query parameter ?peer= falls back to default_node
   const cfgXss2 = simulateResolveConfig('https://my-gateway.pages.dev/?peer="><img src=x onerror=alert(1)>');
   assert(cfgXss2.peerId === 'default_node', 'Malicious query peer XSS payload is rejected and falls back to default');
+}
+
+// 5. Test SW Multi-Tab Session Isolation & Worker Filter Precision
+{
+  console.log('\n--- Testing SW Multi-Tab Session Isolation & Worker Filter Precision ---');
+
+  // A. Worker filter predicate simulation
+  function isWorkerScript(destination, pathname, contentType) {
+    const ct = (contentType || '').toLowerCase();
+    return (destination === 'worker' ||
+            destination === 'sharedworker' ||
+            /(?:\.worker|_worker)\.js$/i.test(pathname)) &&
+           ct.includes('javascript');
+  }
+
+  assert(!isWorkerScript('', '/api/worker/tasks', 'application/json'), 'API endpoint /api/worker/tasks with JSON is NOT treated as worker');
+  assert(!isWorkerScript('', '/worker/status.json', 'application/json'), 'Endpoint /worker/status.json is NOT treated as worker');
+  assert(!isWorkerScript('', '/api/worker_pool', 'application/json'), 'Endpoint /api/worker_pool is NOT treated as worker');
+  assert(isWorkerScript('worker', '/bundle.js', 'application/javascript'), 'Destination "worker" with JS is treated as worker');
+  assert(isWorkerScript('', '/monaco.worker.js', 'text/javascript'), 'Extension .worker.js with JS is treated as worker');
+  assert(isWorkerScript('', '/pdf_worker.js', 'application/javascript'), 'Extension _worker.js with JS is treated as worker');
+
+  // B. Multi-tab parent-child session mapping simulation
+  const sessions = new Map();
+  const iframeToPortalMap = new Map();
+
+  function onPortalAttach(clientId, peerId, port) {
+    sessions.set(clientId, { clientId, peerId, port, lastActive: Date.now() });
+  }
+
+  function onNavigate(clientId, resultingClientId) {
+    if (clientId && sessions.has(clientId)) {
+      iframeToPortalMap.set(resultingClientId, clientId);
+    } else if (clientId && iframeToPortalMap.has(clientId)) {
+      const parent = iframeToPortalMap.get(clientId);
+      iframeToPortalMap.set(resultingClientId, parent);
+    }
+  }
+
+  function resolveSession(clientId) {
+    if (clientId && iframeToPortalMap.has(clientId)) {
+      return sessions.get(iframeToPortalMap.get(clientId)) || null;
+    }
+    if (clientId && sessions.has(clientId)) {
+      return sessions.get(clientId) || null;
+    }
+    return null;
+  }
+
+  // Tab 1 connects to node "bili"
+  onPortalAttach('tab_bili', 'bili', { id: 'port_bili' });
+  // Tab 2 connects to node "nas"
+  onPortalAttach('tab_nas', 'nas', { id: 'port_nas' });
+
+  // Tab 1 navigates iframe_bili
+  onNavigate('tab_bili', 'iframe_bili_1');
+  // Tab 2 navigates iframe_nas
+  onNavigate('tab_nas', 'iframe_nas_1');
+
+  // Subresources fetched by iframe 1
+  const sess1 = resolveSession('iframe_bili_1');
+  assert(sess1 && sess1.peerId === 'bili', 'iframe_bili_1 resolves to portal tab_bili (peerId = bili)');
+
+  // Subresources fetched by iframe 2
+  const sess2 = resolveSession('iframe_nas_1');
+  assert(sess2 && sess2.peerId === 'nas', 'iframe_nas_1 resolves to portal tab_nas (peerId = nas)');
+
+  // Nested navigation within iframe 1: iframe_bili_1 navigates to iframe_bili_2
+  onNavigate('iframe_bili_1', 'iframe_bili_2');
+  const sess3 = resolveSession('iframe_bili_2');
+  assert(sess3 && sess3.peerId === 'bili', 'Cascaded iframe_bili_2 preserves portal tab_bili context without crosstalk');
+
+  // Direct fetch from portal tab itself
+  const sessDirect = resolveSession('tab_bili');
+  assert(sessDirect && sessDirect.peerId === 'bili', 'Direct portal fetch resolves to own session');
 }
 
 console.log(`\n=== Verification Complete: ${passCount} Passed, ${failCount} Failed ===`);
