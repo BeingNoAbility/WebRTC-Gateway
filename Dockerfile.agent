@@ -41,6 +41,10 @@ ENV NODE_ID=homeserver \
     SECRET="" \
     PROXY_URL="" \
     SNI="" \
-    INSECURE=false
+    INSECURE=false \
+    TURN_URL="" \
+    TURN_USER="" \
+    TURN_PASS="" \
+    STUN_SERVERS=""
 
 ENTRYPOINT ["/app/agent"]

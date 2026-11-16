@@ -300,8 +300,13 @@ Go 二进制通过 `go:embed` 技术将编译好的 Web 门户（HTML、JS、Ser
 > ```bash
 > # 拉取服务端镜像 (含前端与信令)
 > docker pull ghcr.io/beingnoability/webrtc-p2p-server:latest
+> # 或指定最新版本号：
+> docker pull ghcr.io/beingnoability/webrtc-p2p-server:v1.3.0
+>
 > # 拉取内网穿透 Agent 客户端
 > docker pull ghcr.io/beingnoability/webrtc-p2p-agent:latest
+> # 或指定最新版本号：
+> docker pull ghcr.io/beingnoability/webrtc-p2p-agent:v1.3.0
 > ```
 
 根目录下提供了**高度模块化且内置完备注释的 [docker-compose.yml](docker-compose.yml)**，开箱即用。
@@ -332,7 +337,7 @@ docker compose down
 # docker-compose.agent-only.yml
 services:
   agent:
-    image: webrtc-p2p-agent:latest
+    image: ghcr.io/beingnoability/webrtc-p2p-agent:latest
     build:
       context: .
       dockerfile: Dockerfile.agent
@@ -357,7 +362,7 @@ services:
 ```yaml
 services:
   server:
-    image: webrtc-p2p-server:latest
+    image: ghcr.io/beingnoability/webrtc-p2p-server:latest
     build:
       context: .
       dockerfile: Dockerfile.server
@@ -372,7 +377,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
 
   agent:
-    image: webrtc-p2p-agent:latest
+    image: ghcr.io/beingnoability/webrtc-p2p-agent:latest
     build:
       context: .
       dockerfile: Dockerfile.agent
@@ -393,7 +398,7 @@ services:
 ```yaml
 services:
   server:
-    image: webrtc-p2p-server:latest
+    image: ghcr.io/beingnoability/webrtc-p2p-server:latest
     ports:
       - "443:443"
     environment:
@@ -413,7 +418,7 @@ services:
     # ... 一体化信令服务端 ...
 
   agent-media:
-    image: webrtc-p2p-agent:latest
+    image: ghcr.io/beingnoability/webrtc-p2p-agent:latest
     network_mode: "host"
     environment:
       - NODE_ID=media
@@ -421,7 +426,7 @@ services:
       - TARGET_URL=http://127.0.0.1:8096 # 影音 Jellyfin
 
   agent-pan:
-    image: webrtc-p2p-agent:latest
+    image: ghcr.io/beingnoability/webrtc-p2p-agent:latest
     network_mode: "host"
     environment:
       - NODE_ID=pan
@@ -429,7 +434,7 @@ services:
       - TARGET_URL=http://127.0.0.1:5244 # 网盘 Alist
 
   agent-pass:
-    image: webrtc-p2p-agent:latest
+    image: ghcr.io/beingnoability/webrtc-p2p-agent:latest
     network_mode: "host"
     environment:
       - NODE_ID=pass
@@ -439,7 +444,23 @@ services:
 
 ---
 
-#### 3. 环境变量全量速查表
+#### 3. 极速生成 HMAC-SHA256 时效安全分享链接 (Docker 运行)
+
+无需在宿主机安装 Go 环境，通过 Docker Compose 或独立 Agent 容器即可极速生成数学级安全时效分享链接：
+
+```bash
+# 方式 A：通过 Docker Compose 极速生成 (例如 24 小时有效)
+docker compose run --rm agent -sign-link 24h -portal-url https://p2p.yourdomain.com
+
+# 方式 B：通过独立 docker run 容器生成
+docker run --rm -e SECRET=your_master_secret \
+  ghcr.io/beingnoability/webrtc-p2p-agent:latest \
+  -node-id homeserver -sign-link 24h -portal-url https://p2p.yourdomain.com
+```
+
+---
+
+#### 4. 环境变量全量速查表
 
 ##### 服务端环境变量 (`webrtc-p2p-server`)
 | 环境变量 | 默认值 | 对应命令行参数 | 说明 |
@@ -468,30 +489,30 @@ services:
 
 ---
 
-#### 4. 单独构建与运行 Docker 容器命令速查
+#### 5. 单独构建与运行 Docker 容器命令速查
 
-**构建镜像：**
+**构建本地镜像（可选）：**
 ```bash
 # 构建一体化服务端镜像
-docker build -t webrtc-p2p-server:latest -f Dockerfile.server .
+docker build -t ghcr.io/beingnoability/webrtc-p2p-server:latest -f Dockerfile.server .
 
 # 构建穿透 Agent 镜像
-docker build -t webrtc-p2p-agent:latest -f Dockerfile.agent .
+docker build -t ghcr.io/beingnoability/webrtc-p2p-agent:latest -f Dockerfile.agent .
 ```
 
 **运行服务端容器：**
 ```bash
-# 1. 默认 HTTP 运行
+# 1. 默认 HTTP 运行 (直接拉取官方镜像)
 docker run -d --name webrtc-server --restart unless-stopped \
   -p 8888:8888 \
-  webrtc-p2p-server:latest
+  ghcr.io/beingnoability/webrtc-p2p-server:latest
 
-# 2. 原生自签 HTTPS 运行
+# 2. 原生自签 HTTPS 运行 (自动生成覆盖所有内网 IP 的 SAN 证书)
 docker run -d --name webrtc-server-tls --restart unless-stopped \
   -p 8443:8443 \
   -e ADDR=:8443 \
   -e TLS_AUTO=true \
-  webrtc-p2p-server:latest
+  ghcr.io/beingnoability/webrtc-p2p-server:latest
 ```
 
 **运行 Agent 容器：**
@@ -502,7 +523,7 @@ docker run -d --name webrtc-agent --restart unless-stopped \
   -e NODE_ID=my-nas \
   -e SIGNAL_URL=wss://p2p.yourdomain.com/ws \
   -e TARGET_URL=http://127.0.0.1:8096 \
-  webrtc-p2p-agent:latest
+  ghcr.io/beingnoability/webrtc-p2p-agent:latest
 ```
 
 ---

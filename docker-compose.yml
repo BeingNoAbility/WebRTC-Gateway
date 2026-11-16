@@ -9,6 +9,8 @@
 #   docker compose up -d
 # 查看运行日志：
 #   docker compose logs -f
+# 一键生成 HMAC-SHA256 时效安全分享链接 (v1.3.0+)：
+#   docker compose run --rm agent -sign-link 24h -portal-url https://p2p.yourdomain.com
 # ==============================================================================
 
 services:
@@ -21,7 +23,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.server
-    image: webrtc-p2p-server:latest
+    image: ghcr.io/beingnoability/webrtc-p2p-server:latest
     container_name: webrtc-p2p-server
     restart: unless-stopped
     ports:
@@ -87,7 +89,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.agent
-    image: webrtc-p2p-agent:latest
+    image: ghcr.io/beingnoability/webrtc-p2p-agent:latest
     container_name: webrtc-p2p-agent
     restart: unless-stopped
 

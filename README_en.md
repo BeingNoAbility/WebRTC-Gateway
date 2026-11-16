@@ -269,8 +269,13 @@ Official pre-built multi-architecture (`linux/amd64`, `linux/arm64`) images are 
 > ```bash
 > # Pull server image (Portal + Signaling broker)
 > docker pull ghcr.io/beingnoability/webrtc-p2p-server:latest
+> # Or specific version:
+> docker pull ghcr.io/beingnoability/webrtc-p2p-server:v1.3.0
+>
 > # Pull agent image (Intranet reverse proxy client)
 > docker pull ghcr.io/beingnoability/webrtc-p2p-agent:latest
+> # Or specific version:
+> docker pull ghcr.io/beingnoability/webrtc-p2p-agent:v1.3.0
 > ```
 
 #### 1. Quick Launch with Docker Compose
@@ -305,6 +310,20 @@ docker run -d --name webrtc-agent --restart unless-stopped \
   -e SIGNAL_URL=wss://p2p.yourdomain.com/ws \
   -e TARGET_URL=http://127.0.0.1:8096 \
   ghcr.io/beingnoability/webrtc-p2p-agent:latest
+```
+
+#### 3. Generate Stateless HMAC-SHA256 Share Links with Docker
+
+Generate mathematical temporary share links on the fly without installing Go:
+
+```bash
+# Via Docker Compose (e.g. valid for 24 hours):
+docker compose run --rm agent -sign-link 24h -portal-url https://p2p.yourdomain.com
+
+# Via standalone docker run:
+docker run --rm -e SECRET=your_master_secret \
+  ghcr.io/beingnoability/webrtc-p2p-agent:latest \
+  -node-id homeserver -sign-link 24h -portal-url https://p2p.yourdomain.com
 ```
 
 ---
