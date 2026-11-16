@@ -35,6 +35,9 @@ const portalCode = fs.readFileSync(portalJsPath, 'utf-8');
 assert(swCode.includes('window.__P2P_NODE_ID__'), 'sw.js injects window.__P2P_NODE_ID__');
 assert(swCode.includes('window.__P2P_PORTAL_ORIGIN__'), 'sw.js injects window.__P2P_PORTAL_ORIGIN__');
 assert(swCode.includes('NODE_CHANGE'), 'sw.js listens for NODE_CHANGE');
+assert(!swCode.includes('__P2P_SECRET__'), 'sw.js MUST NOT inject window.__P2P_SECRET__ (P0-3)');
+assert(!portalCode.includes('value="${this.peerId}"'), 'portal.js MUST NOT interpolate peerId into input value attribute (P0-2)');
+assert(!portalCode.includes('value="${this.secret}"'), 'portal.js MUST NOT interpolate secret into input value attribute (P0-2)');
 
 // 3. Test patch.js virtualization in simulated DOM environment
 function createMockDOM(options = {}) {
@@ -311,7 +314,7 @@ function createMockDOM(options = {}) {
   const resolved = sandbox.window.__p2pResolveUrl('/video/BV333');
   const u = new URL(resolved);
   assert(u.searchParams.get('peer') === 'bili', 'Dynamically received P2P_PORTAL_CONTEXT nodeId=bili used');
-  assert(u.searchParams.get('secret') === 'secret123', 'Dynamically received P2P_PORTAL_CONTEXT secret preserved');
+  assert(!u.searchParams.has('secret'), 'Security hardening: secret is never leaked into URL query parameters');
 }
 
 // Test Case 5: Verification of portal app.ts configuration resolution logic
@@ -357,32 +360,42 @@ function createMockDOM(options = {}) {
       return null;
     }
 
+    function isValidNodeId(id) {
+      return /^[a-zA-Z0-9._-]{1,64}$/.test(id);
+    }
+
     let peerId = params.get('peer') || params.get('node');
+    if (peerId && !isValidNodeId(peerId)) {
+      peerId = null;
+    }
     let secret = params.get('secret') || params.get('token') || '';
 
     if (!peerId && url.hash) {
       const rawHash = url.hash.replace(/^#\/?/, '').trim();
       if (rawHash) {
         const parts = rawHash.split(/[?&]/);
-        peerId = parts[0];
+        if (isValidNodeId(parts[0])) {
+          peerId = parts[0];
+        }
       }
     }
 
     if (!peerId) {
       const explicitSub = extractExplicitP2PSubdomain(url.hostname);
-      if (explicitSub) peerId = explicitSub;
+      if (explicitSub && isValidNodeId(explicitSub)) peerId = explicitSub;
     }
 
     if (!peerId) {
-      peerId = storage['p2p_active_peer_id'] || storage['p2p_peer_id'] || '';
+      const cached = storage['p2p_active_peer_id'] || storage['p2p_peer_id'] || '';
+      if (cached && isValidNodeId(cached)) peerId = cached;
     }
 
     if (!peerId) {
       const sub = extractNodeIdFromHostname(url.hostname);
-      if (sub) peerId = sub;
+      if (sub && isValidNodeId(sub)) peerId = sub;
     }
 
-    if (!peerId) {
+    if (!peerId || !isValidNodeId(peerId)) {
       peerId = 'default_node';
     }
 
@@ -408,6 +421,14 @@ function createMockDOM(options = {}) {
   // 5. Reserved subdomain gateway.example.com falls back to default_node
   const cfg5 = simulateResolveConfig('https://gateway.example.com/');
   assert(cfg5.peerId === 'default_node', 'Reserved gateway subdomain does not become node ID');
+
+  // 6. XSS Injection attack via hash falls back to default_node
+  const cfgXss1 = simulateResolveConfig('https://my-gateway.pages.dev/#<script>alert(1)</script>');
+  assert(cfgXss1.peerId === 'default_node', 'Malicious hash XSS payload is rejected and falls back to default');
+
+  // 7. XSS Injection attack via query parameter ?peer= falls back to default_node
+  const cfgXss2 = simulateResolveConfig('https://my-gateway.pages.dev/?peer="><img src=x onerror=alert(1)>');
+  assert(cfgXss2.peerId === 'default_node', 'Malicious query peer XSS payload is rejected and falls back to default');
 }
 
 console.log(`\n=== Verification Complete: ${passCount} Passed, ${failCount} Failed ===`);

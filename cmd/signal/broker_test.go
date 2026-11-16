@@ -236,6 +236,13 @@ func TestIPRateLimiter_ConnectionAndRateLimits(t *testing.T) {
 	if !limiter.RecordFailedAuth(attackerIP) {
 		t.Errorf("10th failure should trigger lockout")
 	}
+	if !limiter.IsLocked(attackerIP) {
+		t.Errorf("IsLocked should return true after 10 failures")
+	}
+	limiter.ResetFailedAuth(attackerIP)
+	if limiter.IsLocked(attackerIP) {
+		t.Errorf("IsLocked should return false after ResetFailedAuth")
+	}
 }
 
 func TestServerMetrics_Export(t *testing.T) {

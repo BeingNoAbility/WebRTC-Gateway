@@ -191,12 +191,6 @@ export class SignalingRoom extends DurableObject {
             break;
           }
 
-          case 'list_nodes': {
-            const list = Array.from(this.agents.keys());
-            ws.send(JSON.stringify({ type: 'nodes_list', nodes: list }));
-            break;
-          }
-
           case 'error': {
             // Relay error message (e.g. auth rejection from agent to client)
             if (role === 'agent' && msg.session_id) {

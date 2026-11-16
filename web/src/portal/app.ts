@@ -248,6 +248,9 @@ class PortalApp {
     // 1. Peer ID and Secret resolution:
     // Priority 1: Query parameter ?peer= or ?node= (explicit in virtualized link / window.open)
     let peerId = params.get('peer') || params.get('node');
+    if (peerId && !this.isValidNodeId(peerId)) {
+      peerId = null;
+    }
     let secret = '';
     let initialPath = '/';
     let exp = 0;
@@ -278,7 +281,9 @@ class PortalApp {
       const rawHash = window.location.hash.replace(/^#\/?/, '').trim();
       if (rawHash) {
         const parts = rawHash.split(/[?&]/);
-        if (!peerId) peerId = parts[0];
+        if (!peerId && this.isValidNodeId(parts[0])) {
+          peerId = parts[0];
+        }
         for (let i = 1; i < parts.length; i++) {
           const [k, v] = parts[i].split('=');
           if ((k === 'secret' || k === 'token') && v) {
@@ -300,26 +305,29 @@ class PortalApp {
     // Priority 3: Explicit .p2p. subdomain (e.g. bili.p2p.example.com)
     if (!peerId) {
       const explicitSub = this.extractExplicitP2PSubdomain();
-      if (explicitSub) {
+      if (explicitSub && this.isValidNodeId(explicitSub)) {
         peerId = explicitSub;
       }
     }
 
     // Priority 4: Cached active peer from sessionStorage / localStorage (preserves active node across new windows/tabs)
     if (!peerId) {
-      peerId = sessionStorage.getItem('p2p_active_peer_id') || localStorage.getItem('p2p_peer_id') || '';
+      const cached = sessionStorage.getItem('p2p_active_peer_id') || localStorage.getItem('p2p_peer_id') || '';
+      if (cached && this.isValidNodeId(cached)) {
+        peerId = cached;
+      }
     }
 
     // Priority 5: Fallback generic custom subdomain (e.g. immich.mycustomdomain.com)
     if (!peerId) {
       const subdomainNode = this.extractNodeIdFromHostname();
-      if (subdomainNode) {
+      if (subdomainNode && this.isValidNodeId(subdomainNode)) {
         peerId = subdomainNode;
       }
     }
 
     // Priority 6: Built-in default
-    if (!peerId) {
+    if (!peerId || !this.isValidNodeId(peerId)) {
       peerId = DEFAULT_NODE_ID;
     }
 
@@ -412,6 +420,10 @@ class PortalApp {
       if (rawHash) {
         const parts = rawHash.split(/[?&]/);
         const newHash = parts[0];
+        if (!this.isValidNodeId(newHash)) {
+          this.log(`Ignored invalid node ID format in hash: ${newHash}`);
+          return;
+        }
         let newSecret = '';
         let newExp = 0;
         let newSign = '';
@@ -450,7 +462,7 @@ class PortalApp {
           } catch {}
           const sw = navigator.serviceWorker?.controller;
           if (sw) {
-            sw.postMessage({ type: 'NODE_CHANGE', peerId: newHash, secret: this.secret });
+            sw.postMessage({ type: 'NODE_CHANGE', peerId: newHash });
           }
           this.reconnect();
         }
@@ -473,7 +485,7 @@ class PortalApp {
           channel.port1.onmessage = (event) => {
             this.handleSWMessage(event);
           };
-          sw.postMessage({ type: 'PORTAL_ATTACH', peerId: this.peerId, secret: this.secret }, [channel.port2]);
+          sw.postMessage({ type: 'PORTAL_ATTACH', peerId: this.peerId }, [channel.port2]);
           this.log('Attached dedicated MessagePort tunnel to Service Worker');
         };
 
@@ -506,7 +518,6 @@ class PortalApp {
         JSON.stringify({
           type: 'join',
           node_id: this.peerId,
-          secret: this.secret,
         })
       );
     };
@@ -803,7 +814,6 @@ class PortalApp {
             type: 'P2P_PORTAL_CONTEXT',
             nodeId: this.peerId,
             portalOrigin: window.location.origin,
-            secret: this.secret,
           },
           '*'
         );
@@ -835,8 +845,10 @@ class PortalApp {
       font-size: 13px;
       line-height: 1.6;
     `;
-    const curHost = window.location.host;
-    const curPort = window.location.port || '8888';
+    const curHost = this.escapeHtml(window.location.host);
+    const curPort = this.escapeHtml(window.location.port || '8888');
+    const safePeer = this.escapeHtml(this.peerId);
+    const safeOrigin = this.escapeHtml(window.location.origin);
     banner.innerHTML = `
       <div style="display: flex; align-items: flex-start; gap: 14px;">
         <span style="font-size: 26px; line-height: 1;">⚠️</span>
@@ -845,15 +857,15 @@ class PortalApp {
             当前处于非安全上下文（Insecure Context），已暂停加载目标网页
           </h4>
           <p style="color: #c9d1d9; margin-bottom: 10px;">
-            根据 W3C Web 标准与现代浏览器安全规范：在非 HTTPS 且非 localhost 的局域网纯 HTTP IP（如 <code>${window.location.origin}</code>）下，<strong>Service Worker 将被强制禁用</strong>。本网关依赖 Service Worker 虚拟化拦截和转发请求，请选择以下任一方式使用：
+            根据 W3C Web 标准与现代浏览器安全规范：在非 HTTPS 且非 localhost 的局域网纯 HTTP IP（如 <code>${safeOrigin}</code>）下，<strong>Service Worker 将被强制禁用</strong>。本网关依赖 Service Worker 虚拟化拦截和转发请求，请选择以下任一方式使用：
           </p>
           <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-bottom: 10px;">
             <div style="margin-bottom: 8px;">
               <span style="color: #58a6ff; font-weight: 600;">方案 1（本机访问，最快）</span>：若浏览器与信令服务运行在同一台设备，请直接在地址栏打开 
-              <a href="http://localhost:${curPort}/#${this.peerId}" style="color: #388bfd; text-decoration: underline;">http://localhost:${curPort}/#${this.peerId}</a> 或 <code>http://127.0.0.1:${curPort}/#${this.peerId}</code>（localhost 属于标准安全上下文）。
+              <a href="http://localhost:${curPort}/#${safePeer}" style="color: #388bfd; text-decoration: underline;">http://localhost:${curPort}/#${safePeer}</a> 或 <code>http://127.0.0.1:${curPort}/#${safePeer}</code>（localhost 属于标准安全上下文）。
             </div>
             <div style="margin-bottom: 8px;">
-              <span style="color: #3fb950; font-weight: 600;">方案 2（生产推荐，零配置）</span>：部署在支持 HTTPS 的域名或免费部署至 Cloudflare Workers（如 <code>https://p2p.yourdomain.com/#${this.peerId}</code>）。
+              <span style="color: #3fb950; font-weight: 600;">方案 2（生产推荐，零配置）</span>：部署在支持 HTTPS 的域名或免费部署至 Cloudflare Workers（如 <code>https://p2p.yourdomain.com/#${safePeer}</code>）。
             </div>
             <div>
               <span style="color: #d29922; font-weight: 600;">方案 3（局域网跨设备 HTTP 免证书测试）</span>：在 Chrome/Edge 浏览器地址栏打开：<br/>
@@ -1205,7 +1217,7 @@ class PortalApp {
     `;
     pill.innerHTML = `
       <span id="pillModeBadge" style="display:inline-flex; align-items:center; gap:3px; font-weight:700; padding:2px 7px; border-radius:10px; font-size:11px; background:#238636; color:#ffffff; letter-spacing:0.5px;">⚡ P2P</span>
-      <span id="pillNode" style="font-weight:500;" title="Click to open WebRTC HUD">P2P: ${this.peerId}</span>
+      <span id="pillNode" style="font-weight:500;" title="Click to open WebRTC HUD">P2P: ${this.escapeHtml(this.peerId)}</span>
       <span id="pillRtt" style="color:#58a6ff; font-family:monospace;">-- ms</span>
       <span id="pillSpeed" style="color:#8b949e; font-size:11px; font-family:monospace;">↓ 0 KB/s</span>
       <span id="pillGear" style="cursor:pointer; opacity:0.75; font-size:13px; margin-left:2px;" title="Connection Settings">⚙</span>
@@ -1245,7 +1257,7 @@ class PortalApp {
         <div style="margin-bottom: 16px;">
           <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">目标节点 ID (Target Node ID)</label>
           <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">支持二级/三级子域名（如 <code>bili.p2p.example.com</code>）、URL Hash（#nodeId）或手动指定。</div>
-          <input id="inputNodeId" type="text" value="${this.peerId}" placeholder="e.g. myhome" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 14px; font-family: monospace;" />
+          <input id="inputNodeId" type="text" placeholder="e.g. myhome" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 14px; font-family: monospace;" />
           <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;" id="nodeChips">
             <span class="node-chip" data-node="librespeed" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">librespeed</span>
             <span class="node-chip" data-node="vaultwarden" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">vaultwarden</span>
@@ -1259,7 +1271,7 @@ class PortalApp {
         <div style="margin-bottom: 20px;">
           <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">信令服务端地址 (Signaling Server URL)</label>
           <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">设置 WebRTC 握手撮合信令服务器 WebSocket 地址。</div>
-          <input id="inputSignalUrl" type="text" value="${this.signalUrl}" placeholder="wss://..." style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;" />
+          <input id="inputSignalUrl" type="text" placeholder="wss://..." style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;" />
           <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;" id="signalChips">
             <span class="signal-chip" data-signal="current" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">当前同源信令 (Same-Origin /ws)</span>
             <span class="signal-chip" data-signal="ws://127.0.0.1:8888/ws" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">本地信令 (localhost:8888)</span>
@@ -1268,7 +1280,7 @@ class PortalApp {
         <div style="margin-bottom: 20px;">
           <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">访问口令 / 密钥 (Secret Token - 可选)</label>
           <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">若目标节点开启了 <code>-secret</code> 保护，请输入匹配的口令；留空表示公开访问。</div>
-          <input id="inputSecret" type="password" value="${this.secret}" placeholder="Optional Secret Token" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;" />
+          <input id="inputSecret" type="password" placeholder="Optional Secret Token" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;" />
         </div>
         <div style="margin-bottom: 20px;">
           <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">TURN 中继穿透 (Symmetric NAT Relay - 可选)</label>
@@ -1307,6 +1319,13 @@ class PortalApp {
       </div>
     `;
     document.body.appendChild(modal);
+
+    const initNode = document.getElementById('inputNodeId') as HTMLInputElement;
+    if (initNode) initNode.value = this.peerId;
+    const initSignal = document.getElementById('inputSignalUrl') as HTMLInputElement;
+    if (initSignal) initSignal.value = this.signalUrl;
+    const initSecret = document.getElementById('inputSecret') as HTMLInputElement;
+    if (initSecret) initSecret.value = this.secret;
 
     document.querySelectorAll('.node-chip').forEach((chip) => {
       chip.addEventListener('click', () => {
@@ -1356,7 +1375,12 @@ class PortalApp {
       const inputTurnUser = document.getElementById('inputTurnUser') as HTMLInputElement;
       const inputTurnPass = document.getElementById('inputTurnPass') as HTMLInputElement;
 
-      const newNodeId = inputNode?.value.trim() || DEFAULT_NODE_ID;
+      const rawNodeId = inputNode?.value.trim() || DEFAULT_NODE_ID;
+      if (!this.isValidNodeId(rawNodeId)) {
+        alert('Invalid Node ID format. Only alphanumeric characters, dots, dashes, and underscores are allowed (1-64 chars).');
+        return;
+      }
+      const newNodeId = rawNodeId;
       const newSignalUrl = inputSignal?.value.trim() || DEFAULT_SIGNAL_URL;
       const newSecret = inputSecret ? inputSecret.value.trim() : '';
 
@@ -1388,7 +1412,7 @@ class PortalApp {
 
       const sw = navigator.serviceWorker?.controller;
       if (sw) {
-        sw.postMessage({ type: 'NODE_CHANGE', peerId: newNodeId, secret: newSecret });
+        sw.postMessage({ type: 'NODE_CHANGE', peerId: newNodeId });
       }
 
       modal.style.display = 'none';
@@ -1406,6 +1430,10 @@ class PortalApp {
       const tip = document.getElementById('shareCopyTip');
 
       const targetNode = inputNode?.value.trim() || this.peerId;
+      if (!this.isValidNodeId(targetNode)) {
+        alert('Invalid Node ID format. Only alphanumeric characters, dots, dashes, and underscores are allowed (1-64 chars).');
+        return;
+      }
       const secretKey = inputSecret?.value.trim() || this.secret;
       const durationSec = parseInt(selDuration?.value || '86400', 10);
 
@@ -1503,15 +1531,18 @@ class PortalApp {
       document.body.appendChild(overlay);
     }
 
+    const safePeer = this.escapeHtml(peerId);
+    const safeSignal = this.escapeHtml(this.signalUrl);
+
     overlay.innerHTML = `
       <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px; max-width: 480px; width: 90%; color: #c9d1d9; box-shadow: 0 16px 40px rgba(0,0,0,0.6); text-align: center;">
         <div style="font-size: 36px; margin-bottom: 12px;">📡</div>
-        <h2 style="font-size: 18px; color: #f0f6fc; margin-bottom: 8px;">Target Node [${peerId}] is Offline</h2>
+        <h2 style="font-size: 18px; color: #f0f6fc; margin-bottom: 8px;">Target Node [${safePeer}] is Offline</h2>
         <p style="font-size: 13px; color: #8b949e; line-height: 1.6; margin-bottom: 20px;">
           The remote agent daemon has not registered with the signaling relay yet. Please verify that <code>agent.exe</code> is running on your server, or switch to another node.
         </p>
         <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; font-size: 12px; font-family: monospace; color: #58a6ff; margin-bottom: 20px; text-align: left; word-break: break-all;">
-          ./agent.exe -node-id ${peerId} -signal ${this.signalUrl}
+          ./agent.exe -node-id ${safePeer} -signal ${safeSignal}
         </div>
         <div style="display: flex; gap: 12px; justify-content: center;">
           <button id="btnRetryConn" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer;">Retry</button>
@@ -1550,20 +1581,23 @@ class PortalApp {
       document.body.appendChild(overlay);
     }
 
+    const safePeer = this.escapeHtml(peerId);
+    const safeError = errorMsg ? this.escapeHtml(errorMsg) : '';
+
     overlay.innerHTML = `
       <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px; max-width: 440px; width: 90%; color: #c9d1d9; box-shadow: 0 16px 40px rgba(0,0,0,0.6); text-align: center;">
         <div style="font-size: 36px; margin-bottom: 12px;">🔐</div>
         <h2 style="font-size: 18px; color: #f0f6fc; margin-bottom: 8px;">访问口令鉴权 (Auth Required)</h2>
         <p style="font-size: 13px; color: #8b949e; line-height: 1.6; margin-bottom: 16px;">
-          目标节点 <code style="color: #58a6ff; font-weight: 600;">[${peerId}]</code> 已开启访问保护，请输入访问密钥：
+          目标节点 <code style="color: #58a6ff; font-weight: 600;">[${safePeer}]</code> 已开启访问保护，请输入访问密钥：
         </p>
         ${
-          errorMsg
-            ? `<div style="background: rgba(248, 81, 73, 0.15); border: 1px solid rgba(248, 81, 73, 0.4); color: #f85149; border-radius: 6px; padding: 8px 12px; font-size: 12px; margin-bottom: 16px;">${errorMsg}</div>`
+          safeError
+            ? `<div style="background: rgba(248, 81, 73, 0.15); border: 1px solid rgba(248, 81, 73, 0.4); color: #f85149; border-radius: 6px; padding: 8px 12px; font-size: 12px; margin-bottom: 16px;">${safeError}</div>`
             : ''
         }
         <div style="margin-bottom: 16px; text-align: left;">
-          <input id="inputAuthSecret" type="password" placeholder="请输入口令 / Secret Token..." value="${this.secret}" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 10px 12px; border-radius: 6px; font-size: 14px; font-family: monospace;" />
+          <input id="inputAuthSecret" type="password" placeholder="请输入口令 / Secret Token..." style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 10px 12px; border-radius: 6px; font-size: 14px; font-family: monospace;" />
         </div>
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 20px; font-size: 12px; color: #8b949e; cursor: pointer;">
           <input type="checkbox" id="chkRememberSecret" checked style="cursor: pointer;" />
@@ -1578,6 +1612,7 @@ class PortalApp {
 
     const input = document.getElementById('inputAuthSecret') as HTMLInputElement;
     if (input) {
+      input.value = this.secret;
       setTimeout(() => input.focus(), 50);
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
@@ -1687,7 +1722,6 @@ class PortalApp {
             JSON.stringify({
               type: 'join',
               node_id: this.peerId,
-              secret: this.secret,
             })
           );
           resolve();
@@ -1755,7 +1789,7 @@ class PortalApp {
 
     const sw = navigator.serviceWorker?.controller;
     if (sw) {
-      sw.postMessage({ type: 'NODE_CHANGE', peerId: this.peerId, secret: this.secret });
+      sw.postMessage({ type: 'NODE_CHANGE', peerId: this.peerId });
     }
 
     if (this.appFrame) {
@@ -2434,8 +2468,13 @@ class PortalApp {
     return `${val.toFixed(val >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
   }
 
-  private escapeHtml(str: string): string {
-    return str
+  private isValidNodeId(id: string): boolean {
+    return /^[a-zA-Z0-9._-]{1,64}$/.test(id);
+  }
+
+  private escapeHtml(str?: string | null): string {
+    if (!str) return '';
+    return String(str)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')

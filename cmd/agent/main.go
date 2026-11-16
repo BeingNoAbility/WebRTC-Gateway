@@ -51,6 +51,7 @@ func main() {
 	cfgMaxStreams := 512
 	cfgMetricsAddr := ""
 	cfgPortalURL := "https://your-portal-domain.com"
+	cfgAllowedProxyDomains := ""
 
 	// 2. Load Config File (Tier 2: Config File)
 	configPath, explicitConfig := FindConfigFile(os.Args[1:], []string{"agent.yaml", "agent.yml", "agent.json"})
@@ -115,6 +116,9 @@ func main() {
 		if fileCfg.PortalURL != "" {
 			cfgPortalURL = fileCfg.PortalURL
 		}
+		if len(fileCfg.AllowedProxyDomains) > 0 {
+			cfgAllowedProxyDomains = fileCfg.AllowedProxyDomains.String()
+		}
 	}
 
 	// 3. Override with Environment Variables (Tier 3: ENV)
@@ -171,6 +175,9 @@ func main() {
 	if env := os.Getenv("PORTAL_URL"); env != "" {
 		cfgPortalURL = env
 	}
+	if env := os.Getenv("ALLOWED_PROXY_DOMAINS"); env != "" {
+		cfgAllowedProxyDomains = env
+	}
 
 	// 4. CLI Flags (Tier 4: CLI Flags - Highest Priority)
 	nodeID := flag.String("node-id", cfgNodeID, "Unique node ID for this agent (env: NODE_ID)")
@@ -192,6 +199,7 @@ func main() {
 	metricsAddr := flag.String("metrics-addr", cfgMetricsAddr, "Optional address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default disabled)")
 	shareDuration := flag.Duration("sign-link", 0, "Generate a temporary signed share link with the given expiration duration (e.g. 1h, 24h, 7d) and exit")
 	portalURL := flag.String("portal-url", cfgPortalURL, "Base URL of the Web Portal for -sign-link generation")
+	allowedProxyDomains := flag.String("allowed-proxy-domains", cfgAllowedProxyDomains, "Comma-separated allowed domain suffixes for cross-origin proxying (e.g. *.hdslb.com,*.bilivideo.com, env: ALLOWED_PROXY_DOMAINS)")
 	_ = configFlag
 	flag.Parse()
 
@@ -279,6 +287,17 @@ func main() {
 	}
 	if *proxyURL != "" {
 		ag.SetProxy(*proxyURL)
+	}
+	if *allowedProxyDomains != "" {
+		var domains []string
+		for _, d := range strings.Split(*allowedProxyDomains, ",") {
+			d = strings.TrimSpace(d)
+			if d != "" {
+				domains = append(domains, d)
+			}
+		}
+		ag.SetAllowedProxyDomains(domains)
+		log.Printf("  Allowed Proxy Domains: %v", domains)
 	}
 	if *insecure {
 		ag.SetInsecureTLS(true)

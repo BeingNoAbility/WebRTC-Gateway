@@ -72,11 +72,12 @@ func ExtractRootDomain(hostname string) string {
 
 // HTTPProxy bridges multiplexed P2P streams with local HTTP backend services.
 type HTTPProxy struct {
-	targetURL     *url.URL
-	rootDomain    string
-	cookieManager *SessionCookieManager
-	httpClient    *http.Client
-	transport     *http.Transport
+	targetURL      *url.URL
+	rootDomain     string
+	allowedDomains []string
+	cookieManager  *SessionCookieManager
+	httpClient     *http.Client
+	transport      *http.Transport
 }
 
 // NewHTTPProxy creates a new HTTPProxy targeting targetURLString.
@@ -126,6 +127,43 @@ func (p *HTTPProxy) SetProxy(proxyURL string) {
 	p.transport.Proxy = http.ProxyFromEnvironment
 }
 
+// SetAllowedDomains configures explicit domain patterns (e.g. "*.hdslb.com") allowed for cross-origin proxying.
+func (p *HTTPProxy) SetAllowedDomains(domains []string) {
+	p.allowedDomains = nil
+	for _, d := range domains {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d != "" {
+			p.allowedDomains = append(p.allowedDomains, d)
+		}
+	}
+}
+
+func (p *HTTPProxy) isDomainAllowed(hostOnly string) bool {
+	hostOnly = strings.ToLower(strings.TrimSpace(hostOnly))
+	if hostOnly == "" {
+		return false
+	}
+	// 1. Same target host or subdomain of target rootDomain
+	if strings.EqualFold(hostOnly, p.targetURL.Hostname()) {
+		return true
+	}
+	if p.rootDomain != "" && (hostOnly == p.rootDomain || strings.HasSuffix(hostOnly, "."+p.rootDomain)) {
+		return true
+	}
+	// 2. Explicit allowed domain patterns
+	for _, pattern := range p.allowedDomains {
+		if strings.HasPrefix(pattern, "*.") {
+			suffix := pattern[1:] // ".hdslb.com"
+			if strings.HasSuffix(hostOnly, suffix) || hostOnly == pattern[2:] {
+				return true
+			}
+		} else if strings.EqualFold(hostOnly, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *HTTPProxy) resolveTargetURL(reqPath string, headers map[string]string) (*url.URL, string, error) {
 	cleanPath := reqPath
 	if !strings.HasPrefix(cleanPath, "/") {
@@ -162,22 +200,7 @@ func (p *HTTPProxy) resolveTargetURL(reqPath string, headers map[string]string) 
 			}
 		}
 
-		brand := strings.Split(p.rootDomain, ".")[0]
-		brandShort := brand
-		if len(brandShort) > 4 {
-			brandShort = brandShort[:4]
-		}
-
-		lowerPath := strings.ToLower(subPath)
-		isMedia := strings.Contains(lowerPath, ".m4s") || strings.Contains(lowerPath, ".mp4") ||
-			strings.Contains(lowerPath, ".ts") || strings.Contains(lowerPath, ".m3u8") ||
-			strings.Contains(lowerPath, ".webm") || strings.Contains(lowerPath, "/upgcxcode/")
-
-		isAllowed := hostOnly == p.rootDomain ||
-			strings.HasSuffix(hostOnly, "."+p.rootDomain) ||
-			strings.EqualFold(hostOnly, p.targetURL.Hostname()) ||
-			(brandShort != "" && strings.Contains(hostOnly, brandShort)) ||
-			isMedia
+		isAllowed := p.isDomainAllowed(hostOnly)
 
 		if isAllowed {
 			scheme := p.targetURL.Scheme
@@ -231,15 +254,7 @@ func (p *HTTPProxy) rewriteLocation(loc string, targetHost string) string {
 			return u.RequestURI()
 		}
 		hostClean := strings.ToLower(u.Hostname())
-		if hostClean == p.rootDomain || strings.HasSuffix(hostClean, "."+p.rootDomain) {
-			return "/--p2p-proxy/" + u.Host + u.RequestURI()
-		}
-		brand := strings.Split(p.rootDomain, ".")[0]
-		brandShort := brand
-		if len(brandShort) > 4 {
-			brandShort = brandShort[:4]
-		}
-		if brandShort != "" && strings.Contains(hostClean, brandShort) {
+		if p.isDomainAllowed(hostClean) {
 			return "/--p2p-proxy/" + u.Host + u.RequestURI()
 		}
 		return loc

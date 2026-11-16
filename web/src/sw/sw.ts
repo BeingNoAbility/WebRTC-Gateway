@@ -25,7 +25,6 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
 let portalPort: MessagePort | null = null;
 let activePortalClientId: string | null = null;
 let activeNodeId: string | null = null;
-let activePortalSecret: string | null = null;
 let currentBackendOrigin: string | null = null;
 let currentBackendRootDomain: string | null = null;
 
@@ -33,7 +32,6 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
   const data = event.data;
   if (data?.type === 'PORTAL_ATTACH') {
     if (data.peerId) activeNodeId = data.peerId;
-    if (data.secret !== undefined) activePortalSecret = data.secret;
     if (event.ports && event.ports[0]) {
       portalPort = event.ports[0];
       if (event.source) {
@@ -42,7 +40,6 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
     }
   } else if (data?.type === 'NODE_CHANGE') {
     if (data.peerId) activeNodeId = data.peerId;
-    if (data.secret !== undefined) activePortalSecret = data.secret;
   }
 });
 
@@ -330,7 +327,6 @@ function injectScriptIntoHtmlStream(inputStream: ReadableStream<Uint8Array>): Re
   const contextTag = `<script>` +
     `window.__P2P_NODE_ID__ = ${JSON.stringify(activeNodeId || '')};` +
     `window.__P2P_PORTAL_ORIGIN__ = ${JSON.stringify(self.location.origin)};` +
-    (activePortalSecret ? `window.__P2P_SECRET__ = ${JSON.stringify(activePortalSecret)};` : '') +
     `</script>`;
   const originTag = currentBackendOrigin
     ? `<script>window.__P2P_TARGET_ORIGIN__ = ${JSON.stringify(currentBackendOrigin)};window.__P2P_TARGET_ROOT_DOMAIN__ = ${JSON.stringify(currentBackendRootDomain || '')};</script>`

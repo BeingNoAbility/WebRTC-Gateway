@@ -33,10 +33,11 @@ type WSConnectMetadata struct {
 
 // WSProxy handles bidirectional relay between WebRTC streams and local WebSocket services.
 type WSProxy struct {
-	targetBase    *url.URL
-	rootDomain    string
-	cookieManager *SessionCookieManager
-	dialer        *websocket.Dialer
+	targetBase     *url.URL
+	rootDomain     string
+	allowedDomains []string
+	cookieManager  *SessionCookieManager
+	dialer         *websocket.Dialer
 }
 
 // NewWSProxy creates a new WSProxy targeting the given base URL.
@@ -79,6 +80,41 @@ func (wp *WSProxy) SetProxy(proxyURL string) {
 	wp.dialer.Proxy = http.ProxyFromEnvironment
 }
 
+// SetAllowedDomains configures explicit domain patterns (e.g. "*.hdslb.com") allowed for cross-origin proxying.
+func (wp *WSProxy) SetAllowedDomains(domains []string) {
+	wp.allowedDomains = nil
+	for _, d := range domains {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d != "" {
+			wp.allowedDomains = append(wp.allowedDomains, d)
+		}
+	}
+}
+
+func (wp *WSProxy) isDomainAllowed(hostOnly string) bool {
+	hostOnly = strings.ToLower(strings.TrimSpace(hostOnly))
+	if hostOnly == "" {
+		return false
+	}
+	if strings.EqualFold(hostOnly, wp.targetBase.Hostname()) {
+		return true
+	}
+	if wp.rootDomain != "" && (hostOnly == wp.rootDomain || strings.HasSuffix(hostOnly, "."+wp.rootDomain)) {
+		return true
+	}
+	for _, pattern := range wp.allowedDomains {
+		if strings.HasPrefix(pattern, "*.") {
+			suffix := pattern[1:]
+			if strings.HasSuffix(hostOnly, suffix) || hostOnly == pattern[2:] {
+				return true
+			}
+		} else if strings.EqualFold(hostOnly, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 func (wp *WSProxy) resolveTargetWSURL(reqPath string, headers map[string]string) (*url.URL, string, error) {
 	cleanPath := reqPath
 	if !strings.HasPrefix(cleanPath, "/") {
@@ -114,16 +150,7 @@ func (wp *WSProxy) resolveTargetWSURL(reqPath string, headers map[string]string)
 			}
 		}
 
-		brand := strings.Split(wp.rootDomain, ".")[0]
-		brandShort := brand
-		if len(brandShort) > 4 {
-			brandShort = brandShort[:4]
-		}
-
-		isAllowed := hostOnly == wp.rootDomain ||
-			strings.HasSuffix(hostOnly, "."+wp.rootDomain) ||
-			strings.EqualFold(hostOnly, wp.targetBase.Hostname()) ||
-			(brandShort != "" && strings.Contains(hostOnly, brandShort))
+		isAllowed := wp.isDomainAllowed(hostOnly)
 
 		if isAllowed {
 			scheme := wp.targetBase.Scheme

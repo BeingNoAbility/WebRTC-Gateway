@@ -104,10 +104,6 @@
             if (e.data.portalOrigin) {
               globalScope.__P2P_PORTAL_ORIGIN__ = e.data.portalOrigin;
             }
-            if (e.data.secret) {
-              globalScope.__P2P_SECRET__ = e.data.secret;
-              try { sessionStorage.setItem('p2p_secret', e.data.secret); } catch {}
-            }
           }
         } catch {}
       });
@@ -279,9 +275,6 @@
       if (nodeId) {
         p2pUrl.searchParams.set('peer', nodeId);
         p2pUrl.hash = nodeId;
-      }
-      if (secret) {
-        p2pUrl.searchParams.set('secret', secret);
       }
       return p2pUrl.href;
     };

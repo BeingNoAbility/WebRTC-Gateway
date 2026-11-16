@@ -77,7 +77,8 @@ type AgentConfigFile struct {
 	StunServers  StringOrSlice `json:"stun_servers" yaml:"stun_servers"`
 	MaxStreams   int           `json:"max_streams" yaml:"max_streams"`
 	MetricsAddr  string        `json:"metrics_addr" yaml:"metrics_addr"`
-	PortalURL    string        `json:"portal_url" yaml:"portal_url"`
+	PortalURL           string        `json:"portal_url" yaml:"portal_url"`
+	AllowedProxyDomains StringOrSlice `json:"allowed_proxy_domains" yaml:"allowed_proxy_domains"`
 }
 
 // LoadAgentConfigFile parses an agent configuration file (YAML or JSON).

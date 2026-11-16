@@ -118,14 +118,18 @@ func New(nodeID, signalURL, signalSecret, accessSecret, target string) *Agent {
 	}
 }
 
-// SetProxy configures an explicit proxy (http://, https://, or socks5://) for signaling and backend proxies.
+// SetProxy configures an explicit proxy (http://, https://, or socks5://) strictly for signaling connections.
 func (a *Agent) SetProxy(proxyURL string) {
 	a.ProxyURL = proxyURL
+}
+
+// SetAllowedProxyDomains configures allowed domain patterns for cross-origin proxying.
+func (a *Agent) SetAllowedProxyDomains(domains []string) {
 	if a.httpProxy != nil {
-		a.httpProxy.SetProxy(proxyURL)
+		a.httpProxy.SetAllowedDomains(domains)
 	}
 	if a.wsProxy != nil {
-		a.wsProxy.SetProxy(proxyURL)
+		a.wsProxy.SetAllowedDomains(domains)
 	}
 }
 
@@ -388,8 +392,8 @@ func (a *Agent) teardownSession(sessionID, cookieSession string, pc *webrtc.Peer
 		delete(a.activeConns, sessionID)
 		delete(a.clientIPs, sessionID)
 	}
-	a.connMu.Unlock()
 	atomic.StoreInt64(&a.activePeers, int64(len(a.activeConns)))
+	a.connMu.Unlock()
 	a.cookieManager.RemoveSession(cookieSession)
 	if pc != nil {
 		_ = pc.Close()
@@ -418,6 +422,7 @@ func (a *Agent) Close() {
 		delete(a.activeConns, id)
 	}
 	a.clientIPs = make(map[string]string)
+	atomic.StoreInt64(&a.activePeers, 0)
 	a.connMu.Unlock()
 }
 
@@ -732,6 +737,7 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 	if clientIP != "" {
 		a.clientIPs[sessionID] = clientIP
 	}
+	atomic.StoreInt64(&a.activePeers, int64(len(a.activeConns)))
 	a.connMu.Unlock()
 
 	// Create Answer

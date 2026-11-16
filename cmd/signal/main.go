@@ -403,6 +403,25 @@ func (l *IPRateLimiter) RecordFailedAuth(ip string) bool {
 	return false
 }
 
+func (l *IPRateLimiter) IsLocked(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cutoff := time.Now().Add(-1 * time.Minute)
+	validCount := 0
+	for _, t := range l.failedAuths[ip] {
+		if t.After(cutoff) {
+			validCount++
+		}
+	}
+	return validCount >= 10
+}
+
+func (l *IPRateLimiter) ResetFailedAuth(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.failedAuths, ip)
+}
+
 func (l *IPRateLimiter) Rejections() uint64 {
 	return atomic.LoadUint64(&l.rejectedCount)
 }
@@ -856,6 +875,11 @@ func main() {
 					_ = session.Send(&signaling.Message{Type: signaling.TypeError, Error: "node_id is required"})
 					return
 				}
+				if limiter.IsLocked(clientIP) {
+					log.Printf("[Broker] Preemptive lockout: IP %s blocked due to excessive failed attempts", clientIP)
+					_ = session.Send(&signaling.Message{Type: signaling.TypeError, Error: "too many failed authentication attempts, IP throttled"})
+					return
+				}
 				if err := broker.RegisterAgent(msg.NodeID, msg.Secret, msg.RequireVisitorAuth, session); err != nil {
 					log.Printf("[Broker] Registration rejected for node_id=%s from IP %s: %v", msg.NodeID, clientIP, err)
 					if limiter.RecordFailedAuth(clientIP) {
@@ -865,6 +889,7 @@ func main() {
 					}
 					return
 				}
+				limiter.ResetFailedAuth(clientIP)
 				session.Role = "agent"
 				session.NodeID = msg.NodeID
 				_ = session.Send(&signaling.Message{Type: signaling.TypeRegistered, NodeID: msg.NodeID})

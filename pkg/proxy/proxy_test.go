@@ -171,19 +171,26 @@ func TestResolveTargetURL_ComprehensiveBoundaries(t *testing.T) {
 		t.Errorf("Sibling proxy mismatch: url=%v, host=%v", u, host)
 	}
 
-	// Case 5: Allowed media stream path regardless of host
+	// Case 5: Explicit allowed domain whitelist for external CDN / media
+	// Unwhitelisted domain is blocked even if query contains .mp4
+	_, _, err = hp.resolveTargetURL("/--p2p-proxy/xy123x.bilivideo.com/upgcxcode/123.m4s", nil)
+	if err == nil {
+		t.Errorf("Expected bilivideo to be blocked before adding to allowed domains")
+	}
+	// Whitelist bilivideo.com
+	hp.SetAllowedDomains([]string{"*.bilivideo.com"})
 	u, host, err = hp.resolveTargetURL("/--p2p-proxy/xy123x.bilivideo.com/upgcxcode/123.m4s", nil)
 	if err != nil {
-		t.Fatalf("Media stream path should be allowed, got error: %v", err)
+		t.Fatalf("Whitelisted domain should be allowed, got error: %v", err)
 	}
 	if host != "xy123x.bilivideo.com" {
 		t.Errorf("Media host mismatch: got %v", host)
 	}
 
-	// Case 6: Security boundary: completely unrelated 3rd party domain blocked
-	_, _, err = hp.resolveTargetURL("/--p2p-proxy/malicious-attacker.com/steal", nil)
+	// Case 6: Security boundary: open proxy bypass attempt with fake .mp4 in query blocked!
+	_, _, err = hp.resolveTargetURL("/--p2p-proxy/malicious-attacker.com/steal?fake=.mp4", nil)
 	if err == nil {
-		t.Errorf("Expected cross-origin restriction error for malicious host, got nil")
+		t.Errorf("Expected cross-origin restriction error for malicious host with fake .mp4, got nil")
 	}
 
 	// Case 7: Via x-p2p-dest-host header
