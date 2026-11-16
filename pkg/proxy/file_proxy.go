@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -137,7 +139,32 @@ func (fp *FileProxy) HandleStream(sessionID string, stream *mux.Stream) {
 	if reqPath == "" {
 		reqPath = "/"
 	}
-	req, err := http.NewRequestWithContext(stream.Context(), method, reqPath, nil)
+
+	// 1. Safe URL normalization and unescaping
+	// Strip query parameters for filesystem mapping
+	rawPath := reqPath
+	if idx := strings.Index(rawPath, "?"); idx != -1 {
+		rawPath = rawPath[:idx]
+	}
+
+	// Unescape BEFORE path.Clean to defeat %2e%2e traversal bypasses while properly
+	// resolving special characters (such as Asian characters, brackets, spaces, etc.)
+	unescapedPath, err := url.PathUnescape(rawPath)
+	if err != nil {
+		unescapedPath = rawPath
+	}
+
+	// Reject embedded null bytes immediately
+	if strings.ContainsRune(unescapedPath, 0) {
+		http.Error(w, "Bad Request: Null byte detected in path", http.StatusBadRequest)
+		return
+	}
+
+	// Normalize Windows backslashes to forward slashes before path.Clean
+	unescapedPath = strings.ReplaceAll(unescapedPath, "\\", "/")
+	cleanReqPath := path.Clean("/" + unescapedPath)
+
+	req, err := http.NewRequestWithContext(stream.Context(), method, cleanReqPath, nil)
 	if err != nil {
 		fp.sendError(stream, http.StatusInternalServerError, "Failed to create request")
 		return
@@ -150,29 +177,35 @@ func (fp *FileProxy) HandleStream(sessionID string, stream *mux.Stream) {
 
 	// 2. Handle Single File Mode
 	if fp.mode == FileModeSingleFile {
+		w.Header().Set("X-P2P-Mode", "file")
+		w.Header().Set("X-P2P-File-Name", fp.fileName)
+		w.Header().Set("X-P2P-File-Size", fmt.Sprintf("%d", fp.fileSize))
+		if mimeType := detectMimeType(fp.targetPath); mimeType != "" {
+			w.Header().Set("Content-Type", mimeType)
+		}
 		if fp.isInline {
 			w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", fp.fileName))
 		} else {
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fp.fileName))
 		}
+		w.Header().Set("Accept-Ranges", "bytes")
 		http.ServeFile(w, req, fp.targetPath)
 		return
 	}
 
 	// 3. Handle Directory Mode with Path Traversal & Symlink Defense
-	cleanReqPath := path.Clean("/" + reqPath)
 	relSubPath := filepath.FromSlash(strings.TrimPrefix(cleanReqPath, "/"))
 	localPath := filepath.Join(fp.targetPath, relSubPath)
 
 	// Lexical boundary check: ensure path does not escape root
 	rel, err := filepath.Rel(fp.targetPath, localPath)
-	if err != nil || strings.HasPrefix(rel, "..") || strings.HasPrefix(rel, "/..") || strings.HasPrefix(rel, `\..`) {
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		http.Error(w, "Forbidden: Path traversal blocked", http.StatusForbidden)
 		return
 	}
 
 	// Check existence
-	_, err = os.Stat(localPath)
+	fi, err := os.Stat(localPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.NotFound(w, req)
@@ -189,9 +222,24 @@ func (fp *FileProxy) HandleStream(sessionID string, stream *mux.Stream) {
 		return
 	}
 	realRel, err := filepath.Rel(fp.targetPath, realPath)
-	if err != nil || strings.HasPrefix(realRel, "..") {
+	if err != nil || realRel == ".." || strings.HasPrefix(realRel, ".."+string(filepath.Separator)) {
 		http.Error(w, "Forbidden: Symlink target escapes root directory", http.StatusForbidden)
 		return
+	}
+
+	w.Header().Set("X-P2P-Mode", "dir")
+	if !fi.IsDir() {
+		w.Header().Set("X-P2P-File-Name", fi.Name())
+		w.Header().Set("X-P2P-File-Size", fmt.Sprintf("%d", fi.Size()))
+		if mimeType := detectMimeType(realPath); mimeType != "" {
+			w.Header().Set("Content-Type", mimeType)
+		}
+		if isInlineExtension(filepath.Ext(realPath)) {
+			w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", fi.Name()))
+		} else {
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fi.Name()))
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
 	}
 
 	// Serve the verified file or directory (handles index.html or directory listing automatically)
@@ -271,11 +319,76 @@ func (w *streamResponseWriter) Write(b []byte) (int, error) {
 // (in-browser media playback / view) or as a file attachment download.
 func isInlineExtension(ext string) bool {
 	switch strings.ToLower(ext) {
-	case ".mp4", ".webm", ".ogg", ".ogv", ".mp3", ".wav", ".flac", ".aac", ".m4a", ".m4s", ".ts",
+	case ".mp4", ".m4v", ".webm", ".ogg", ".ogv", ".mp3", ".wav", ".flac", ".aac", ".m4a", ".m4s", ".ts",
 		".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp",
 		".pdf", ".txt", ".md", ".json", ".csv", ".log", ".html", ".htm", ".css", ".js", ".xml":
 		return true
 	default:
 		return false
 	}
+}
+
+// Built-in comprehensive MIME map to ensure correct Content-Type across all minimal OS environments
+// (including Alpine Linux, minimal Docker images, and Windows without specific file registrations).
+var builtinMimeTypes = map[string]string{
+	// Video
+	".mp4":  "video/mp4",
+	".m4v":  "video/mp4",
+	".webm": "video/webm",
+	".mkv":  "video/x-matroska",
+	".avi":  "video/x-msvideo",
+	".mov":  "video/quicktime",
+	".ogv":  "video/ogg",
+	".ts":   "video/mp2t",
+	// Audio
+	".mp3":  "audio/mpeg",
+	".wav":  "audio/wav",
+	".flac": "audio/flac",
+	".aac":  "audio/aac",
+	".m4a":  "audio/mp4",
+	".oga":  "audio/ogg",
+	".ogg":  "audio/ogg",
+	".weba": "audio/webm",
+	// Documents & Text
+	".pdf":  "application/pdf",
+	".txt":  "text/plain; charset=utf-8",
+	".md":   "text/markdown; charset=utf-8",
+	".html": "text/html; charset=utf-8",
+	".htm":  "text/html; charset=utf-8",
+	".css":  "text/css; charset=utf-8",
+	".js":   "application/javascript; charset=utf-8",
+	".mjs":  "application/javascript; charset=utf-8",
+	".json": "application/json; charset=utf-8",
+	".xml":  "application/xml; charset=utf-8",
+	".csv":  "text/csv; charset=utf-8",
+	".log":  "text/plain; charset=utf-8",
+	// Images
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".webp": "image/webp",
+	".svg":  "image/svg+xml",
+	".ico":  "image/x-icon",
+	".bmp":  "image/bmp",
+	// Archives & Binaries
+	".zip":  "application/zip",
+	".tar":  "application/x-tar",
+	".gz":   "application/gzip",
+	".tgz":  "application/gzip",
+	".rar":  "application/vnd.rar",
+	".7z":   "application/x-7z-compressed",
+	".iso":  "application/x-iso9660-image",
+}
+
+// detectMimeType returns the MIME Content-Type for a given file path based on its extension.
+func detectMimeType(filePath string) string {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if mt, ok := builtinMimeTypes[ext]; ok {
+		return mt
+	}
+	if mt := mime.TypeByExtension(ext); mt != "" {
+		return mt
+	}
+	return ""
 }

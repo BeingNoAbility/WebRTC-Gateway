@@ -375,3 +375,205 @@ func TestFileProxy_DirectoryMode_AndPathTraversalDefense(t *testing.T) {
 		t.Fatalf("Path traversal attack must NOT succeed with 200! Got: %d", meta3.Status)
 	}
 }
+
+func createConnectedMuxPair() (*mux.Mux, *mux.Mux, func()) {
+	tClient, tAgent := newMemoryTransportPair()
+	clientMux := mux.NewMux(tClient, true)
+	agentMux := mux.NewMux(tAgent, false)
+
+	tClient.mu.Lock()
+	tClient.onMsg = func(d []byte) { _ = clientMux.HandleIncomingMessage(d) }
+	tClient.mu.Unlock()
+
+	tAgent.mu.Lock()
+	tAgent.onMsg = func(d []byte) { _ = agentMux.HandleIncomingMessage(d) }
+	tAgent.mu.Unlock()
+
+	cleanup := func() {
+		clientMux.Close()
+		agentMux.Close()
+		tClient.Close()
+		tAgent.Close()
+	}
+	return clientMux, agentMux, cleanup
+}
+
+func TestFileProxy_SpecialFilenameAndURLDecoding(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Special anime filename with Chinese characters, brackets, spaces, and hyphens
+	specialFileName := "[ANi] FX 戰士久留美 - 01 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4"
+	specialFilePath := filepath.Join(tempDir, specialFileName)
+	fileContent := []byte("fake-mp4-stream-data-bytes-for-anime-episode-01")
+	if err := os.WriteFile(specialFilePath, fileContent, 0644); err != nil {
+		t.Fatalf("Failed to create special file: %v", err)
+	}
+
+	fpDir, err := NewDirProxy(tempDir)
+	if err != nil {
+		t.Fatalf("NewDirProxy failed: %v", err)
+	}
+
+	clientMux, agentMux, cleanup := createConnectedMuxPair()
+	defer cleanup()
+
+	// Accept stream on agent side
+	go func() {
+		stream, err := agentMux.AcceptStream(context.Background())
+		if err != nil {
+			return
+		}
+		fpDir.HandleStream("sess-special", stream)
+	}()
+
+	s, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+
+	// Browser sends RFC 3986 percent-encoded URL path
+	encodedPath := "/%5BANi%5D%20FX%20%E6%88%B0%E5%A3%AB%E4%B9%85%E7%95%99%E7%BE%8E%20-%2001%20%5B1080P%5D%5BBaha%5D%5BWEB-DL%5D%5BAAC%20AVC%5D%5BCHT%5D.mp4"
+	reqBytes, _ := json.Marshal(RequestMetadata{Method: "GET", Path: encodedPath})
+	_ = s.WriteHeaders(reqBytes)
+	_ = s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	hRaw, err := s.ReadHeaders(ctx)
+	cancel()
+	if err != nil {
+		t.Fatalf("ReadHeaders failed: %v", err)
+	}
+
+	var respMeta ResponseMetadata
+	_ = json.Unmarshal(hRaw, &respMeta)
+	if respMeta.Status != 200 {
+		t.Fatalf("Expected 200 OK for special filename, got %d (Msg: %s)", respMeta.Status, respMeta.Msg)
+	}
+
+	// Verify Content-Type is video/mp4 (not octet-stream!)
+	ct := respMeta.Headers["content-type"]
+	if !strings.HasPrefix(ct, "video/mp4") {
+		t.Errorf("Expected content-type video/mp4, got %q", ct)
+	}
+
+	// Verify X-P2P-Mode and X-P2P-File-Name
+	if respMeta.Headers["x-p2p-mode"] != "dir" {
+		t.Errorf("Expected x-p2p-mode dir, got %q", respMeta.Headers["x-p2p-mode"])
+	}
+	if respMeta.Headers["x-p2p-file-name"] != specialFileName {
+		t.Errorf("Expected x-p2p-file-name %q, got %q", specialFileName, respMeta.Headers["x-p2p-file-name"])
+	}
+
+	body, err := io.ReadAll(s)
+	if err != nil {
+		t.Fatalf("ReadAll body failed: %v", err)
+	}
+	if string(body) != string(fileContent) {
+		t.Fatalf("Body content mismatch: expected %d bytes, got %d bytes", len(fileContent), len(body))
+	}
+}
+
+func TestFileProxy_PathTraversalDefense_PercentEncoded(t *testing.T) {
+	tempDir := t.TempDir()
+	fpDir, err := NewDirProxy(tempDir)
+	if err != nil {
+		t.Fatalf("NewDirProxy failed: %v", err)
+	}
+
+	maliciousPaths := []string{
+		"/%2e%2e/%2e%2e/etc/passwd",
+		"/%2e%2e%2f%2e%2e%2fWindows%2fwin.ini",
+		"/sub/%2e%2e/%2e%2e/shadow",
+		"/..%2f..%2f..%2froot",
+		"/%00/malicious",
+	}
+
+	for _, malPath := range maliciousPaths {
+		t.Run(malPath, func(t *testing.T) {
+			clientMux, agentMux, cleanup := createConnectedMuxPair()
+			defer cleanup()
+
+			go func() {
+				stream, err := agentMux.AcceptStream(context.Background())
+				if err != nil {
+					return
+				}
+				fpDir.HandleStream("sess-mal", stream)
+			}()
+
+			s, err := clientMux.OpenStream()
+			if err != nil {
+				t.Fatalf("OpenStream failed: %v", err)
+			}
+			reqBytes, _ := json.Marshal(RequestMetadata{Method: "GET", Path: malPath})
+			_ = s.WriteHeaders(reqBytes)
+			_ = s.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			hRaw, err := s.ReadHeaders(ctx)
+			cancel()
+			if err != nil {
+				t.Fatalf("ReadHeaders failed: %v", err)
+			}
+
+			var respMeta ResponseMetadata
+			_ = json.Unmarshal(hRaw, &respMeta)
+			if respMeta.Status == 200 {
+				t.Fatalf("Malicious path %q must NOT return 200! Got: %d", malPath, respMeta.Status)
+			}
+		})
+	}
+}
+
+func TestFileProxy_SingleFile_MediaAndPDF_MimeTypes(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. Single PDF file
+	pdfPath := filepath.Join(tempDir, "specification.pdf")
+	_ = os.WriteFile(pdfPath, []byte("%PDF-1.7 mock content"), 0644)
+	fpPdf, err := NewSingleFileProxy(pdfPath)
+	if err != nil {
+		t.Fatalf("NewSingleFileProxy pdf failed: %v", err)
+	}
+
+	clientMux, agentMux, cleanup := createConnectedMuxPair()
+	defer cleanup()
+
+	go func() {
+		stream, err := agentMux.AcceptStream(context.Background())
+		if err != nil {
+			return
+		}
+		fpPdf.HandleStream("sess-pdf", stream)
+	}()
+
+	s, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+	reqBytes, _ := json.Marshal(RequestMetadata{Method: "GET", Path: "/"})
+	_ = s.WriteHeaders(reqBytes)
+	_ = s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	hRaw, err := s.ReadHeaders(ctx)
+	cancel()
+	if err != nil {
+		t.Fatalf("ReadHeaders failed: %v", err)
+	}
+
+	var respMeta ResponseMetadata
+	_ = json.Unmarshal(hRaw, &respMeta)
+	if respMeta.Status != 200 {
+		t.Fatalf("Expected 200 OK for PDF, got %d", respMeta.Status)
+	}
+	if respMeta.Headers["content-type"] != "application/pdf" {
+		t.Errorf("Expected application/pdf, got %q", respMeta.Headers["content-type"])
+	}
+	if respMeta.Headers["x-p2p-mode"] != "file" {
+		t.Errorf("Expected x-p2p-mode file, got %q", respMeta.Headers["x-p2p-mode"])
+	}
+	if respMeta.Headers["x-p2p-file-name"] != "specification.pdf" {
+		t.Errorf("Expected x-p2p-file-name specification.pdf, got %q", respMeta.Headers["x-p2p-file-name"])
+	}
+}

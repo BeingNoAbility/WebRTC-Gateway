@@ -10,6 +10,7 @@ const BYPASS_PATHS = [
   '/patch.js',
   '/patch.js.map',
   '/favicon.ico',
+  '/favicon.svg',
 ];
 
 self.addEventListener('install', (event: ExtendableEvent) => {
@@ -84,8 +85,11 @@ self.addEventListener('fetch', (event: FetchEvent) => {
   const brandShort = brand.length > 4 ? brand.slice(0, 4).toLowerCase() : brand.toLowerCase();
   const isRelatedBrand = brandShort ? url.hostname.toLowerCase().includes(brandShort) : false;
   const lowerPath = url.pathname.toLowerCase();
-  const isMedia = lowerPath.includes('.m4s') || lowerPath.includes('.mp4') || lowerPath.includes('.ts') ||
-                  lowerPath.includes('.m3u8') || lowerPath.includes('.webm') || lowerPath.includes('/upgcxcode/');
+  const isMedia = lowerPath.includes('.m4s') || lowerPath.includes('.mp4') || lowerPath.includes('.m4v') ||
+                  lowerPath.includes('.webm') || lowerPath.includes('.mkv') || lowerPath.includes('.ts') ||
+                  lowerPath.includes('.m3u8') || lowerPath.includes('.mp3') || lowerPath.includes('.wav') ||
+                  lowerPath.includes('.flac') || lowerPath.includes('.aac') || lowerPath.includes('.m4a') ||
+                  lowerPath.includes('/upgcxcode/');
 
   if (url.origin !== self.location.origin && !isProxyPath && !isTargetOrigin && !isSiblingDomain && !isRelatedBrand && !isMedia) {
     return; // Bypass truly external cross-origin requests
@@ -99,8 +103,12 @@ self.addEventListener('fetch', (event: FetchEvent) => {
   }
 
   // Bypass initial portal entry page:
-  // Root path requests from top-level window (destination !== 'iframe') bypass to fetch index.html
-  if (url.pathname === '/' && event.request.destination !== 'iframe') {
+  // ONLY top-level document navigations to root path bypass SW to load the portal index.html.
+  // Video, audio, subresources, and Range requests to '/' or any other path are intercepted and tunneled.
+  const isTopLevelDocNav = event.request.mode === 'navigate' &&
+                           (event.request.destination === 'document' || event.request.destination === '') &&
+                           (event.request.headers.get('accept') || '').includes('text/html');
+  if ((url.pathname === '/' || url.pathname === '/index.html') && isTopLevelDocNav) {
     return;
   }
 
@@ -136,6 +144,7 @@ async function handleTunneledRequest(request: Request): Promise<Response> {
     path,
     headers,
     hasBody,
+    destination: request.destination,
   };
 
   // Dispatch request to Portal Shell: prioritize dedicated portalPort, fallback to client.postMessage

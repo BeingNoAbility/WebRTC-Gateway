@@ -4,6 +4,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.7.1] - 2026-11-16
+
+### Fixed
+- **`-dir` Special Filename 404 Resolution (RFC 3986 Percent-Decoding)**:
+  - Fixed 404 Not Found error when accessing files with Asian characters, spaces, and brackets (e.g. `[ANi] FX 戰士久留美 - 01 ...mp4`).
+  - Placed `url.PathUnescape` strictly before `path.Clean` to restore legitimate characters while defending against `%2e%2e` traversal bypasses and null-byte injection.
+- **`-file` Media Streaming Fix & Service Worker Precise Interception**:
+  - Refined root path bypass condition in Service Worker (`isTopLevelDocNav`) to strictly allow top-level document HTML navigations while 100% intercepting and tunneling `<video src="/">` and Range requests.
+  - Added comprehensive built-in MIME dictionary in `pkg/proxy/file_proxy.go` covering MP4, WebM, MKV, MP3, PDF, etc., ensuring proper `video/mp4` headers across minimal environments.
+- **Edge & Mobile PDF Plugin Sandbox Blocking Resolution (P2P File Vault)**:
+  - Eliminated Edge's "此页面已被 Microsoft Edge 阻止" and mobile Edge disabled plugin errors caused by W3C sandboxed iframe restrictions on PDFium.
+  - Introduced **P2P File Vault** UI featuring 1-click line-rate P2P streaming download and open in native un-sandboxed tab preview.
+  - Mounted native HTML5 `<video controls autoplay playsinline>` in portal DOM, unlocking full GPU acceleration, PiP, and fullscreen.
+
+---
+
+## [v1.7.0] - 2026-11-16
+
+### Added
+- **Mixed Workload Benchmarking (`test/mixed_workload_benchmark_test.go`)**:
+  - Validated P2PMux 32KB chunk scheduling under concurrent 10MB file streaming (46.21 MB/s) and 50 burst REST API calls (Min 0.58ms, P50 4.14ms, P95 7.11ms).
+- **ICE Restart Mobile Roaming Resilience Test (`test/ice_restart_resilience_test.go`)**:
+  - Automated in-place `iceRestart: true` simulation with full session preservation and CookieJar retention.
+- **Browser Compatibility Matrix (`docs/BROWSER_COMPATIBILITY.md`)**:
+  - Documented Tier 1 and Tier 2 browser support and WebKit/iOS Safari hibernation re-attachment.
+
+### Fixed
+- **P2PMux Frame Specification Alignment**:
+  - Corrected frame type documentation across README, Chinese README, English README, and Wiki (`DATA=0x01`, `HEADERS=0x02`, `WINDOW_UPDATE=0x04`, `PING=0x05`, `PONG=0x06`).
+- **Strict Frame Length Validation**:
+  - Hardened `DecodeFrameBytes` in Go (`pkg/protocol/frame.go`) and TypeScript (`web/src/protocol/frame.ts`) to enforce exact match `len(data) == HeaderSize + int(frame.Length)`.
+
+---
+
+## [v1.6.2] - 2026-11-16
+
+### Added
+- **Native Healthcheck Probe (`-health`) & `/healthz` HTTP Endpoint**:
+  - Go-native healthcheck subcommand in `server` and `agent` eliminating Alpine/Docker curl/wget dependency.
+  - Resolved Docker Compose `unhealthy` container status.
+- **Official Vector Logos**:
+  - Vector square icon (`assets/logo.svg`) and full banner (`assets/logo-banner.svg`).
+
+---
+
 ## [v1.6.1] - 2026-11-16
 
 ### Fixed

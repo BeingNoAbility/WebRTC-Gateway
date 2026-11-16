@@ -90,6 +90,8 @@ class PortalApp {
   private testOutput = document.getElementById('testOutput') as HTMLElement;
 
   private appFrame: HTMLIFrameElement | null = null;
+  private vaultContainer: HTMLElement | null = null;
+  private mediaContainer: HTMLElement | null = null;
   private activeStreamsCount = 0;
 
   constructor() {
@@ -1759,6 +1761,14 @@ class PortalApp {
       this.appFrame.remove();
       this.appFrame = null;
     }
+    if (this.vaultContainer) {
+      this.vaultContainer.remove();
+      this.vaultContainer = null;
+    }
+    if (this.mediaContainer) {
+      this.mediaContainer.remove();
+      this.mediaContainer = null;
+    }
 
     if (this.pingInterval) clearInterval(this.pingInterval);
     if (this.mux) {
@@ -1842,11 +1852,69 @@ class PortalApp {
         }
       }
 
+      const headers = respMeta.h || {};
+      const contentType = (headers['content-type'] || '').toLowerCase();
+      const contentDisposition = (headers['content-disposition'] || '').toLowerCase();
+      const p2pMode = headers['x-p2p-mode'] || '';
+      const p2pFileName = headers['x-p2p-file-name'] || '';
+      const p2pFileSize = parseInt(headers['x-p2p-file-size'] || '0', 10) || 0;
+
+      // Handle navigation requests originated from the appViewport iframe
+      if (msg.destination === 'iframe') {
+        const isPdf = contentType.includes('application/pdf') || (p2pFileName && p2pFileName.toLowerCase().endsWith('.pdf'));
+        const isVideo = contentType.startsWith('video/') || (p2pFileName && p2pFileName.match(/\.(mp4|webm|mkv|mov|avi|ts|m4v)$/i));
+        const isAudio = contentType.startsWith('audio/') || (p2pFileName && p2pFileName.match(/\.(mp3|wav|flac|aac|m4a|ogg)$/i));
+        const isAttachment = contentDisposition.includes('attachment') || (p2pMode === 'file' && !contentType.includes('text/html') && !contentType.startsWith('image/'));
+
+        if (isPdf) {
+          this.showFileVault({
+            fileName: p2pFileName || this.extractFileName(msg.path),
+            fileSize: p2pFileSize,
+            type: 'pdf',
+            path: msg.path,
+            isDir: p2pMode === 'dir',
+          });
+        } else if (isVideo) {
+          this.showNativeMediaPlayer({
+            src: msg.path,
+            fileName: p2pFileName || this.extractFileName(msg.path),
+            isDir: p2pMode === 'dir',
+            type: 'video',
+          });
+        } else if (isAudio) {
+          this.showNativeMediaPlayer({
+            src: msg.path,
+            fileName: p2pFileName || this.extractFileName(msg.path),
+            isDir: p2pMode === 'dir',
+            type: 'audio',
+          });
+        } else if (isAttachment) {
+          this.showFileVault({
+            fileName: p2pFileName || this.extractFileName(msg.path),
+            fileSize: p2pFileSize,
+            type: 'file',
+            path: msg.path,
+            isDir: p2pMode === 'dir',
+          });
+        } else if (this.appFrame && this.appFrame.style.display === 'none') {
+          // Restore iframe if returning to normal HTML page or directory view
+          if (this.mediaContainer) {
+            this.mediaContainer.remove();
+            this.mediaContainer = null;
+          }
+          if (this.vaultContainer) {
+            this.vaultContainer.remove();
+            this.vaultContainer = null;
+          }
+          this.appFrame.style.display = 'block';
+        }
+      }
+
       port.postMessage({
         type: 'RESP_START',
         status: respMeta.s || 200,
         statusText: respMeta.m || 'OK',
-        headers: respMeta.h || {},
+        headers: headers,
       });
     });
 
@@ -2030,6 +2098,266 @@ class PortalApp {
       this.log(`Stream write error: ${err.message}`);
       this.btnEcho.disabled = false;
     }
+  }
+
+  // Show dedicated P2P File Vault for PDF and binary downloads
+  private showFileVault(opts: { fileName: string; fileSize: number; type: string; path: string; isDir: boolean }) {
+    if (this.appFrame) {
+      this.appFrame.style.display = 'none';
+    }
+    if (this.mediaContainer) {
+      this.mediaContainer.remove();
+      this.mediaContainer = null;
+    }
+    if (this.vaultContainer) {
+      this.vaultContainer.remove();
+      this.vaultContainer = null;
+    }
+
+    const container = document.createElement('div');
+    container.id = 'p2pFileVault';
+    container.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: #0d1117;
+      color: #f0f6fc;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 20px;
+      box-sizing: border-box;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    `;
+
+    const formattedSize = this.formatFileSize(opts.fileSize);
+    const isPdf = opts.type === 'pdf' || opts.fileName.toLowerCase().endsWith('.pdf');
+    const icon = isPdf ? '📄' : (opts.fileName.match(/\.(zip|tar|gz|7z|rar|iso)$/i) ? '📦' : '💾');
+    const viewUrl = opts.isDir ? opts.path : '/' + encodeURIComponent(opts.fileName || 'file');
+
+    container.innerHTML = `
+      <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; max-width: 540px; width: 100%; padding: 32px; box-shadow: 0 16px 36px rgba(0,0,0,0.6); text-align: center;">
+        <div style="font-size: 54px; margin-bottom: 16px; line-height: 1;">${icon}</div>
+        <h2 style="font-size: 18px; font-weight: 600; color: #f0f6fc; margin-bottom: 8px; word-break: break-all; line-height: 1.4;">
+          ${this.escapeHtml(opts.fileName)}
+        </h2>
+        <div style="display: flex; justify-content: center; align-items: center; gap: 12px; margin-bottom: 24px;">
+          ${formattedSize ? `<span style="font-size: 13px; color: #8b949e; background: #21262d; padding: 2px 10px; border-radius: 12px; border: 1px solid #30363d;">${formattedSize}</span>` : ''}
+          <span style="font-size: 13px; color: #3fb950; background: rgba(63, 185, 80, 0.15); padding: 2px 10px; border-radius: 12px; border: 1px solid #3fb950;">⚡ P2P Direct Tunnel</span>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+          <button id="btnVaultDownload" style="background: #238636; color: #ffffff; border: 1px solid rgba(240, 246, 252, 0.1); border-radius: 6px; padding: 12px 20px; font-size: 15px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s;">
+            ⚡ 极速 P2P 下载 (Download)
+          </button>
+
+          ${isPdf ? `
+          <button id="btnVaultPreview" style="background: #21262d; border: 1px solid #30363d; color: #58a6ff; border-radius: 6px; padding: 10px 20px; font-size: 14px; font-weight: 500; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s;">
+            📑 在新标签页打开原生预览 (Open in New Tab)
+          </button>
+          ` : ''}
+
+          ${opts.isDir ? `
+          <button id="btnVaultBack" style="background: transparent; border: 1px solid #30363d; color: #8b949e; border-radius: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer; transition: 0.2s;">
+            ⬅ 返回文件目录 (Back to Directory)
+          </button>
+          ` : ''}
+        </div>
+
+        ${isPdf ? `
+        <p style="font-size: 12px; color: #8b949e; line-height: 1.5; margin: 0; text-align: left; background: #0d1117; padding: 10px 14px; border-radius: 6px; border: 1px solid #21262d;">
+          💡 <strong>预览提示</strong>：由于浏览器安全沙箱限制，内嵌沙箱环境已禁用 PDF 插件。桌面端请点击<strong>【在新标签页打开原生预览】</strong>；移动端推荐点击<strong>【极速 P2P 下载】</strong>使用系统阅读器浏览。
+        </p>
+        ` : ''}
+      </div>
+    `;
+
+    document.body.appendChild(container);
+    this.vaultContainer = container;
+
+    document.getElementById('btnVaultDownload')?.addEventListener('click', () => {
+      const a = document.createElement('a');
+      a.href = viewUrl;
+      a.download = opts.fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    });
+
+    if (isPdf) {
+      document.getElementById('btnVaultPreview')?.addEventListener('click', () => {
+        window.open(viewUrl, '_blank');
+      });
+    }
+
+    if (opts.isDir) {
+      document.getElementById('btnVaultBack')?.addEventListener('click', () => {
+        this.closeVaultAndRestoreIframe();
+      });
+    }
+  }
+
+  // Show native HTML5 media player directly in portal DOM to eliminate iframe sandbox constraints
+  private showNativeMediaPlayer(opts: { src: string; fileName: string; isDir: boolean; type: 'video' | 'audio' }) {
+    if (this.appFrame) {
+      this.appFrame.style.display = 'none';
+    }
+    if (this.vaultContainer) {
+      this.vaultContainer.remove();
+      this.vaultContainer = null;
+    }
+    if (this.mediaContainer) {
+      this.mediaContainer.remove();
+      this.mediaContainer = null;
+    }
+
+    const container = document.createElement('div');
+    container.id = 'p2pMediaPlayerContainer';
+    container.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: #000000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    `;
+
+    const viewUrl = opts.isDir ? opts.src : '/' + encodeURIComponent(opts.fileName || 'media');
+
+    if (opts.isDir) {
+      const topBar = document.createElement('div');
+      topBar.style.cssText = `
+        position: absolute;
+        top: 16px;
+        left: 20px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        z-index: 102;
+      `;
+      topBar.innerHTML = `
+        <button id="btnMediaBack" style="background: rgba(33, 38, 45, 0.85); backdrop-filter: blur(8px); border: 1px solid #30363d; color: #f0f6fc; border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 500; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+          ⬅ 返回目录
+        </button>
+        <span style="color: #c9d1d9; font-size: 13px; font-weight: 500; max-width: 50vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">
+          ${this.escapeHtml(opts.fileName)}
+        </span>
+      `;
+      container.appendChild(topBar);
+    }
+
+    if (opts.type === 'video') {
+      const video = document.createElement('video');
+      video.id = 'p2pNativeVideo';
+      video.controls = true;
+      video.autoplay = true;
+      video.playsInline = true;
+      video.style.cssText = 'width: 100vw; height: 100vh; object-fit: contain; background: #000;';
+      video.src = viewUrl;
+      container.appendChild(video);
+    } else {
+      const audioCard = document.createElement('div');
+      audioCard.style.cssText = `
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        padding: 32px;
+        max-width: 500px;
+        width: 90%;
+        text-align: center;
+        box-shadow: 0 16px 36px rgba(0,0,0,0.6);
+      `;
+      audioCard.innerHTML = `
+        <div style="font-size: 48px; margin-bottom: 16px;">🎵</div>
+        <h3 style="font-size: 16px; color: #f0f6fc; margin-bottom: 20px; word-break: break-all;">${this.escapeHtml(opts.fileName)}</h3>
+        <audio controls autoplay style="width: 100%;" src="${viewUrl}"></audio>
+      `;
+      container.appendChild(audioCard);
+    }
+
+    document.body.appendChild(container);
+    this.mediaContainer = container;
+
+    if (opts.isDir) {
+      document.getElementById('btnMediaBack')?.addEventListener('click', () => {
+        this.closeMediaAndRestoreIframe();
+      });
+    }
+  }
+
+  private closeMediaAndRestoreIframe() {
+    if (this.mediaContainer) {
+      const video = this.mediaContainer.querySelector('video') as HTMLVideoElement;
+      if (video) {
+        video.pause();
+        video.src = '';
+        video.load();
+      }
+      const audio = this.mediaContainer.querySelector('audio') as HTMLAudioElement;
+      if (audio) {
+        audio.pause();
+        audio.src = '';
+        audio.load();
+      }
+      this.mediaContainer.remove();
+      this.mediaContainer = null;
+    }
+    if (this.appFrame) {
+      this.appFrame.style.display = 'block';
+      this.appFrame.src = '/';
+    }
+  }
+
+  private closeVaultAndRestoreIframe() {
+    if (this.vaultContainer) {
+      this.vaultContainer.remove();
+      this.vaultContainer = null;
+    }
+    if (this.appFrame) {
+      this.appFrame.style.display = 'block';
+      this.appFrame.src = '/';
+    }
+  }
+
+  private formatFileSize(bytes: number): string {
+    if (!bytes || bytes <= 0) return '';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let val = bytes;
+    let idx = 0;
+    while (val >= 1024 && idx < units.length - 1) {
+      val /= 1024;
+      idx++;
+    }
+    return `${val.toFixed(val >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
+  }
+
+  private escapeHtml(str: string): string {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  private extractFileName(urlPath: string): string {
+    try {
+      const clean = urlPath.split('?')[0].split('#')[0];
+      const segments = clean.split('/').filter(Boolean);
+      if (segments.length > 0) {
+        return decodeURIComponent(segments[segments.length - 1]);
+      }
+    } catch {}
+    return 'file';
   }
 }
 

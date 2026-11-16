@@ -81,17 +81,38 @@ Expiration: 2026-11-17 18:00:00 CST (Valid for: 24h0m0s)
 
 ---
 
-## 4. 严密的安全沙箱防护
+## 4. 严密的安全沙箱与特殊文件名解析 (v1.7.1 加固)
 
-针对目录托管模式，系统内置了双重路径安全防御：
+针对目录托管模式，系统内置了严密的安全与 URL 解码防御流程：
 
 ```text
-访客请求路径 
-  ➔ filepath.Clean 净化
-    ➔ filepath.Rel 词法边界校验 (杜绝 ../ 穿越)
-      ➔ filepath.EvalSymlinks 物理软链求值 (杜绝符号链接逃逸)
+访客请求路径 ➔ RFC 3986 安全百分号解码 ➔ Null-byte 空字节拦截 ➔ filepath.Clean 净化
+              ➔ filepath.Rel 词法边界校验 (杜绝 ../ 穿越)
+                ➔ filepath.EvalSymlinks 物理软链求值 (杜绝符号链接逃逸)
 ```
 
-1. **词法穿越防御**：通过 `filepath.Rel(rootDir, targetPath)`，若相对路径以 `..` 开头或为绝对路径，立即阻断并响应 `403 Forbidden`；
-2. **符号链接逃逸防御**：通过 `filepath.EvalSymlinks` 解析真实物理路径，若软链指向了受管目录之外的系统敏感文件（如 `/etc/passwd`、`C:\Windows`），直接阻断并响应 `403 Forbidden`；
-3. **隐藏文件屏蔽**：以 `.` 开头的隐藏文件或隐藏目录拒绝直接读取。
+1. **特殊文件名与亚洲字符兼容**：
+   - 浏览器对非 ASCII 字符（如中文、日文番剧名、方括号 `[ANi]`、空格等）按规范进行百分号编码；
+   - 在路径净化前先执行 `url.PathUnescape`，确保正确匹配磁盘物理文件，彻底避免 404 Not Found；
+   - 解码后严密校验 `\0` 空字节注入并直接阻断（`400 Bad Request`）。
+2. **词法穿越防御**：通过 `filepath.Rel(rootDir, targetPath)`，若相对路径以 `..` 开头或为绝对路径，立即阻断并响应 `403 Forbidden`；
+3. **符号链接逃逸防御**：通过 `filepath.EvalSymlinks` 解析真实物理路径，若软链指向了受管目录之外的系统敏感文件（如 `/etc/passwd`、`C:\Windows`），直接阻断并响应 `403 Forbidden`；
+4. **隐藏文件屏蔽**：以 `.` 开头的隐藏文件或隐藏目录拒绝直接读取。
+
+---
+
+## 5. P2P File Vault 文件舱与原生媒体流 (v1.7.1 新增)
+
+### ① P2P File Vault 文件舱 (解决 Edge/Android PDF 沙箱拦截)
+W3C HTML5 规范规定：带有 `sandbox` 属性的 iframe 强制禁用浏览器扩展插件（包括 Edge/Chromium 内置的 PDFium 插件），导致直接内嵌 PDF 时浏览器提示“此页面已被 Microsoft Edge 阻止”。
+在 v1.7.1 中，门户检测到文档/二进制资源时自动挂载 **P2P File Vault 文件舱**：
+- **极简深色文件卡片**：展示文件名、格式化体积与 `⚡ P2P Direct Tunnel` 零中转直连状态；
+- **[ ⚡ 极速 P2P 下载 ]**：通过 WebRTC DataChannel 流式下载，跑满对等端带宽；
+- **[ 📑 在新标签页打开原生预览 ]**：在独立的顶层无沙箱标签页激活 Edge/Chrome 原生 PDFium 阅读器，提供完整的缩略图、目录、缩放、搜索和批注功能。
+
+### ② 全功能原生 DOM 媒体播放器
+针对视频（MP4, WebM, MKV）与音频（MP3, FLAC, WAV）文件：
+- 脱离 iframe 沙箱限制，在 DOM 顶层动态挂载原生 HTML5 播放器；
+- **GPU 硬件加速**：解锁硬件解码性能，彻底消除卡顿；
+- **原生全屏与画中画 (PiP)**：支持键盘快捷键（空格播放/暂停、方向键快进/后退/调音量、F 键全屏）；
+- **目录模式一键返回**：目录点播视频时提供顶栏 `[ ⬅ 返回目录 ]` 浮动按钮，随时返回文件树。

@@ -405,3 +405,216 @@ func TestE2E_FileServer_DirectoryMode(t *testing.T) {
 	}
 	t.Logf("Subdirectory asset /assets/style.css served correctly!")
 }
+
+func TestE2E_FileServer_SpecialCharactersAndMediaMIME(t *testing.T) {
+	// 1. Setup Signal Server
+	server, _ := startRealSignalServer("")
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+
+	// 2. Prepare directory with anime video and pdf
+	tempDir := t.TempDir()
+	specialAnimeName := "[ANi] FX 戰士久留美 - 01 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4"
+	animePath := filepath.Join(tempDir, specialAnimeName)
+	animePayload := []byte("anime-mp4-video-stream-payload-data")
+	if err := os.WriteFile(animePath, animePayload, 0644); err != nil {
+		t.Fatalf("Write anime file failed: %v", err)
+	}
+
+	pdfName := "user_guide.pdf"
+	pdfPath := filepath.Join(tempDir, pdfName)
+	pdfPayload := []byte("%PDF-1.7 mock document stream")
+	if err := os.WriteFile(pdfPath, pdfPayload, 0644); err != nil {
+		t.Fatalf("Write pdf file failed: %v", err)
+	}
+
+	// 3. Launch Agent in Directory Mode
+	nodeID := "p2p-anime-vault"
+	ag := agent.New(nodeID, wsURL, "", "", "")
+	if err := ag.SetDirectory(tempDir); err != nil {
+		t.Fatalf("SetDirectory failed: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ag.Start(ctx)
+	defer ag.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 4. Client connects via WebRTC DataChannel
+	clientWS, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Client dial WS failed: %v", err)
+	}
+	defer clientWS.Close()
+
+	var clientWSMu sync.Mutex
+	safeWriteWS := func(m *signaling.Message) error {
+		clientWSMu.Lock()
+		defer clientWSMu.Unlock()
+		return clientWS.WriteJSON(m)
+	}
+
+	ansCh := make(chan signaling.Message, 5)
+	go func() {
+		for {
+			var m signaling.Message
+			if err := clientWS.ReadJSON(&m); err != nil {
+				return
+			}
+			if m.Type == signaling.TypeAnswer {
+				ansCh <- m
+			}
+		}
+	}()
+
+	_ = safeWriteWS(&signaling.Message{Type: signaling.TypeJoin, NodeID: nodeID})
+
+	clientPC, err := webrtc.NewPeerConnection(webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
+	})
+	if err != nil {
+		t.Fatalf("NewPeerConnection failed: %v", err)
+	}
+	defer clientPC.Close()
+
+	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+	if err != nil {
+		t.Fatalf("CreateDataChannel failed: %v", err)
+	}
+
+	clientMux := mux.NewMux(dc, true)
+	defer clientMux.Close()
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		_ = clientMux.HandleIncomingMessage(msg.Data)
+	})
+
+	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c != nil {
+			cand := c.ToJSON()
+			_ = safeWriteWS(&signaling.Message{
+				Type:      signaling.TypeCandidate,
+				NodeID:    nodeID,
+				Candidate: &cand,
+			})
+		}
+	})
+
+	offer, err := clientPC.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("CreateOffer failed: %v", err)
+	}
+	_ = clientPC.SetLocalDescription(offer)
+
+	_ = safeWriteWS(&signaling.Message{
+		Type:   signaling.TypeOffer,
+		NodeID: nodeID,
+		SDP:    &offer,
+	})
+
+	select {
+	case ans := <-ansCh:
+		_ = clientPC.SetRemoteDescription(*ans.SDP)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Timeout waiting for Answer")
+	}
+
+	dcOpenCh := make(chan struct{}, 1)
+	dc.OnOpen(func() { close(dcOpenCh) })
+	select {
+	case <-dcOpenCh:
+		t.Logf("DataChannel opened for anime special char test!")
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Timeout waiting for DataChannel to open")
+	}
+
+	// 5. Test fetching special anime filename via percent-encoded path
+	s1, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+	encodedPath := "/%5BANi%5D%20FX%20%E6%88%B0%E5%A3%AB%E4%B9%85%E7%95%99%E7%BE%8E%20-%2001%20%5B1080P%5D%5BBaha%5D%5BWEB-DL%5D%5BAAC%20AVC%5D%5BCHT%5D.mp4"
+	reqData, _ := json.Marshal(proxy.RequestMetadata{Method: "GET", Path: encodedPath})
+	_ = s1.WriteHeaders(reqData)
+	_ = s1.Close()
+
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 3*time.Second)
+	h1Raw, err := s1.ReadHeaders(ctx1)
+	cancel1()
+	if err != nil {
+		t.Fatalf("ReadHeaders failed: %v", err)
+	}
+	var meta1 proxy.ResponseMetadata
+	_ = json.Unmarshal(h1Raw, &meta1)
+	if meta1.Status != 200 {
+		t.Fatalf("Expected 200 for anime episode, got: %d", meta1.Status)
+	}
+	if !strings.HasPrefix(meta1.Headers["content-type"], "video/mp4") {
+		t.Errorf("Expected content-type video/mp4, got %q", meta1.Headers["content-type"])
+	}
+	if meta1.Headers["x-p2p-mode"] != "dir" {
+		t.Errorf("Expected x-p2p-mode dir, got %q", meta1.Headers["x-p2p-mode"])
+	}
+	if meta1.Headers["x-p2p-file-name"] != specialAnimeName {
+		t.Errorf("Expected x-p2p-file-name %q, got %q", specialAnimeName, meta1.Headers["x-p2p-file-name"])
+	}
+	body1, _ := io.ReadAll(s1)
+	if string(body1) != string(animePayload) {
+		t.Fatalf("Anime payload mismatch!")
+	}
+	t.Logf("✓ Special anime filename with Chinese, spaces, brackets fetched with 200 OK and video/mp4 MIME!")
+
+	// 6. Test fetching PDF file
+	s2, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+	reqData2, _ := json.Marshal(proxy.RequestMetadata{Method: "GET", Path: "/" + pdfName})
+	_ = s2.WriteHeaders(reqData2)
+	_ = s2.Close()
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+	h2Raw, err := s2.ReadHeaders(ctx2)
+	cancel2()
+	if err != nil {
+		t.Fatalf("ReadHeaders failed: %v", err)
+	}
+	var meta2 proxy.ResponseMetadata
+	_ = json.Unmarshal(h2Raw, &meta2)
+	if meta2.Status != 200 {
+		t.Fatalf("Expected 200 for pdf, got: %d", meta2.Status)
+	}
+	if meta2.Headers["content-type"] != "application/pdf" {
+		t.Errorf("Expected content-type application/pdf, got %q", meta2.Headers["content-type"])
+	}
+	if meta2.Headers["x-p2p-file-name"] != pdfName {
+		t.Errorf("Expected x-p2p-file-name %q, got %q", pdfName, meta2.Headers["x-p2p-file-name"])
+	}
+	body2, _ := io.ReadAll(s2)
+	if string(body2) != string(pdfPayload) {
+		t.Fatalf("PDF payload mismatch!")
+	}
+	t.Logf("✓ PDF document fetched with 200 OK and application/pdf MIME!")
+
+	// 7. Verify Path Traversal defense over real WebRTC DataChannel
+	s3, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+	reqData3, _ := json.Marshal(proxy.RequestMetadata{Method: "GET", Path: "/%2e%2e/%2e%2e/etc/passwd"})
+	_ = s3.WriteHeaders(reqData3)
+	_ = s3.Close()
+
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 3*time.Second)
+	h3Raw, err := s3.ReadHeaders(ctx3)
+	cancel3()
+	if err != nil {
+		t.Fatalf("ReadHeaders failed: %v", err)
+	}
+	var meta3 proxy.ResponseMetadata
+	_ = json.Unmarshal(h3Raw, &meta3)
+	if meta3.Status == 200 {
+		t.Fatalf("Path traversal attack must NOT return 200 OK! Got: %d", meta3.Status)
+	}
+	t.Logf("✓ Path traversal attack over WebRTC DataChannel correctly rejected with status %d!", meta3.Status)
+}
