@@ -1,13 +1,14 @@
 // test/test_vault_download.cjs
-// Automated verification for P2P File Vault download pipeline:
+// Automated verification for P2P File Vault & Action Hub pipeline:
 // Verifies elimination of SW-bypassing <a download>, addition of fetch-based P2P streaming,
-// progress tracking, blob creation, AbortController cancellation, and showSaveFilePicker dual-mode writing.
+// progress tracking, blob creation, AbortController cancellation, showSaveFilePicker dual-mode writing,
+// dedicated media action sheet with "Play Online" + "view=inline", and explicit "Cancel Download" button.
 
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
 
-console.log('=== Verifying P2P File Vault Download Architecture ===\n');
+console.log('=== Verifying P2P File Vault & Action Hub Architecture ===\n');
 
 const portalJsPath = path.resolve(__dirname, '../web/dist/portal.js');
 const portalTsPath = path.resolve(__dirname, '../web/src/portal/app.ts');
@@ -48,10 +49,27 @@ assert(portalTs.includes('activeVaultAbortController.abort()'),
   'Closing File Vault or returning to directory must abort active download and trigger backend stream reset');
 console.log('✔ [PASS] Verified AbortController cancellation on close/back navigation');
 
-// 7. Verify compiled portal.js bundle contains the compiled constructs
+// 7. Verify explicit "Cancel Download" button (btnVaultCancel)
+assert(portalTs.includes('btnVaultCancel') && portalTs.includes('⏹ 终止下载'),
+  'File Hub must provide explicit Cancel Download button to allow users to abort in-progress transfers');
+console.log('✔ [PASS] Verified explicit [ ⏹ 终止下载 (Cancel) ] button implementation');
+
+// 8. Verify Media Action Sheet ("Play Online" button and view=inline navigation to prevent infinite loops)
+assert(portalTs.includes('btnVaultPlay') && portalTs.includes('view=inline') && portalTs.includes('isExplicitInline'),
+  'Media files must offer "Play Online" and use view=inline flag to prevent infinite vault popups');
+console.log('✔ [PASS] Verified Media Action Sheet ("Play Online" with view=inline anti-loop protection)');
+
+// 9. Verify scope constraint: only -file and -dir modes trigger Action Hub, never third-party -target web apps
+assert(portalTs.includes("isP2PFileOrDir = p2pMode === 'file' || p2pMode === 'dir'"),
+  'Action Hub must only trigger on p2pMode file or dir to avoid interfering with third-party web apps');
+console.log('✔ [PASS] Verified scope guard (isP2PFileOrDir) protecting -target applications');
+
+// 10. Verify compiled portal.js bundle contains the compiled constructs
 assert(portalJs.includes('showSaveFilePicker'), 'Compiled portal.js must contain showSaveFilePicker');
 assert(portalJs.includes('createObjectURL'), 'Compiled portal.js must contain createObjectURL');
 assert(portalJs.includes('p2pFileVault'), 'Compiled portal.js must contain p2pFileVault');
-console.log('✔ [PASS] Verified compiled portal.js bundle contains full P2P File Vault pipeline');
+assert(portalJs.includes('btnVaultCancel'), 'Compiled portal.js must contain btnVaultCancel');
+assert(portalJs.includes('btnVaultPlay'), 'Compiled portal.js must contain btnVaultPlay');
+console.log('✔ [PASS] Verified compiled portal.js bundle contains full P2P File Hub & Download pipeline');
 
-console.log('\n=== All P2P File Vault Download Tests Passed Successfully! ===\n');
+console.log('\n=== All P2P File Vault & Action Hub Tests Passed Successfully! ===\n');

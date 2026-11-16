@@ -1858,15 +1858,22 @@ class PortalApp {
 
       // Handle navigation requests originated from the appViewport iframe
       if (msg.destination === 'iframe') {
-        const isPdf = contentType.includes('application/pdf') || (p2pFileName && p2pFileName.toLowerCase().endsWith('.pdf'));
-        const isAttachment = contentDisposition.includes('attachment') ||
-                             (p2pMode === 'file' && !contentType.includes('text/html') && !contentType.startsWith('image/') && !contentType.startsWith('video/') && !contentType.startsWith('audio/'));
+        const isExplicitInline = msg.path.includes('view=inline');
+        const isP2PFileOrDir = p2pMode === 'file' || p2pMode === 'dir';
 
-        if (isPdf || isAttachment) {
+        const fileName = p2pFileName || this.extractFileName(msg.path);
+        const isPdf = contentType.includes('application/pdf') || fileName.toLowerCase().endsWith('.pdf');
+        const isVideo = contentType.startsWith('video/') || !!fileName.match(/\.(mp4|m4v|webm|mkv|avi|mov|wmv|flv)$/i);
+        const isAudio = contentType.startsWith('audio/') || !!fileName.match(/\.(mp3|wav|flac|aac|m4a|ogg|opus)$/i);
+        const isMedia = isVideo || isAudio;
+        const isAttachment = contentDisposition.includes('attachment') ||
+                             (p2pMode === 'file' && !contentType.includes('text/html') && !contentType.startsWith('image/') && !isMedia && !isPdf);
+
+        if (!isExplicitInline && isP2PFileOrDir && (isPdf || isMedia || isAttachment)) {
           this.showFileVault({
-            fileName: p2pFileName || this.extractFileName(msg.path),
+            fileName,
             fileSize: p2pFileSize,
-            type: isPdf ? 'pdf' : 'file',
+            type: isPdf ? 'pdf' : (isMedia ? 'media' : 'file'),
             path: msg.path,
             isDir: p2pMode === 'dir',
           });
@@ -2122,7 +2129,17 @@ class PortalApp {
 
     const formattedSize = this.formatFileSize(opts.fileSize);
     const isPdf = opts.type === 'pdf' || opts.fileName.toLowerCase().endsWith('.pdf');
-    const icon = isPdf ? '📄' : (opts.fileName.match(/\.(zip|tar|gz|7z|rar|iso)$/i) ? '📦' : '💾');
+    const isVideo = !!opts.fileName.match(/\.(mp4|m4v|webm|mkv|avi|mov|wmv|flv)$/i);
+    const isAudio = !!opts.fileName.match(/\.(mp3|wav|flac|aac|m4a|ogg|opus)$/i);
+    const isMedia = opts.type === 'media' || isVideo || isAudio;
+    const isArchive = !!opts.fileName.match(/\.(zip|tar|gz|7z|rar|iso|img|bin)$/i);
+
+    let icon = '💾';
+    if (isVideo) icon = '🎬';
+    else if (isAudio) icon = '🎵';
+    else if (isPdf) icon = '📄';
+    else if (isArchive) icon = '📦';
+
     const viewUrl = opts.isDir ? opts.path : '/' + encodeURIComponent(opts.fileName || 'file');
 
     container.innerHTML = `
@@ -2137,13 +2154,24 @@ class PortalApp {
         </div>
 
         <div style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+          ${isMedia ? `
+          <button id="btnVaultPlay" style="background: #1f6feb; color: #ffffff; border: 1px solid rgba(240, 246, 252, 0.1); border-radius: 6px; padding: 12px 20px; font-size: 15px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s;">
+            ▶ 立即在线播放 (Play Online)
+          </button>
+          ` : ''}
+
           <button id="btnVaultDownload" style="background: #238636; color: #ffffff; border: 1px solid rgba(240, 246, 252, 0.1); border-radius: 6px; padding: 12px 20px; font-size: 15px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s;">
             ⚡ 极速 P2P 下载 (Download)
           </button>
+
           <div id="vaultProgressBar" style="display: none; background: #21262d; border-radius: 6px; overflow: hidden; height: 8px; width: 100%; border: 1px solid #30363d; margin-top: -4px;">
             <div id="vaultProgressFill" style="background: #238636; width: 0%; height: 100%; transition: width 0.15s ease;"></div>
           </div>
           <div id="vaultStatusText" style="display: none; font-size: 12px; color: #8b949e; text-align: center; margin-top: -6px; word-break: break-all;"></div>
+
+          <button id="btnVaultCancel" style="display: none; background: #21262d; color: #f85149; border: 1px solid rgba(248, 81, 73, 0.3); border-radius: 6px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; align-items: center; justify-content: center; gap: 6px; transition: 0.2s;">
+            ⏹ 终止下载 (Cancel)
+          </button>
 
           ${isPdf ? `
           <button id="btnVaultPreview" style="background: #21262d; border: 1px solid #30363d; color: #58a6ff; border-radius: 6px; padding: 10px 20px; font-size: 14px; font-weight: 500; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s;">
@@ -2163,6 +2191,12 @@ class PortalApp {
           💡 <strong>预览提示</strong>：由于浏览器安全沙箱限制，内嵌沙箱环境已禁用 PDF 插件。桌面端请点击<strong>【在新标签页打开原生预览】</strong>；移动端推荐点击<strong>【极速 P2P 下载】</strong>使用系统阅读器浏览。
         </p>
         ` : ''}
+
+        ${isMedia ? `
+        <p style="font-size: 12px; color: #8b949e; line-height: 1.5; margin: 0; text-align: left; background: #0d1117; padding: 10px 14px; border-radius: 6px; border: 1px solid #21262d;">
+          💡 <strong>媒体提示</strong>：点击<strong>【立即在线播放】</strong>使用浏览器原生播放器（支持全屏、倍速与画中画）；点击<strong>【极速 P2P 下载】</strong>将原片高速直存至本地设备。
+        </p>
+        ` : ''}
       </div>
     `;
 
@@ -2170,9 +2204,29 @@ class PortalApp {
     this.vaultContainer = container;
 
     const btnDownload = document.getElementById('btnVaultDownload') as HTMLButtonElement | null;
+    const btnPlay = document.getElementById('btnVaultPlay') as HTMLButtonElement | null;
+    const btnPreview = document.getElementById('btnVaultPreview') as HTMLButtonElement | null;
+    const btnCancel = document.getElementById('btnVaultCancel') as HTMLButtonElement | null;
     const progressBar = document.getElementById('vaultProgressBar') as HTMLDivElement | null;
     const progressFill = document.getElementById('vaultProgressFill') as HTMLDivElement | null;
     const statusText = document.getElementById('vaultStatusText') as HTMLDivElement | null;
+
+    if (isMedia) {
+      btnPlay?.addEventListener('click', () => {
+        this.closeVaultAndRestoreIframe();
+        const inlineUrl = viewUrl + (viewUrl.includes('?') ? '&' : '?') + 'view=inline';
+        if (this.appFrame) {
+          this.appFrame.src = inlineUrl;
+        }
+      });
+    }
+
+    btnCancel?.addEventListener('click', () => {
+      if (this.activeVaultAbortController) {
+        this.activeVaultAbortController.abort();
+        this.activeVaultAbortController = null;
+      }
+    });
 
     btnDownload?.addEventListener('click', async () => {
       if (this.activeVaultAbortController) {
@@ -2186,6 +2240,9 @@ class PortalApp {
           btnDownload.style.cursor = 'pointer';
           btnDownload.innerText = '⚡ 极速 P2P 下载 (Download)';
         }
+        if (btnPlay) btnPlay.style.display = 'flex';
+        if (btnPreview) btnPreview.style.display = 'flex';
+        if (btnCancel) btnCancel.style.display = 'none';
         if (progressBar) progressBar.style.display = 'none';
         if (progressFill) progressFill.style.width = '0%';
         if (statusText) statusText.style.display = 'none';
@@ -2216,6 +2273,9 @@ class PortalApp {
       btnDownload.style.opacity = '0.7';
       btnDownload.style.cursor = 'not-allowed';
       btnDownload.innerText = '⚡ 正在建立 P2P 传输...';
+      if (btnPlay) btnPlay.style.display = 'none';
+      if (btnPreview) btnPreview.style.display = 'none';
+      if (btnCancel) btnCancel.style.display = 'flex';
       if (progressBar) progressBar.style.display = 'block';
       if (statusText) {
         statusText.style.display = 'block';
@@ -2240,6 +2300,7 @@ class PortalApp {
           const blob = await response.blob();
           this.triggerBlobDownload(blob, opts.fileName);
           btnDownload.innerText = '✅ 下载完成';
+          if (btnCancel) btnCancel.style.display = 'none';
           setTimeout(resetUI, 2500);
           return;
         }
@@ -2291,6 +2352,7 @@ class PortalApp {
         }
 
         btnDownload.innerText = '✅ 下载完成';
+        if (btnCancel) btnCancel.style.display = 'none';
         if (progressFill) progressFill.style.width = '100%';
         if (statusText) statusText.innerText = `🎉 传输完毕，共 ${this.formatFileSize(receivedBytes)}`;
         setTimeout(resetUI, 2500);
@@ -2299,6 +2361,7 @@ class PortalApp {
           try { await fileStream.abort(); } catch {}
           fileStream = null;
         }
+        if (btnCancel) btnCancel.style.display = 'none';
         if (err.name === 'AbortError') {
           btnDownload.innerText = '⚠️ 下载已取消';
           if (statusText) statusText.innerText = '用户中断了传输';
@@ -2307,7 +2370,7 @@ class PortalApp {
           btnDownload.innerText = '❌ 下载失败';
           if (statusText) statusText.innerText = `传输失败: ${err.message || '网络连接异常'}`;
         }
-        setTimeout(resetUI, 3500);
+        setTimeout(resetUI, 1500);
       } finally {
         this.activeVaultAbortController = null;
       }
