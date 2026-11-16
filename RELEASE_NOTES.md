@@ -1,30 +1,33 @@
 # WebRTC Gateway Release Notes
 
-## [v1.7.2] - 2026-11-16
+## [v1.7.3] - 2026-11-16
 
-### 🎧 彻底消除音视频重音回声、回归浏览器原生播放器 & 严密截断文件舱后台流 (Eliminate Audio Echo, Native Player & File Vault Stream Truncation)
+### 🚀 治愈 Edge 下载“没有文件”与 txt 误判、现代双模 P2P 流式存盘与实时传输速率显示 (Zero-Network P2P Stream Download, File System Access & Real-Time Progress)
 
-- **彻底消除音视频“双重声音 / 重音”缺陷 (100% Elimination of Double Audio Echo)**：
-  - **根本原因解决**：修复了在 `-dir` 与 `-file` 模式下打开音视频时，前端一方面在 DOM 顶层动态创建新播放器发起第二路流，另一方面被隐藏的 iframe 仍在持续接收第一路流并起播，导致“前台一个声音、后台一个声音”以及 P2P 带宽被瞬间翻倍消耗的双重缺陷；
-  - **全面回归浏览器原生能力 (Plan A)**：基于 `v1.7.1` 已治愈的底层 Service Worker 根路由精准放行（`isTopLevelDocNav`）与 Go 端内置标准 MIME 字典（`video/mp4` 及 `Accept-Ranges: bytes`），彻底移除多余的前端 DOM 播放器逻辑，让音视频自然在 `appViewport` iframe 中播放；
-  - **享受顶级原生播放体验**：由浏览器（Chrome/Edge/Safari/Firefox/移动端）原生媒体引擎渲染，完美支持 GPU 硬件加速、倍速播放（0.5x~2.0x）、音量记忆、画中画（PiP）、全屏以及空格/方向键快捷键；
-  - **目录模式历史栈自然自愈**：在 `-dir` 模式点播视频后，点击浏览器“后退”按钮或手机侧滑返回，浏览器的 History API 会自然无缝回到文件目录树。
+- **彻底治愈 Chromium / Edge `<a download>` 绕过 Service Worker 的内核缺陷 (Chromium Bug 40410035 Resolved)**：
+  - **根本原因解决**：修复了在 File Vault（文件金库）中点击下载时，由于合成点击 `<a href="..." download="...">` 触发了 Chromium 内核对带有 `download` 属性的网络 URL 强行绕过 Service Worker 的限制，导致请求直接穿透打到信令服务器返回 `HTTP 404 Not Found (text/plain)`，进而引发 Edge 报告“无法下载 - 没有文件”并将文件类型误判为 `.txt` 的缺陷；
+  - **100% 经由 JS Fetch 隧道**：下载触发全面迁移为 `fetch(viewUrl, { signal })` 管道，根据 W3C 规范保证百分之百被 Service Worker 捕获并由 WebRTC DataChannel 向 Agent 索取数据流，完全切断向信令服务器的网络逃逸；
+  - **本地 `blob:` 零网络直存**：常规文件（<= 500MB）接收完毕后生成 `blob:` URL 并触发保存，Chromium 内核对 `blob:` 协议完全不发起外部网络请求，直接将本地内存数据流写入磁盘，100% 严格保证原始文件名与 `.pdf` 等扩展名。
 
-- **弹出 P2P File Vault 文件舱时彻底截断后台 iframe 推流 (Stream Truncation & Bandwidth Conservation)**：
-  - 当检测到 PDF 文档（`application/pdf`）或非内联二进制下载（`isAttachment`）并激活文件舱时：
-    - 主动向 iframe 的 MessagePort 发送 `HTTP 204 No Content` 终止响应；
-    - 立即调用 `stream.reset()` 告知 Agent 停止推送后续数据块；
-  - **双重收益**：
-    1. 根据 W3C 规范，导航请求收到 204 时浏览器强制终止跳转并保留在当前页面，彻底杜绝 Edge 沙箱报出“此页面已被阻止”错误；
-    2. 彻底掐断后台静默推流，节省 100% 的无谓 P2P 带宽损耗，并避免与文件舱中的下载按钮产生交互冲突。
+- **工业级“双模直写体系”：兼顾多端通用与超大文件防 OOM (Dual-Mode Direct-to-Disk Architecture)**：
+  - **常规与中大型文件（<= 500MB，涵盖所有课本、文档、源码、常规音视频与压缩包）**：
+    - 采用 `ReadableStream` 收集分块数据，自动组装为带精准 MIME 类型的 `Blob` 进行毫秒级本地存盘，全平台（iOS/Android/Safari/Edge/Chrome/Firefox）无缝平滑自适应；
+  - **超大文件（> 500MB，长篇原盘视频、系统镜像）**：
+    - 在桌面端 Edge / Chrome 环境下优先探测并调用现代 **File System Access API (`window.showSaveFilePicker()`)**；
+    - 唤起系统原生另存为对话框，获取本地底层文件可写流 `FileSystemWritableFileStream`；
+    - 边从 WebRTC 收包边落盘，**内存占用恒定保持在数百 KB 以内**，即使传输数十 GB 的超大型镜像也绝不发生浏览器内存溢出（OOM / 页面崩溃）。
 
-- **完备的 Feature Policy 权限穿透**：
-  - 为 `appViewport` 显式补全 `allow="fullscreen; ... picture-in-picture"` 及 `allowfullscreen="true"` 跨代兼容属性，确保原生播放器在点击全屏或画中画时不受父级容器约束，100% 铺满整块物理屏幕。
+- **实时极速下载进度条与传输流速显示 (Real-time P2P Progress & Speed HUD)**：
+  - 点击下载后，下载按钮自动置灰并展示实时下载状态与速率（例如：`📥 正在接收: 45% (18.2 MB/s)`）；
+  - 在按钮下方提供高精度平滑动态绿色进度条与已传输字节 / 总字节实时比对；
+  - **防呆保护与带宽保护**：
+    - 下载期间防止用户重复频繁点击产生重复打洞；
+    - 深度绑定 `AbortController`，当用户点击“⬅ 返回文件目录”或关闭弹窗时，立即中断传输并自动通知远端 Agent `stream.reset()`，即时节省带宽。
 
 ---
 
 ### 📦 资产下载与快速验证
 - 预编译二进制跨平台支持：Linux (amd64 / arm64)、Windows (amd64 / arm64)、macOS Darwin (amd64 / Apple Silicon arm64)。
 - 多架构 Docker 镜像已同步发布至 GitHub Container Registry (`ghcr.io`)：
-  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.7.2` (`latest`)
-  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.7.2` (`latest`)
+  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v1.7.3` (`latest`)
+  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v1.7.3` (`latest`)

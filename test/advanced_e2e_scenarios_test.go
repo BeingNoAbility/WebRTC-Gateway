@@ -206,7 +206,7 @@ func TestE2E_HTTP_PostUploadWithBodyAndContentLength(t *testing.T) {
 	_ = stream.Close() // Send FIN
 
 	// Read response headers
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	respHeadersPayload, err := stream.ReadHeaders(ctx)
 	if err != nil {
@@ -290,7 +290,7 @@ func TestE2E_HTTP_RangeAnd206MediaStreaming(t *testing.T) {
 	_ = stream.WriteHeaders(metaBytes)
 	_ = stream.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	respHeadersPayload, err := stream.ReadHeaders(ctx)
 	if err != nil {

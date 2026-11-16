@@ -91,6 +91,7 @@ class PortalApp {
 
   private appFrame: HTMLIFrameElement | null = null;
   private vaultContainer: HTMLElement | null = null;
+  private activeVaultAbortController: AbortController | null = null;
   private activeStreamsCount = 0;
 
   constructor() {
@@ -1887,11 +1888,7 @@ class PortalApp {
           return;
         } else if (this.appFrame && this.appFrame.style.display === 'none') {
           // Restore iframe if returning to normal HTML page, media streaming, or directory view
-          if (this.vaultContainer) {
-            this.vaultContainer.remove();
-            this.vaultContainer = null;
-          }
-          this.appFrame.style.display = 'block';
+          this.closeVaultAndRestoreIframe();
         }
       }
 
@@ -2087,6 +2084,10 @@ class PortalApp {
 
   // Show dedicated P2P File Vault for PDF and binary downloads
   private showFileVault(opts: { fileName: string; fileSize: number; type: string; path: string; isDir: boolean }) {
+    if (this.activeVaultAbortController) {
+      this.activeVaultAbortController.abort();
+      this.activeVaultAbortController = null;
+    }
     if (this.appFrame) {
       this.appFrame.style.display = 'none';
     }
@@ -2139,6 +2140,10 @@ class PortalApp {
           <button id="btnVaultDownload" style="background: #238636; color: #ffffff; border: 1px solid rgba(240, 246, 252, 0.1); border-radius: 6px; padding: 12px 20px; font-size: 15px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s;">
             ⚡ 极速 P2P 下载 (Download)
           </button>
+          <div id="vaultProgressBar" style="display: none; background: #21262d; border-radius: 6px; overflow: hidden; height: 8px; width: 100%; border: 1px solid #30363d; margin-top: -4px;">
+            <div id="vaultProgressFill" style="background: #238636; width: 0%; height: 100%; transition: width 0.15s ease;"></div>
+          </div>
+          <div id="vaultStatusText" style="display: none; font-size: 12px; color: #8b949e; text-align: center; margin-top: -6px; word-break: break-all;"></div>
 
           ${isPdf ? `
           <button id="btnVaultPreview" style="background: #21262d; border: 1px solid #30363d; color: #58a6ff; border-radius: 6px; padding: 10px 20px; font-size: 14px; font-weight: 500; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s;">
@@ -2164,13 +2169,148 @@ class PortalApp {
     document.body.appendChild(container);
     this.vaultContainer = container;
 
-    document.getElementById('btnVaultDownload')?.addEventListener('click', () => {
-      const a = document.createElement('a');
-      a.href = viewUrl;
-      a.download = opts.fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+    const btnDownload = document.getElementById('btnVaultDownload') as HTMLButtonElement | null;
+    const progressBar = document.getElementById('vaultProgressBar') as HTMLDivElement | null;
+    const progressFill = document.getElementById('vaultProgressFill') as HTMLDivElement | null;
+    const statusText = document.getElementById('vaultStatusText') as HTMLDivElement | null;
+
+    btnDownload?.addEventListener('click', async () => {
+      if (this.activeVaultAbortController) {
+        return; // Prevent duplicate download clicks
+      }
+
+      const resetUI = () => {
+        if (btnDownload) {
+          btnDownload.disabled = false;
+          btnDownload.style.opacity = '1';
+          btnDownload.style.cursor = 'pointer';
+          btnDownload.innerText = '⚡ 极速 P2P 下载 (Download)';
+        }
+        if (progressBar) progressBar.style.display = 'none';
+        if (progressFill) progressFill.style.width = '0%';
+        if (statusText) statusText.style.display = 'none';
+      };
+
+      // 1. Dual-mode write detection for ultra-large files (> 500MB) via File System Access API
+      let fileStream: any = null;
+      const LARGE_FILE_THRESHOLD = 500 * 1024 * 1024; // 500MB
+      const hasSavePicker = typeof window !== 'undefined' && typeof (window as any).showSaveFilePicker === 'function';
+
+      if (opts.fileSize > LARGE_FILE_THRESHOLD && hasSavePicker) {
+        try {
+          const handle = await (window as any).showSaveFilePicker({
+            suggestedName: opts.fileName,
+          });
+          fileStream = await handle.createWritable();
+        } catch (pickerErr: any) {
+          if (pickerErr.name === 'AbortError') {
+            // User cancelled the file picker dialog
+            return;
+          }
+          this.log(`File System Access API prompt failed: ${pickerErr.message}, falling back to Blob.`);
+        }
+      }
+
+      // 2. Lock UI & prepare AbortController
+      btnDownload.disabled = true;
+      btnDownload.style.opacity = '0.7';
+      btnDownload.style.cursor = 'not-allowed';
+      btnDownload.innerText = '⚡ 正在建立 P2P 传输...';
+      if (progressBar) progressBar.style.display = 'block';
+      if (statusText) {
+        statusText.style.display = 'block';
+        statusText.innerText = '正在通过 WebRTC DataChannel 发起请求...';
+      }
+
+      const abortController = new AbortController();
+      this.activeVaultAbortController = abortController;
+
+      try {
+        const response = await fetch(viewUrl, { signal: abortController.signal });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} ${response.statusText}`);
+        }
+
+        const contentLengthHeader = response.headers.get('content-length');
+        const totalBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : (opts.fileSize || 0);
+        const contentType = response.headers.get('content-type') || 'application/octet-stream';
+
+        const reader = response.body?.getReader();
+        if (!reader) {
+          const blob = await response.blob();
+          this.triggerBlobDownload(blob, opts.fileName);
+          btnDownload.innerText = '✅ 下载完成';
+          setTimeout(resetUI, 2500);
+          return;
+        }
+
+        const chunks: Uint8Array[] = [];
+        let receivedBytes = 0;
+        const startTime = Date.now();
+        let lastUiUpdate = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            receivedBytes += value.length;
+            if (fileStream) {
+              await fileStream.write(value);
+            } else {
+              chunks.push(value);
+            }
+
+            const now = Date.now();
+            if (now - lastUiUpdate > 100 || (totalBytes > 0 && receivedBytes >= totalBytes)) {
+              lastUiUpdate = now;
+              const elapsedSec = Math.max((now - startTime) / 1000, 0.01);
+              const speedBps = receivedBytes / elapsedSec;
+              const speedStr = this.formatSpeed(speedBps);
+              const receivedStr = this.formatFileSize(receivedBytes);
+              const totalStr = totalBytes > 0 ? this.formatFileSize(totalBytes) : '';
+
+              if (totalBytes > 0) {
+                const pct = Math.min(100, Math.round((receivedBytes / totalBytes) * 100));
+                btnDownload.innerText = `📥 正在接收: ${pct}% (${speedStr})`;
+                if (progressFill) progressFill.style.width = `${pct}%`;
+                if (statusText) statusText.innerText = `已传输 ${receivedStr} / ${totalStr} · 速度 ${speedStr}`;
+              } else {
+                btnDownload.innerText = `📥 已接收 ${receivedStr} (${speedStr})`;
+                if (statusText) statusText.innerText = `已传输 ${receivedStr} · 速度 ${speedStr}`;
+              }
+            }
+          }
+        }
+
+        if (fileStream) {
+          await fileStream.close();
+          fileStream = null;
+        } else {
+          const finalBlob = new Blob(chunks, { type: contentType });
+          this.triggerBlobDownload(finalBlob, opts.fileName);
+        }
+
+        btnDownload.innerText = '✅ 下载完成';
+        if (progressFill) progressFill.style.width = '100%';
+        if (statusText) statusText.innerText = `🎉 传输完毕，共 ${this.formatFileSize(receivedBytes)}`;
+        setTimeout(resetUI, 2500);
+      } catch (err: any) {
+        if (fileStream) {
+          try { await fileStream.abort(); } catch {}
+          fileStream = null;
+        }
+        if (err.name === 'AbortError') {
+          btnDownload.innerText = '⚠️ 下载已取消';
+          if (statusText) statusText.innerText = '用户中断了传输';
+        } else {
+          this.log(`Vault download error: ${err.message}`);
+          btnDownload.innerText = '❌ 下载失败';
+          if (statusText) statusText.innerText = `传输失败: ${err.message || '网络连接异常'}`;
+        }
+        setTimeout(resetUI, 3500);
+      } finally {
+        this.activeVaultAbortController = null;
+      }
     });
 
     if (isPdf) {
@@ -2187,6 +2327,10 @@ class PortalApp {
   }
 
   private closeVaultAndRestoreIframe() {
+    if (this.activeVaultAbortController) {
+      this.activeVaultAbortController.abort();
+      this.activeVaultAbortController = null;
+    }
     if (this.vaultContainer) {
       this.vaultContainer.remove();
       this.vaultContainer = null;
@@ -2194,6 +2338,25 @@ class PortalApp {
     if (this.appFrame) {
       this.appFrame.style.display = 'block';
     }
+  }
+
+  private formatSpeed(bytesPerSec: number): string {
+    return `${this.formatFileSize(bytesPerSec)}/s`;
+  }
+
+  private triggerBlobDownload(blob: Blob, fileName: string) {
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => {
+      try {
+        URL.revokeObjectURL(blobUrl);
+      } catch {}
+    }, 60000);
   }
 
   private formatFileSize(bytes: number): string {
