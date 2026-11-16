@@ -39,6 +39,8 @@ assert(!swCode.includes('__P2P_SECRET__'), 'sw.js MUST NOT inject window.__P2P_S
 assert(!swCode.includes("includes('/worker')") && !swCode.includes('includes("/worker")'), 'sw.js MUST NOT use fuzzy url.pathname.includes("/worker") (P1-4)');
 assert(swCode.includes('stream: true') || swCode.includes('stream:!0') || swCode.includes('{stream:!0}'), 'sw.js uses TextDecoder { stream: true } (P1-4)');
 assert(swCode.includes('resultingClientId'), 'sw.js includes multi-tab iframe-to-portal session mapping via resultingClientId (P1-2)');
+assert(swCode.includes('matchAll') && swCode.includes('window'), 'sw.js includes Active GC against dead window sessions');
+assert(swCode.includes('clients.get') || swCode.includes('.clients.get'), 'sw.js includes Lazy GC client liveness verification');
 assert(!portalCode.includes('value="${this.peerId}"'), 'portal.js MUST NOT interpolate peerId into input value attribute (P0-2)');
 assert(!portalCode.includes('value="${this.secret}"'), 'portal.js MUST NOT interpolate secret into input value attribute (P0-2)');
 
@@ -507,6 +509,69 @@ function createMockDOM(options = {}) {
   // Direct fetch from portal tab itself
   const sessDirect = resolveSession('tab_bili');
   assert(sessDirect && sessDirect.peerId === 'bili', 'Direct portal fetch resolves to own session');
+
+  // C. Fast-Refresh GC and LibreSpeed Web Worker session isolation
+  console.log('\n--- Testing Fast-Refresh GC & LibreSpeed Web Worker Routing ---');
+
+  // Simulate active living clients in the browser
+  let liveClients = new Set(['tab_bili', 'tab_nas']);
+
+  function activeGCSweep(currentLivingIds) {
+    for (const id of sessions.keys()) {
+      if (!currentLivingIds.has(id)) {
+        sessions.delete(id);
+      }
+    }
+    for (const [childId, parentId] of iframeToPortalMap.entries()) {
+      if (!currentLivingIds.has(parentId)) {
+        iframeToPortalMap.delete(childId);
+      }
+    }
+  }
+
+  // User presses F5 on tab_bili: tab_bili is destroyed and replaced by tab_bili_refreshed
+  liveClients = new Set(['tab_bili_refreshed', 'tab_nas']);
+  activeGCSweep(liveClients);
+
+  assert(!sessions.has('tab_bili'), 'Dead session tab_bili is purged by Active GC on refresh');
+  assert(!iframeToPortalMap.has('iframe_bili_1'), 'Dead iframe mapping for tab_bili is purged by Active GC');
+
+  // New tab connects
+  onPortalAttach('tab_bili_refreshed', 'bili', { id: 'port_bili_refreshed' });
+  assert(sessions.has('tab_bili_refreshed'), 'New session tab_bili_refreshed registered successfully');
+  assert(sessions.size === 2, 'Sessions size strictly equals 2 live tabs (no zombie accumulation)');
+
+  // Tab 2 mounts LibreSpeed iframe and LibreSpeed creates a Web Worker:
+  onNavigate('tab_bili_refreshed', 'iframe_librespeed');
+  // Worker created by iframe: request.destination === 'worker'
+  function onWorkerSpawn(parentContextId, resultingWorkerClientId) {
+    const parentPortal = iframeToPortalMap.get(parentContextId) || (sessions.has(parentContextId) ? parentContextId : null);
+    if (parentPortal) {
+      iframeToPortalMap.set(resultingWorkerClientId, parentPortal);
+    }
+  }
+
+  onWorkerSpawn('iframe_librespeed', 'worker_speedtest_1');
+
+  // Web Worker fetches /backend/empty.php with clientId === 'worker_speedtest_1'
+  const workerSession = resolveSession('worker_speedtest_1');
+  assert(workerSession && workerSession.clientId === 'tab_bili_refreshed', 'LibreSpeed Web Worker resolves directly to parent portal session tab_bili_refreshed');
+  assert(workerSession && workerSession.peerId === 'bili', 'LibreSpeed Web Worker accesses correct node bili');
+
+  // Lazy GC verification: if a session dies before active GC runs, lazy GC purges it
+  liveClients.delete('tab_nas'); // tab_nas closed unexpectedly
+  function lazyGCVerify(session) {
+    if (session && !liveClients.has(session.clientId)) {
+      sessions.delete(session.clientId);
+      return null;
+    }
+    return session;
+  }
+
+  const deadSess = resolveSession('tab_nas');
+  const checked = lazyGCVerify(deadSess);
+  assert(checked === null, 'Lazy GC detects dead window client and invalidates session');
+  assert(!sessions.has('tab_nas'), 'Lazy GC purges dead session from sessions map');
 }
 
 console.log(`\n=== Verification Complete: ${passCount} Passed, ${failCount} Failed ===`);

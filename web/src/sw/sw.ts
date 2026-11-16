@@ -43,6 +43,25 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
   if (data?.type === 'PORTAL_ATTACH') {
     const port = event.ports && event.ports[0];
     const peerId = data.peerId || '';
+
+    // Active GC: Sweep and purge dead sessions from previous page loads/refreshes
+    (async () => {
+      try {
+        const livingClients = await sw.clients.matchAll({ type: 'window' });
+        const livingIds = new Set(livingClients.map((c) => c.id));
+        for (const id of sessions.keys()) {
+          if (!id.startsWith('anon_') && !livingIds.has(id)) {
+            sessions.delete(id);
+          }
+        }
+        for (const [childId, parentId] of iframeToPortalMap.entries()) {
+          if (!livingIds.has(parentId)) {
+            iframeToPortalMap.delete(childId);
+          }
+        }
+      } catch {}
+    })();
+
     if (clientId) {
       let session = sessions.get(clientId);
       if (!session) {
@@ -86,33 +105,29 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
 
 // Resolve the owning PortalSession for a given client ID (mapping iframes back to their parent portal tab)
 function resolveSession(clientId: string): PortalSession | null {
-  // 1. Direct match in iframeToPortalMap (subresources or navigations originating from a child iframe)
+  // 1. Direct match in iframeToPortalMap (subresources or navigations originating from a child iframe or worker)
   if (clientId && iframeToPortalMap.has(clientId)) {
     const portalId = iframeToPortalMap.get(clientId)!;
     const session = sessions.get(portalId);
     if (session) {
-      session.lastActive = Date.now();
       return session;
     }
   }
 
   // 2. Direct match in sessions (requests initiated directly by a top-level portal tab)
   if (clientId && sessions.has(clientId)) {
-    const session = sessions.get(clientId)!;
-    session.lastActive = Date.now();
-    return session;
+    return sessions.get(clientId)!;
   }
 
   // 3. Fallback: if only one portal session exists, use it
   if (sessions.size === 1) {
     const session = sessions.values().next().value;
     if (session) {
-      session.lastActive = Date.now();
       return session;
     }
   }
 
-  // 4. Fallback: select the most recently active portal session
+  // 4. Fallback: select the most recently active portal session (without mutating lastActive here)
   if (sessions.size > 1) {
     let best: PortalSession | null = null;
     for (const s of sessions.values()) {
@@ -121,7 +136,6 @@ function resolveSession(clientId: string): PortalSession | null {
       }
     }
     if (best) {
-      best.lastActive = Date.now();
       return best;
     }
   }
@@ -156,8 +170,12 @@ sw.addEventListener('fetch', (event: FetchEvent) => {
   const request = event.request;
   const url = new URL(request.url);
 
-  // Maintain parent-child client mapping across iframe navigation cascade
-  if (request.mode === 'navigate' && event.resultingClientId) {
+  // Maintain parent-child client mapping across iframe navigation cascade and Web Workers
+  const isChildContext = (request.mode === 'navigate' ||
+                          request.destination === 'worker' ||
+                          request.destination === 'sharedworker') &&
+                         Boolean(event.resultingClientId);
+  if (isChildContext) {
     if (event.clientId && sessions.has(event.clientId)) {
       iframeToPortalMap.set(event.resultingClientId, event.clientId);
     } else if (event.clientId && iframeToPortalMap.has(event.clientId)) {
@@ -214,7 +232,33 @@ sw.addEventListener('fetch', (event: FetchEvent) => {
   event.respondWith(handleTunneledRequest(request, session));
 });
 
-async function handleTunneledRequest(request: Request, session: PortalSession | null): Promise<Response> {
+async function handleTunneledRequest(request: Request, initialSession: PortalSession | null): Promise<Response> {
+  let session = initialSession;
+
+  // Lazy GC: Verify that the selected session's client is still alive
+  if (session && session.clientId && !session.clientId.startsWith('anon_')) {
+    try {
+      const isAlive = await sw.clients.get(session.clientId);
+      if (!isAlive) {
+        sessions.delete(session.clientId);
+        for (const [childId, parentId] of iframeToPortalMap.entries()) {
+          if (parentId === session.clientId) {
+            iframeToPortalMap.delete(childId);
+          }
+        }
+        session = null; // Stale session purged!
+      }
+    } catch {}
+  }
+
+  // If session was invalid, purged, or missing, discover living portal client
+  if (!session) {
+    const activeClient = await getPortalClient();
+    if (activeClient && sessions.has(activeClient.id)) {
+      session = sessions.get(activeClient.id)!;
+    }
+  }
+
   const messageChannel = new MessageChannel();
   const port = messageChannel.port1;
 

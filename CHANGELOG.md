@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.9.1] - 2026-11-17
+
+### Fixed
+- **Service Worker Active & Lazy GC against Zombie Sessions (F5 Fast-Refresh)**:
+  - Eliminated 30-second `504 Gateway Timeout` and white screen caused by dispatching requests to dead `MessagePort`s of destroyed pages after short-interval refreshes.
+  - Implemented Active GC in `PORTAL_ATTACH` sweeping `sw.clients.matchAll({ type: 'window' })` to purge orphaned sessions on page reloads.
+  - Implemented Lazy GC in `handleTunneledRequest` via `sw.clients.get(session.clientId)`, instantly pruning stale sessions and recovering the living portal window client.
+  - Removed self-poisoning timestamp mutation (`best.lastActive = Date.now()`) in fallback session selection.
+- **Web Worker Context Tracking (LibreSpeed & Worker-Heavy Apps)**:
+  - Extended child context mapping in `sw.ts` to `destination === 'worker' || destination === 'sharedworker'`.
+  - Enables Web Worker requests (e.g. LibreSpeed's `speedtest_worker.js`, Monaco Editor, PDF.js) to resolve accurately to the parent portal session without falling into unmapped fallbacks.
+
+---
+
 ## [v1.9.0] - 2026-11-17
 
 ### Added
