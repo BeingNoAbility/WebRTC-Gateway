@@ -24,13 +24,13 @@ flowchart TD
 
 - [ ] **1.1 Go 客户端版本变量更新**
   - **位置**：[cmd/agent/main.go](file:///cmd/agent/main.go) 中的 `var Version = "vX.Y.Z"`
-  - **操作**：将版本号字符串订正为本次发布的目标版本（例如 `v1.9.2`）。
+  - **操作**：将版本号字符串订正为本次发布的目标版本（例如 `v1.9.3`）。
   - **验证命令**：`go run ./cmd/agent -v`
   - **预期输出**：必须输出包含新版本的标准信息，如 `WebRTC Gateway Agent vX.Y.Z`。
 
 - [ ] **1.2 Go 服务端版本变量更新**
   - **位置**：[cmd/signal/main.go](file:///cmd/signal/main.go) 中的 `var Version = "vX.Y.Z"`
-  - **操作**：将版本号字符串订正为本次发布的目标版本（例如 `v1.9.2`）。
+  - **操作**：将版本号字符串订正为本次发布的目标版本（例如 `v1.9.3`）。
   - **验证命令**：`go run ./cmd/signal -v`
   - **预期输出**：必须输出包含新版本的标准信息，如 `WebRTC Gateway Signal vX.Y.Z`。
 
@@ -229,7 +229,7 @@ flowchart TD
     确认输出完全为空且提示 `nothing to commit, working tree clean`，确保没有任何未被 `.gitignore` 捕获的临时本地调试脚本、中间产物或未提交修改带入发版 Tag。
 
 - [ ] **6.2 创建语义化 Git 附注标签 (Annotated Tag)**
-  - **标签格式**：严格使用 `v` 前缀加语义化版本号（如 `v1.9.2`）；
+  - **标签格式**：严格使用 `v` 前缀加语义化版本号（如 `v1.9.3`）；
   - **打标命令**：
     ```bash
     git tag -a vX.Y.Z -m "Release vX.Y.Z: <简要版本摘要>"
