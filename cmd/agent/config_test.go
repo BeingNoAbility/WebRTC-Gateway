@@ -163,3 +163,41 @@ func TestAgent_ConflictingModesFailFast(t *testing.T) {
 		t.Errorf("Expected conflicting modes error message, got:\n%s", string(out))
 	}
 }
+
+func TestAgent_HelpAndVersionFlags(t *testing.T) {
+	// 1. Test -h
+	cmd := exec.Command("go", "run", ".", "-h")
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("Expected agent -h to exit 0, got err: %v\nOutput: %s", err, string(out))
+	}
+	output := string(out)
+	if !strings.Contains(output, "WebRTC Gateway Agent") || !strings.Contains(output, "Operational Modes") || !strings.Contains(output, "-allowed-proxy-domains") {
+		t.Errorf("Unexpected help output for agent -h:\n%s", output)
+	}
+
+	// 2. Test help subcommand
+	cmd = exec.Command("go", "run", ".", "help")
+	cmd.Dir = "."
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("Expected agent help to exit 0, got err: %v\nOutput: %s", err, string(out))
+	}
+	if !strings.Contains(string(out), "Operational Modes") {
+		t.Errorf("Unexpected help output for agent help:\n%s", string(out))
+	}
+
+	// 3. Test -v and --version
+	for _, flagArg := range []string{"-v", "--version"} {
+		cmd = exec.Command("go", "run", ".", flagArg)
+		cmd.Dir = "."
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			t.Errorf("Expected agent %s to exit 0, got err: %v\nOutput: %s", flagArg, err, string(out))
+		}
+		if !strings.Contains(string(out), "WebRTC Gateway Agent v") {
+			t.Errorf("Expected version string for %s, got:\n%s", flagArg, string(out))
+		}
+	}
+}

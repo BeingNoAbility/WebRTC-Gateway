@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -16,9 +17,105 @@ import (
 	"webrtc-gateway/pkg/agent"
 )
 
+// Version represents the current release version of WebRTC Gateway Agent.
+var Version = "v1.9.1"
+
+func printAgentUsage(out io.Writer) {
+	fmt.Fprintf(out, "WebRTC Gateway Agent (%s)\n", Version)
+	fmt.Fprintf(out, "Zero-Client WebRTC P2P Intranet Penetration & Reverse Proxy Agent\n\n")
+	fmt.Fprintf(out, "Usage:\n")
+	fmt.Fprintf(out, "  agent [mode] [options]\n\n")
+	fmt.Fprintf(out, "Operational Modes (Mutually Exclusive, Default: -target http://127.0.0.1:8080):\n")
+	fmt.Fprintf(out, "  -target string\n")
+	fmt.Fprintf(out, "        Local destination Web application URL to reverse proxy (HTTP/WebSocket)\n")
+	fmt.Fprintf(out, "        (env: TARGET_URL, default: http://127.0.0.1:8080)\n")
+	fmt.Fprintf(out, "  -dir string\n")
+	fmt.Fprintf(out, "        Directory path to serve as static files with automatic directory index\n")
+	fmt.Fprintf(out, "        (env: DIR_PATH)\n")
+	fmt.Fprintf(out, "  -file string\n")
+	fmt.Fprintf(out, "        Single file path to serve directly for P2P download or stream\n")
+	fmt.Fprintf(out, "        (env: FILE_PATH)\n\n")
+	fmt.Fprintf(out, "Core & Signaling Options:\n")
+	fmt.Fprintf(out, "  -node-id string\n")
+	fmt.Fprintf(out, "        Unique node ID for this agent across the cluster\n")
+	fmt.Fprintf(out, "        Allowed characters: a-z, A-Z, 0-9, dot (.), underscore (_), hyphen (-)\n")
+	fmt.Fprintf(out, "        (env: NODE_ID, default: homeserver)\n")
+	fmt.Fprintf(out, "  -signal string\n")
+	fmt.Fprintf(out, "        Signaling server WebSocket URL (env: SIGNAL_URL, default: ws://127.0.0.1:8888/ws)\n")
+	fmt.Fprintf(out, "  -config string\n")
+	fmt.Fprintf(out, "        Path to YAML or JSON configuration file (env: CONFIG_FILE)\n")
+	fmt.Fprintf(out, "  -proxy string\n")
+	fmt.Fprintf(out, "        Optional HTTP/HTTPS/SOCKS5 proxy for signaling (e.g. socks5://127.0.0.1:1080, env: PROXY_URL)\n")
+	fmt.Fprintf(out, "  -sni string\n")
+	fmt.Fprintf(out, "        Optional TLS SNI server name and HTTP Host header for signaling (env: SNI)\n")
+	fmt.Fprintf(out, "  -insecure\n")
+	fmt.Fprintf(out, "        Skip TLS certificate verification for self-signed signaling servers (env: INSECURE)\n\n")
+	fmt.Fprintf(out, "Security & Decoupled Authentication Options:\n")
+	fmt.Fprintf(out, "  -signal-secret string\n")
+	fmt.Fprintf(out, "        Cluster secret token for signaling server registration & anti-hijacking (env: SIGNAL_SECRET)\n")
+	fmt.Fprintf(out, "  -access-secret string\n")
+	fmt.Fprintf(out, "        Visitor password token for P2P proxy access; empty for public access (env: ACCESS_SECRET)\n")
+	fmt.Fprintf(out, "  -allowed-proxy-domains string\n")
+	fmt.Fprintf(out, "        Comma-separated allowed domain suffixes for cross-origin proxying\n")
+	fmt.Fprintf(out, "        Supports wildcards (e.g. *.hdslb.com,*.bilivideo.com,*.qpic.cn, env: ALLOWED_PROXY_DOMAINS)\n\n")
+	fmt.Fprintf(out, "Share Link Generation Options:\n")
+	fmt.Fprintf(out, "  -sign-link duration\n")
+	fmt.Fprintf(out, "        Generate a temporary HMAC-SHA256 signed share link with expiration (e.g. 1h, 24h, 7d) and exit\n")
+	fmt.Fprintf(out, "  -portal-url string\n")
+	fmt.Fprintf(out, "        Base URL of the Web Portal for -sign-link generation\n")
+	fmt.Fprintf(out, "        (env: PORTAL_URL, default: https://your-portal-domain.com)\n\n")
+	fmt.Fprintf(out, "Network & ICE Traversal Options:\n")
+	fmt.Fprintf(out, "  -stun-servers string\n")
+	fmt.Fprintf(out, "        Comma-separated custom STUN servers (e.g. stun:stun.l.google.com:19302, env: STUN_SERVERS)\n")
+	fmt.Fprintf(out, "  -turn-url string\n")
+	fmt.Fprintf(out, "        Optional TURN relay server URL (e.g. turn:relay.example.com:3478, env: TURN_URL)\n")
+	fmt.Fprintf(out, "  -turn-user string\n")
+	fmt.Fprintf(out, "        Optional TURN relay username (env: TURN_USER)\n")
+	fmt.Fprintf(out, "  -turn-pass string\n")
+	fmt.Fprintf(out, "        Optional TURN relay password / credential (env: TURN_PASS)\n\n")
+	fmt.Fprintf(out, "Performance & Monitoring Options:\n")
+	fmt.Fprintf(out, "  -max-streams int\n")
+	fmt.Fprintf(out, "        Maximum concurrent multiplexed streams before capacity backpressure (env: MAX_STREAMS, default: 512)\n")
+	fmt.Fprintf(out, "  -metrics-addr string\n")
+	fmt.Fprintf(out, "        Optional address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default: disabled)\n\n")
+	fmt.Fprintf(out, "Help & Version Options:\n")
+	fmt.Fprintf(out, "  -h, -help\n")
+	fmt.Fprintf(out, "        Show this help message and exit\n")
+	fmt.Fprintf(out, "  -v, -version\n")
+	fmt.Fprintf(out, "        Show version information and exit\n\n")
+	fmt.Fprintf(out, "Configuration Precedence:\n")
+	fmt.Fprintf(out, "  1. CLI Flags (Highest Priority)\n")
+	fmt.Fprintf(out, "  2. Environment Variables\n")
+	fmt.Fprintf(out, "  3. Configuration File (agent.yaml / agent.yml / agent.json)\n")
+	fmt.Fprintf(out, "  4. Built-in Defaults (Lowest Priority)\n\n")
+	fmt.Fprintf(out, "Examples:\n")
+	fmt.Fprintf(out, "  # Reverse proxy a local Web application\n")
+	fmt.Fprintf(out, "  agent -node-id myapp -target http://127.0.0.1:3000 -signal wss://signal.example.com/ws\n\n")
+	fmt.Fprintf(out, "  # Share a local directory protected by visitor password\n")
+	fmt.Fprintf(out, "  agent -node-id vault -dir /var/www/data -access-secret MyPassword123\n\n")
+	fmt.Fprintf(out, "  # Serve a single file directly over P2P\n")
+	fmt.Fprintf(out, "  agent -node-id iso-share -file /data/ubuntu-24.04.iso\n\n")
+	fmt.Fprintf(out, "  # Generate a 24-hour temporary signed share link\n")
+	fmt.Fprintf(out, "  agent -node-id vault -access-secret MyPassword123 -sign-link 24h -portal-url https://portal.example.com\n\n")
+	fmt.Fprintf(out, "  # Cluster anti-hijacking + visitor password protection\n")
+	fmt.Fprintf(out, "  agent -node-id secure-nas -signal-secret ClusterToken123 -access-secret VisitorPass456\n")
+}
+
 func main() {
-	// 0. Fail-fast deprecation check for legacy -secret flag and SECRET env
+	flag.Usage = func() {
+		printAgentUsage(flag.CommandLine.Output())
+	}
+
+	// 0. Early check for help / version and fail-fast deprecation check
 	for _, arg := range os.Args[1:] {
+		if arg == "help" {
+			printAgentUsage(os.Stdout)
+			os.Exit(0)
+		}
+		if arg == "version" {
+			fmt.Printf("WebRTC Gateway Agent %s\n", Version)
+			os.Exit(0)
+		}
 		if arg == "-secret" || strings.HasPrefix(arg, "-secret=") || arg == "--secret" || strings.HasPrefix(arg, "--secret=") {
 			fmt.Fprintln(os.Stderr, "Error: flag -secret has been deprecated and removed.")
 			fmt.Fprintln(os.Stderr, "  - Use -signal-secret (SIGNAL_SECRET) for cluster node registration and anti-hijacking.")
@@ -180,11 +277,11 @@ func main() {
 	}
 
 	// 4. CLI Flags (Tier 4: CLI Flags - Highest Priority)
-	nodeID := flag.String("node-id", cfgNodeID, "Unique node ID for this agent (env: NODE_ID)")
+	nodeID := flag.String("node-id", cfgNodeID, "Unique node ID for this agent across cluster (env: NODE_ID)")
 	signalURL := flag.String("signal", cfgSignalURL, "Signaling server WebSocket URL (env: SIGNAL_URL)")
 	signalSecret := flag.String("signal-secret", cfgSignalSecret, "Cluster secret token for signaling server registration & anti-hijacking (env: SIGNAL_SECRET)")
 	accessSecret := flag.String("access-secret", cfgAccessSecret, "Visitor password token for proxy access; empty for public access (env: ACCESS_SECRET)")
-	target := flag.String("target", cfgTarget, "Local destination Web application URL to reverse proxy (env: TARGET_URL)")
+	target := flag.String("target", cfgTarget, "Local destination Web application URL to reverse proxy (HTTP/WebSocket) (env: TARGET_URL)")
 	dirPath := flag.String("dir", cfgDir, "Directory path to serve as static files / directory index (env: DIR_PATH)")
 	filePath := flag.String("file", cfgFile, "Single file path to serve directly for P2P download or stream (env: FILE_PATH)")
 	configFlag := flag.String("config", "", "Path to configuration file (.yaml, .yml, or .json, env: CONFIG_FILE)")
@@ -198,10 +295,18 @@ func main() {
 	maxStreams := flag.Int("max-streams", cfgMaxStreams, "Maximum concurrent multiplexed streams before capacity backpressure rejection (env: MAX_STREAMS)")
 	metricsAddr := flag.String("metrics-addr", cfgMetricsAddr, "Optional address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default disabled)")
 	shareDuration := flag.Duration("sign-link", 0, "Generate a temporary signed share link with the given expiration duration (e.g. 1h, 24h, 7d) and exit")
-	portalURL := flag.String("portal-url", cfgPortalURL, "Base URL of the Web Portal for -sign-link generation")
-	allowedProxyDomains := flag.String("allowed-proxy-domains", cfgAllowedProxyDomains, "Comma-separated allowed domain suffixes for cross-origin proxying (e.g. *.hdslb.com,*.bilivideo.com, env: ALLOWED_PROXY_DOMAINS)")
+	portalURL := flag.String("portal-url", cfgPortalURL, "Base URL of the Web Portal for -sign-link generation (env: PORTAL_URL)")
+	allowedProxyDomains := flag.String("allowed-proxy-domains", cfgAllowedProxyDomains, "Comma-separated allowed domain suffixes for cross-origin proxying with wildcard support (e.g. *.hdslb.com,*.bilivideo.com, env: ALLOWED_PROXY_DOMAINS)")
+	versionFlag := flag.Bool("version", false, "Display version information and exit")
+	vFlag := flag.Bool("v", false, "Display version information and exit (shorthand)")
 	_ = configFlag
+
 	flag.Parse()
+
+	if *versionFlag || *vFlag {
+		fmt.Printf("WebRTC Gateway Agent %s\n", Version)
+		os.Exit(0)
+	}
 
 	// Mutual Exclusivity Check between -target, -dir, and -file
 	modesCount := 0

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -677,5 +678,43 @@ func TestSignalServer_Offer_ClientIP_InjectionAndAntiSpoofing(t *testing.T) {
 	}
 	if forwarded.ClientIP != "127.0.0.1" {
 		t.Errorf("Expected ClientIP to be 127.0.0.1, got %q", forwarded.ClientIP)
+	}
+}
+
+func TestSignalServer_HelpAndVersionFlags(t *testing.T) {
+	// 1. Test -h
+	cmd := exec.Command("go", "run", ".", "-h")
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("Expected signal -h to exit 0, got err: %v\nOutput: %s", err, string(out))
+	}
+	output := string(out)
+	if !strings.Contains(output, "WebRTC Gateway Signal") || !strings.Contains(output, "TLS & HTTPS Security Options") || !strings.Contains(output, "-trusted-proxies") {
+		t.Errorf("Unexpected help output for signal -h:\n%s", output)
+	}
+
+	// 2. Test help subcommand
+	cmd = exec.Command("go", "run", ".", "help")
+	cmd.Dir = "."
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("Expected signal help to exit 0, got err: %v\nOutput: %s", err, string(out))
+	}
+	if !strings.Contains(string(out), "Server & Network Options") {
+		t.Errorf("Unexpected help output for signal help:\n%s", string(out))
+	}
+
+	// 3. Test -v and --version
+	for _, flagArg := range []string{"-v", "--version"} {
+		cmd = exec.Command("go", "run", ".", flagArg)
+		cmd.Dir = "."
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			t.Errorf("Expected signal %s to exit 0, got err: %v\nOutput: %s", flagArg, err, string(out))
+		}
+		if !strings.Contains(string(out), "WebRTC Gateway Signal v") {
+			t.Errorf("Expected version string for %s, got:\n%s", flagArg, string(out))
+		}
 	}
 }

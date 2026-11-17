@@ -191,6 +191,8 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-metrics-addr` | `METRICS_ADDR` | `""` | 可选的 Prometheus 监控导出地址（如 `:9090`，默认不开放任何端口，保持纯出站安全） |
 | `-sign-link` | - | `0` | 基于 `-access-secret` 生成指定有效期的无状态安全分享链接（如 `1h`、`24h`、`7d`）并退出 |
 | `-portal-url` | - | `https://your-portal-domain.com` | 为 `-sign-link` 指定 Web 门户的基准访问地址 |
+| `-v`, `-version` | - | `false` | 显示 Agent 版本信息并退出 |
+| `-h`, `-help` | - | `false` | 显示完整命令行帮助文档与运行模式示例并退出 |
 
 > [!NOTE]
 > **关于 `-secret` / `SECRET` 的升级说明 (v1.5.0+)**：
@@ -212,6 +214,8 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-metrics-addr` | `METRICS_ADDR` | `""` | 可选的专用 Prometheus 监控导出地址（如 `:9090`，默认直接复用主服务 `/metrics`） |
 | `-health` | - | `false` | 执行本地健康检查探测（自动适配 HTTP/HTTPS/端口），成功退出码 0，失败退出码 1（专用于 Docker/K8s HEALTHCHECK） |
 | `-health-url` | - | `""` | 自定义健康检查探测 URL（默认探测 `-addr` / `ADDR` 的 `/healthz` 端点） |
+| `-v`, `-version` | - | `false` | 显示 Signal 服务端版本信息并退出 |
+| `-h`, `-help` | - | `false` | 显示完整命令行帮助文档与参数示例并退出 |
 
 ---
 

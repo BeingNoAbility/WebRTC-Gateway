@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"math/big"
@@ -616,7 +617,87 @@ func runHealthCheck(addr string, preferTLS bool, customURL string) int {
 	return 1
 }
 
+// Version represents the current release version of WebRTC Gateway Signal Server.
+var Version = "v1.9.1"
+
+func printSignalUsage(out io.Writer) {
+	fmt.Fprintf(out, "WebRTC Gateway Signal (%s)\n", Version)
+	fmt.Fprintf(out, "Zero-Client WebRTC P2P Central Signaling & Web Portal Server\n\n")
+	fmt.Fprintf(out, "Usage:\n")
+	fmt.Fprintf(out, "  signal [options]\n\n")
+	fmt.Fprintf(out, "Server & Network Options:\n")
+	fmt.Fprintf(out, "  -addr string\n")
+	fmt.Fprintf(out, "        Signaling HTTP/WS listening address (env: ADDR or PORT, default: :8888)\n")
+	fmt.Fprintf(out, "  -config string\n")
+	fmt.Fprintf(out, "        Path to YAML or JSON configuration file (env: CONFIG_FILE)\n")
+	fmt.Fprintf(out, "  -static string\n")
+	fmt.Fprintf(out, "        Path to external web portal static assets; falls back to embedded portal if empty or not found\n")
+	fmt.Fprintf(out, "        (env: STATIC_DIR, default: ./web/dist)\n\n")
+	fmt.Fprintf(out, "TLS & HTTPS Security Options:\n")
+	fmt.Fprintf(out, "  -tls-auto\n")
+	fmt.Fprintf(out, "        Automatically generate an in-memory self-signed ECDSA certificate covering localhost and LAN IPs\n")
+	fmt.Fprintf(out, "        to provide a browser Service Worker Secure Context (HTTPS) (env: TLS_AUTO)\n")
+	fmt.Fprintf(out, "  -tls-cert string\n")
+	fmt.Fprintf(out, "        Path to TLS certificate PEM file (e.g. cert.pem or fullchain.pem, env: TLS_CERT)\n")
+	fmt.Fprintf(out, "  -tls-key string\n")
+	fmt.Fprintf(out, "        Path to TLS private key PEM file (e.g. key.pem or privkey.pem, env: TLS_KEY)\n\n")
+	fmt.Fprintf(out, "Security & Access Control Options:\n")
+	fmt.Fprintf(out, "  -signal-secret string\n")
+	fmt.Fprintf(out, "        Server-wide pre-shared secret required for agent registration and anti-hijacking (env: SIGNAL_SECRET)\n")
+	fmt.Fprintf(out, "  -secret string\n")
+	fmt.Fprintf(out, "        Alias for -signal-secret (env: SECRET)\n")
+	fmt.Fprintf(out, "  -trusted-proxies string\n")
+	fmt.Fprintf(out, "        Comma-separated trusted reverse proxy CIDRs/IPs for real client IP extraction via X-Forwarded-For\n")
+	fmt.Fprintf(out, "        (env: TRUSTED_PROXIES, default: loopback & RFC1918 private CIDRs; set to 'none' to disable)\n")
+	fmt.Fprintf(out, "  -max-ip-conns int\n")
+	fmt.Fprintf(out, "        Maximum concurrent WebSocket connections per client IP (env: MAX_IP_CONNS, default: 64)\n\n")
+	fmt.Fprintf(out, "Monitoring & Health Options:\n")
+	fmt.Fprintf(out, "  -health\n")
+	fmt.Fprintf(out, "        Run local health check probe and exit with code 0 (healthy) or 1 (unhealthy)\n")
+	fmt.Fprintf(out, "  -health-url string\n")
+	fmt.Fprintf(out, "        Custom URL for health check probe (default: probe -addr on /healthz)\n")
+	fmt.Fprintf(out, "  -metrics-addr string\n")
+	fmt.Fprintf(out, "        Optional dedicated address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default: /metrics on main -addr)\n\n")
+	fmt.Fprintf(out, "Help & Version Options:\n")
+	fmt.Fprintf(out, "  -h, -help\n")
+	fmt.Fprintf(out, "        Show this help message and exit\n")
+	fmt.Fprintf(out, "  -v, -version\n")
+	fmt.Fprintf(out, "        Show version information and exit\n\n")
+	fmt.Fprintf(out, "Configuration Precedence:\n")
+	fmt.Fprintf(out, "  1. CLI Flags (Highest Priority)\n")
+	fmt.Fprintf(out, "  2. Environment Variables\n")
+	fmt.Fprintf(out, "  3. Configuration File (server.yaml / server.yml / server.json)\n")
+	fmt.Fprintf(out, "  4. Built-in Defaults (Lowest Priority)\n\n")
+	fmt.Fprintf(out, "Examples:\n")
+	fmt.Fprintf(out, "  # Start signaling server with embedded web portal on port 8888\n")
+	fmt.Fprintf(out, "  signal -addr :8888\n\n")
+	fmt.Fprintf(out, "  # Start with in-memory self-signed TLS for local Service Worker Secure Context\n")
+	fmt.Fprintf(out, "  signal -addr :8443 -tls-auto\n\n")
+	fmt.Fprintf(out, "  # Production with custom TLS certificate and cluster registration secret\n")
+	fmt.Fprintf(out, "  signal -addr :443 -tls-cert /etc/ssl/fullchain.pem -tls-key /etc/ssl/privkey.pem -signal-secret ClusterToken123\n\n")
+	fmt.Fprintf(out, "  # Deploy behind reverse proxy (e.g. Nginx, Cloudflare) with trusted proxy CIDRs\n")
+	fmt.Fprintf(out, "  signal -addr :8888 -trusted-proxies 127.0.0.1/32,10.0.0.0/8 -signal-secret ClusterToken123\n\n")
+	fmt.Fprintf(out, "  # Run Docker/Kubernetes container health check probe\n")
+	fmt.Fprintf(out, "  signal -health\n")
+}
+
 func main() {
+	flag.Usage = func() {
+		printSignalUsage(flag.CommandLine.Output())
+	}
+
+	// 0. Early check for help / version
+	for _, arg := range os.Args[1:] {
+		if arg == "help" {
+			printSignalUsage(os.Stdout)
+			os.Exit(0)
+		}
+		if arg == "version" {
+			fmt.Printf("WebRTC Gateway Signal %s\n", Version)
+			os.Exit(0)
+		}
+	}
+
 	// 1. Defaults (Tier 1: Defaults)
 	cfgAddr := ":8888"
 	cfgStatic := "./web/dist"
@@ -708,20 +789,27 @@ func main() {
 
 	// 4. CLI Flags (Tier 4: CLI Flags - Highest Priority)
 	addr := flag.String("addr", cfgAddr, "Signaling HTTP/WS listening address (env: ADDR or PORT)")
-	staticDir := flag.String("static", cfgStatic, "Path to web portal static assets (env: STATIC_DIR)")
+	staticDir := flag.String("static", cfgStatic, "Path to web portal static assets; falls back to embedded portal if empty or not found (env: STATIC_DIR)")
 	tlsCert := flag.String("tls-cert", cfgTLSCert, "Path to TLS certificate PEM file (e.g. cert.pem or fullchain.pem, env: TLS_CERT)")
 	tlsKey := flag.String("tls-key", cfgTLSKey, "Path to TLS private key PEM file (e.g. key.pem or privkey.pem, env: TLS_KEY)")
-	tlsAuto := flag.Bool("tls-auto", cfgTLSAuto, "Automatically generate in-memory self-signed TLS cert for HTTPS (env: TLS_AUTO)")
-	signalSecret := flag.String("signal-secret", cfgSignalSecret, "Server-wide pre-shared secret for agent registration (env: SIGNAL_SECRET)")
+	tlsAuto := flag.Bool("tls-auto", cfgTLSAuto, "Automatically generate in-memory self-signed ECDSA certificate for local/LAN HTTPS Secure Context (env: TLS_AUTO)")
+	signalSecret := flag.String("signal-secret", cfgSignalSecret, "Server-wide pre-shared secret for agent registration & anti-hijacking (env: SIGNAL_SECRET)")
 	serverSecretAlias := flag.String("secret", "", "Alias for -signal-secret (env: SECRET)")
 	configFlag := flag.String("config", "", "Path to configuration file (.yaml, .yml, or .json, env: CONFIG_FILE)")
 	maxIPConns := flag.Int("max-ip-conns", cfgMaxIPConns, "Maximum concurrent WebSocket connections per client IP (env: MAX_IP_CONNS)")
-	trustedProxies := flag.String("trusted-proxies", cfgTrustedProxies, "Comma-separated trusted proxy CIDRs/IPs (default: loopback & RFC1918 private CIDRs; 'none' to disable, env: TRUSTED_PROXIES)")
+	trustedProxies := flag.String("trusted-proxies", cfgTrustedProxies, "Comma-separated trusted proxy CIDRs/IPs for real client IP extraction (env: TRUSTED_PROXIES)")
 	metricsAddr := flag.String("metrics-addr", cfgMetricsAddr, "Optional dedicated address to serve Prometheus metrics (e.g. :9090, env: METRICS_ADDR, default /metrics)")
 	healthCheck := flag.Bool("health", false, "Run local health check probe and exit with code 0 (healthy) or 1 (unhealthy)")
 	healthURL := flag.String("health-url", "", "Custom URL for health check probe (default: probe -addr / ADDR on /healthz)")
+	versionFlag := flag.Bool("version", false, "Display version information and exit")
+	vFlag := flag.Bool("v", false, "Display version information and exit (shorthand)")
 	_ = configFlag
 	flag.Parse()
+
+	if *versionFlag || *vFlag {
+		fmt.Printf("WebRTC Gateway Signal %s\n", Version)
+		os.Exit(0)
+	}
 
 	if *healthCheck {
 		os.Exit(runHealthCheck(*addr, *tlsAuto || (*tlsCert != "" && *tlsKey != ""), *healthURL))
