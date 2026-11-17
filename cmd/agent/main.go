@@ -367,34 +367,14 @@ func main() {
 		}
 	}
 
-	log.Printf("==================================================")
-	log.Printf("  Zero-Client P2P WebRTC Gateway Agent (Go Daemon)")
-	if *filePath != "" {
-		log.Printf("  Node ID: %s | Mode: Single File (%s, %d bytes)", *nodeID, ag.FileProxy().FileName(), ag.FileProxy().FileSize())
-	} else if *dirPath != "" {
-		log.Printf("  Node ID: %s | Mode: Directory Server (%s)", *nodeID, ag.FileProxy().TargetPath())
-	} else {
-		log.Printf("  Node ID: %s | Mode: Reverse Proxy (Target: %s)", *nodeID, *target)
-	}
-	log.Printf("  Cluster Auth: %v | Visitor Auth: %v", *signalSecret != "", *accessSecret != "")
-	if *sni != "" {
-		log.Printf("  TLS SNI / Host: %s", *sni)
-	}
-	if *proxyURL != "" {
-		log.Printf("  Proxy: %s", *proxyURL)
-	}
-	if *insecure {
-		log.Printf("  TLS Verify: Disabled (-insecure)")
-	}
-	log.Printf("==================================================")
 	if *sni != "" {
 		ag.SetSNI(*sni)
 	}
 	if *proxyURL != "" {
 		ag.SetProxy(*proxyURL)
 	}
+	var domains []string
 	if *allowedProxyDomains != "" {
-		var domains []string
 		for _, d := range strings.Split(*allowedProxyDomains, ",") {
 			d = strings.TrimSpace(d)
 			if d != "" {
@@ -402,7 +382,6 @@ func main() {
 			}
 		}
 		ag.SetAllowedProxyDomains(domains)
-		log.Printf("  Allowed Proxy Domains: %v", domains)
 	}
 	if *insecure {
 		ag.SetInsecureTLS(true)
@@ -414,6 +393,56 @@ func main() {
 		ag.SetTURN(*turnURL, *turnUser, *turnPass)
 	}
 	ag.SetMaxConcurrentStreams(*maxStreams)
+
+	clusterAuthStr := "Disabled (Public)"
+	if *signalSecret != "" {
+		clusterAuthStr = "Enabled (Protected)"
+	}
+	visitorAuthStr := "Disabled (Public)"
+	if *accessSecret != "" {
+		visitorAuthStr = "Enabled (Protected)"
+	}
+
+	log.Printf("==================================================")
+	log.Printf("  WebRTC Gateway Agent %s (Go Daemon)", Version)
+	if *filePath != "" {
+		log.Printf("  Node ID: %s | Mode: Single File (%s, %d bytes)", *nodeID, ag.FileProxy().FileName(), ag.FileProxy().FileSize())
+	} else if *dirPath != "" {
+		log.Printf("  Node ID: %s | Mode: Directory Server (%s)", *nodeID, ag.FileProxy().TargetPath())
+	} else {
+		log.Printf("  Node ID: %s | Mode: Reverse Proxy (Target: %s)", *nodeID, *target)
+	}
+	log.Printf("  Signaling: %s", *signalURL)
+	log.Printf("  Cluster Auth: %s | Visitor Auth: %s", clusterAuthStr, visitorAuthStr)
+	stunInfo := "Built-in Defaults (Google STUN)"
+	if *stunServers != "" {
+		stunInfo = *stunServers
+	}
+	log.Printf("  Max Streams: %d | STUN: %s", *maxStreams, stunInfo)
+	if *turnURL != "" {
+		turnUserStr := *turnUser
+		if turnUserStr == "" {
+			turnUserStr = "none"
+		}
+		log.Printf("  TURN Relay: %s (User: %s)", *turnURL, turnUserStr)
+	}
+	if *sni != "" || *proxyURL != "" {
+		var parts []string
+		if *sni != "" {
+			parts = append(parts, fmt.Sprintf("TLS SNI: %s", *sni))
+		}
+		if *proxyURL != "" {
+			parts = append(parts, fmt.Sprintf("Proxy: %s", *proxyURL))
+		}
+		log.Printf("  %s", strings.Join(parts, " | "))
+	}
+	if len(domains) > 0 {
+		log.Printf("  Allowed Domains: %s", strings.Join(domains, ", "))
+	}
+	if *insecure {
+		log.Printf("  TLS Verify: Disabled (-insecure! dev/testing only)")
+	}
+	log.Printf("==================================================")
 
 	if *metricsAddr != "" {
 		go func() {

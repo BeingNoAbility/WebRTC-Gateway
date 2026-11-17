@@ -1142,14 +1142,14 @@ func main() {
 	if *staticDir != "" {
 		if abs, err := filepath.Abs(*staticDir); err == nil {
 			if stat, err := os.Stat(abs); err == nil && stat.IsDir() {
-				staticSource = "disk: " + abs
+				staticSource = fmt.Sprintf("Local Directory (%s)", abs)
 				staticHandler = http.FileServer(http.Dir(abs))
 			}
 		}
 	}
 	if staticHandler == nil {
 		if sub, err := fs.Sub(web.DistFS, "dist"); err == nil {
-			staticSource = "embedded binary FS (web/dist)"
+			staticSource = fmt.Sprintf("Embedded (%s)", Version)
 			staticHandler = http.FileServer(http.FS(sub))
 		}
 	}
@@ -1187,26 +1187,52 @@ func main() {
 
 	scheme := "http"
 	wsScheme := "ws"
+	tlsInfo := "Plain HTTP"
 	if isTLS {
 		scheme = "https"
 		wsScheme = "wss"
+		if *tlsCert != "" {
+			tlsInfo = fmt.Sprintf("HTTPS Custom cert (%s)", *tlsCert)
+		} else {
+			tlsInfo = "HTTPS (Auto SAN cert)"
+		}
+	}
+
+	host := "localhost"
+	port := *addr
+	if !strings.HasPrefix(*addr, ":") {
+		if h, p, err := net.SplitHostPort(*addr); err == nil {
+			if h != "" && h != "0.0.0.0" && h != "::" && h != "[::]" {
+				host = h
+			}
+			port = ":" + p
+		}
+	}
+	portalURL := fmt.Sprintf("%s://%s%s/", scheme, host, port)
+	wsURL := fmt.Sprintf("%s://%s%s/ws", wsScheme, host, port)
+
+	clusterAuthStr := "Disabled (Public)"
+	if *signalSecret != "" {
+		clusterAuthStr = "Enabled (Protected)"
+	}
+
+	trustedProxiesStr := "Default (RFC1918 Private CIDRs)"
+	if *trustedProxies != "" {
+		if *trustedProxies == "none" {
+			trustedProxiesStr = "Disabled (None)"
+		} else {
+			trustedProxiesStr = *trustedProxies
+		}
 	}
 
 	log.Printf("==================================================")
-	log.Printf("  Zero-Client WebRTC P2P Integrated Server")
-	log.Printf("  Listening: %s", *addr)
-	log.Printf("  Web Portal: %s://localhost%s/", scheme, *addr)
-	log.Printf("  Signaling Endpoint: %s://localhost%s/ws", wsScheme, *addr)
+	log.Printf("  WebRTC Gateway Signal Server %s", Version)
+	log.Printf("  Listening: %s (%s)", *addr, tlsInfo)
+	log.Printf("  Web Portal: %s", portalURL)
+	log.Printf("  Signaling WS: %s", wsURL)
+	log.Printf("  Cluster Registration Auth: %s", clusterAuthStr)
 	log.Printf("  Static Assets: %s", staticSource)
-	if isTLS {
-		if *tlsCert != "" {
-			log.Printf("  TLS / HTTPS: Enabled (Custom cert: %s)", *tlsCert)
-		} else {
-			log.Printf("  TLS / HTTPS: Enabled (Auto-generated self-signed SAN cert)")
-		}
-	} else {
-		log.Printf("  TLS / HTTPS: Disabled (Plain HTTP)")
-	}
+	log.Printf("  Limits: Max %d Conns/IP | Trusted Proxies: %s", *maxIPConns, trustedProxiesStr)
 	log.Printf("==================================================")
 
 	// Graceful shutdown
