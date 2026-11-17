@@ -63,6 +63,7 @@ export default withMermaid(
               collapsed: false,
               items: [
                 { text: '📋 正式发版质量审计清单', link: '/RELEASE_CHECKLIST' },
+                { text: '🛡️ 辩证审查原则与核对清单', link: '/REVIEW_GUIDELINES' },
               ],
             },
           ],
@@ -125,6 +126,7 @@ export default withMermaid(
               collapsed: false,
               items: [
                 { text: '📋 Release Quality Checklist', link: '/RELEASE_CHECKLIST' },
+                { text: '🛡️ Dialectical Review Guidelines', link: '/REVIEW_GUIDELINES' },
               ],
             },
           ],
