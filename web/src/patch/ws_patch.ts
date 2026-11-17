@@ -852,4 +852,48 @@
 
     globalScope.WebSocket = PatchedWebSocket;
   }
+
+  // 5. Web Worker & SharedWorker virtualization (Module Worker dynamic adaptation)
+  // When constructing a module worker (e.g. new Worker(url, { type: 'module' })),
+  // W3C spec forbids importScripts(). We append ?_p2p_worker=module so Service Worker
+  // dynamically injects `import "/patch.js";` instead of `importScripts("/patch.js");`.
+  const appendWorkerTypeParam = (url: string | URL, options?: WorkerOptions | string): string | URL => {
+    const isModule = typeof options === 'object' && options !== null && (options as WorkerOptions).type === 'module';
+    if (isModule) {
+      if (typeof url === 'string') {
+        const hashIdx = url.indexOf('#');
+        const hash = hashIdx !== -1 ? url.substring(hashIdx) : '';
+        const base = hashIdx !== -1 ? url.substring(0, hashIdx) : url;
+        const sep = base.includes('?') ? '&' : '?';
+        return `${base}${sep}_p2p_worker=module${hash}`;
+      } else if (url instanceof URL) {
+        const u = new URL(url.href);
+        u.searchParams.set('_p2p_worker', 'module');
+        return u;
+      }
+    }
+    return url;
+  };
+
+  if (typeof globalScope.Worker !== 'undefined') {
+    const OrigWorker = globalScope.Worker;
+    class PatchedWorker extends OrigWorker {
+      constructor(scriptURL: string | URL, options?: WorkerOptions) {
+        const rewritten = appendWorkerTypeParam(scriptURL, options);
+        super(rewritten, options);
+      }
+    }
+    globalScope.Worker = PatchedWorker;
+  }
+
+  if (typeof globalScope.SharedWorker !== 'undefined') {
+    const OrigSharedWorker = globalScope.SharedWorker;
+    class PatchedSharedWorker extends OrigSharedWorker {
+      constructor(scriptURL: string | URL, options?: string | WorkerOptions) {
+        const rewritten = appendWorkerTypeParam(scriptURL, options);
+        super(rewritten as any, options as any);
+      }
+    }
+    globalScope.SharedWorker = PatchedSharedWorker;
+  }
 })();

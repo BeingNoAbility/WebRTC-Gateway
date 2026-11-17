@@ -1,16 +1,19 @@
 import { DurableObject } from 'cloudflare:workers';
 
 /**
- * Cloudflare Worker: Multi-Node P2P Signaling Server
+ * Cloudflare Worker: Multi-Node P2P Signaling Server with WebSocket Hibernation
  * 
  * Backed by Cloudflare SQLite-backed Durable Objects.
- * Supports multiple agents registered under different node_ids simultaneously.
- * Accurately routes WebRTC Offer/Answer/Candidate by node_id.
+ * Uses WebSocket Hibernation API and setWebSocketAutoResponse for automatic ping/pong handling,
+ * slashing idle standby costs to near 0.
+ * Supports dynamic node sharding (?node=<nodeId>) with graceful fallback to global-broker.
  */
 
 export class SignalingRoom extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
+    this.env = env;
+
     // agents: node_id (string) -> WebSocket
     this.agents = new Map();
     // agentNodeIds: WebSocket -> node_id (string)
@@ -30,6 +33,25 @@ export class SignalingRoom extends DurableObject {
     this.failedAttempts = new Map();
   }
 
+  // Restore in-memory state from WebSocket attachments if Durable Object woke up from hibernation
+  ensureState() {
+    if (this.agents.size === 0 && this.clients.size === 0 && this.ctx.getWebSockets) {
+      for (const ws of this.ctx.getWebSockets()) {
+        try {
+          const att = ws.deserializeAttachment();
+          if (!att) continue;
+          if (att.role === 'agent' && att.agentNodeId) {
+            this.agents.set(att.agentNodeId, ws);
+            this.agentNodeIds.set(ws, att.agentNodeId);
+          } else if (att.role === 'client' && att.sessionId) {
+            this.clients.set(ws, { sessionId: att.sessionId, targetNodeId: att.targetNodeId });
+            this.clientBySession.set(att.sessionId, ws);
+          }
+        } catch {}
+      }
+    }
+  }
+
   async fetch(request) {
     const clientIP = request.headers.get('cf-connecting-ip') || 'unknown';
     const currentConns = this.ipConns.get(clientIP) || 0;
@@ -41,8 +63,22 @@ export class SignalingRoom extends DurableObject {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    server.accept();
-    this.handleWS(server, clientIP);
+    // Accept WebSocket into Hibernation API
+    this.ctx.acceptWebSocket(server);
+
+    // Enable native edge ping/pong auto-response to keep connection alive without waking DO
+    try {
+      this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+    } catch {}
+
+    const sessionId = crypto.randomUUID();
+    server.serializeAttachment({
+      clientIP,
+      sessionId,
+      role: '',
+      agentNodeId: '',
+      targetNodeId: '',
+    });
 
     return new Response(null, {
       status: 101,
@@ -50,224 +86,250 @@ export class SignalingRoom extends DurableObject {
     });
   }
 
-  handleWS(ws, clientIP) {
-    let role = '';
-    let sessionId = crypto.randomUUID();
-    let agentNodeId = '';
+  async webSocketMessage(ws, message) {
+    this.ensureState();
+    let att = null;
+    try {
+      att = ws.deserializeAttachment() || {};
+    } catch {
+      att = {};
+    }
 
-    let ipCleaned = false;
-    const cleanupIP = () => {
-      if (ipCleaned) return;
-      ipCleaned = true;
-      const c = this.ipConns.get(clientIP) || 0;
-      if (c <= 1) this.ipConns.delete(clientIP);
-      else this.ipConns.set(clientIP, c - 1);
-    };
+    const clientIP = att.clientIP || 'unknown';
+    const sessionId = att.sessionId || crypto.randomUUID();
 
-    ws.addEventListener('close', cleanupIP);
-    ws.addEventListener('error', cleanupIP);
+    try {
+      const rawText = typeof message === 'string' ? message : new TextDecoder().decode(message);
+      const msg = JSON.parse(rawText);
 
-    ws.addEventListener('message', (event) => {
-      try {
-        const msg = JSON.parse(event.data);
+      switch (msg.type) {
+        case 'register': {
+          const nodeId = msg.node_id;
+          const secret = msg.secret || '';
+          if (!nodeId) return;
 
-        switch (msg.type) {
-          case 'register': {
-            role = 'agent';
-            const nodeId = msg.node_id;
-            const secret = msg.secret || '';
-            if (!nodeId) return;
-            agentNodeId = nodeId;
+          // Global cluster secret verification
+          if (this.env && this.env.SIGNAL_SECRET && this.env.SIGNAL_SECRET !== secret) {
+            try {
+              ws.send(JSON.stringify({
+                type: 'error',
+                code: 4003,
+                message: 'unauthorized: invalid cluster signal secret',
+              }));
+              ws.close(4003, 'Unauthorized');
+            } catch {}
+            return;
+          }
 
-            // Global cluster secret verification
-            if (this.env && this.env.SIGNAL_SECRET && this.env.SIGNAL_SECRET !== secret) {
+          // Anti-hijack protection: verify node secret if already bound
+          const boundSecret = this.nodeSecrets.get(nodeId);
+          if (boundSecret && boundSecret !== secret) {
+            const fails = (this.failedAttempts.get(clientIP) || 0) + 1;
+            this.failedAttempts.set(clientIP, fails);
+            try {
+              ws.send(JSON.stringify({
+                type: 'error',
+                error: fails >= 10 
+                  ? 'Too many failed authentication attempts, throttled'
+                  : `Unauthorized: node_id "${nodeId}" is protected by a different secret`,
+              }));
+              ws.close(4003, 'Unauthorized');
+            } catch {}
+            return;
+          }
+
+          if (secret) {
+            this.nodeSecrets.set(nodeId, secret);
+          }
+
+          // If an old agent connection existed for this nodeId, close it cleanly
+          const oldWs = this.agents.get(nodeId);
+          if (oldWs && oldWs !== ws) {
+            try {
+              oldWs.send(JSON.stringify({ type: 'error', error: 'Replaced by newer agent session' }));
+              oldWs.close(1000, 'Replaced');
+            } catch {}
+            this.agentNodeIds.delete(oldWs);
+          }
+
+          att.role = 'agent';
+          att.agentNodeId = nodeId;
+          ws.serializeAttachment(att);
+
+          this.agents.set(nodeId, ws);
+          this.agentNodeIds.set(ws, nodeId);
+
+          const requireVisitorAuth = msg.require_visitor_auth !== undefined
+            ? !!msg.require_visitor_auth
+            : (msg.requires_secret !== undefined ? !!msg.requires_secret : !!secret);
+          this.nodeVisitorAuth.set(nodeId, requireVisitorAuth);
+          ws.send(JSON.stringify({ type: 'registered', node_id: nodeId }));
+
+          // Notify all clients waiting for this node
+          for (const [clWs, clientInfo] of this.clients.entries()) {
+            if (clientInfo.targetNodeId === nodeId) {
               try {
-                ws.send(JSON.stringify({
-                  type: 'error',
-                  code: 4003,
-                  message: 'unauthorized: invalid cluster signal secret',
-                }));
-                ws.close(4003, 'Unauthorized');
+                clWs.send(
+                  JSON.stringify({
+                    type: 'peer_status',
+                    node_id: nodeId,
+                    session_id: clientInfo.sessionId,
+                    status: 'online',
+                    requires_secret: requireVisitorAuth,
+                  })
+                );
               } catch {}
-              return;
             }
+          }
+          break;
+        }
 
-            // Anti-hijack protection: verify node secret if already bound
-            const boundSecret = this.nodeSecrets.get(nodeId);
-            if (boundSecret && boundSecret !== secret) {
-              const fails = (this.failedAttempts.get(clientIP) || 0) + 1;
-              this.failedAttempts.set(clientIP, fails);
-              try {
-                ws.send(JSON.stringify({
-                  type: 'error',
-                  error: fails >= 10 
-                    ? 'Too many failed authentication attempts, throttled'
-                    : `Unauthorized: node_id "${nodeId}" is protected by a different secret`,
-                }));
-                ws.close(4003, 'Unauthorized');
-              } catch {}
-              return;
-            }
+        case 'join': {
+          const targetNodeId = msg.node_id;
+          att.role = 'client';
+          att.targetNodeId = targetNodeId;
+          ws.serializeAttachment(att);
 
-            if (secret) {
-              this.nodeSecrets.set(nodeId, secret);
-            }
+          this.clients.set(ws, { sessionId, targetNodeId });
+          this.clientBySession.set(sessionId, ws);
 
-            // If an old agent connection existed for this nodeId, close it cleanly
-            const oldWs = this.agents.get(nodeId);
-            if (oldWs && oldWs !== ws) {
-              try {
-                oldWs.send(JSON.stringify({ type: 'error', error: 'Replaced by newer agent session' }));
-                oldWs.close(1000, 'Replaced');
-              } catch {}
-              this.agentNodeIds.delete(oldWs);
-            }
+          const isOnline = this.agents.has(targetNodeId);
+          const requiresSecret = this.nodeVisitorAuth.has(targetNodeId)
+            ? this.nodeVisitorAuth.get(targetNodeId)
+            : !!this.nodeSecrets.get(targetNodeId);
 
-            this.agents.set(nodeId, ws);
-            this.agentNodeIds.set(ws, nodeId);
-            const requireVisitorAuth = msg.require_visitor_auth !== undefined ? !!msg.require_visitor_auth : (msg.requires_secret !== undefined ? !!msg.requires_secret : !!secret);
-            this.nodeVisitorAuth.set(nodeId, requireVisitorAuth);
-            ws.send(JSON.stringify({ type: 'registered', node_id: nodeId }));
+          ws.send(
+            JSON.stringify({
+              type: 'peer_status',
+              node_id: targetNodeId,
+              session_id: sessionId,
+              status: isOnline ? 'online' : 'offline',
+              requires_secret: requiresSecret,
+            })
+          );
+          break;
+        }
 
-            // Notify all clients waiting for this node
-            for (const [clWs, clientInfo] of this.clients.entries()) {
-              if (clientInfo.targetNodeId === nodeId) {
-                try {
-                  clWs.send(
-                    JSON.stringify({
-                      type: 'peer_status',
-                      node_id: nodeId,
-                      session_id: clientInfo.sessionId,
-                      status: 'online',
-                      requires_secret: requireVisitorAuth,
-                    })
-                  );
-                } catch {}
+        case 'offer': {
+          msg.session_id = sessionId;
+          msg.client_ip = clientIP === 'unknown' ? '' : clientIP;
+          const targetNodeId = msg.node_id;
+          const targetAgent = this.agents.get(targetNodeId);
+          if (targetAgent) {
+            targetAgent.send(JSON.stringify(msg));
+          } else {
+            ws.send(JSON.stringify({ type: 'error', error: `Target agent [${targetNodeId}] is offline` }));
+          }
+          break;
+        }
+
+        case 'answer': {
+          // Agent -> Client (Strict node attribution validation)
+          if (att.role === 'agent') {
+            const clWs = this.clientBySession.get(msg.session_id);
+            if (clWs) {
+              const clientInfo = this.clients.get(clWs);
+              if (clientInfo && clientInfo.targetNodeId === att.agentNodeId) {
+                clWs.send(JSON.stringify(msg));
               }
             }
-            break;
           }
+          break;
+        }
 
-          case 'join': {
-            role = 'client';
-            const targetNodeId = msg.node_id;
-            this.clients.set(ws, { sessionId, targetNodeId });
-            this.clientBySession.set(sessionId, ws);
-
-            const isOnline = this.agents.has(targetNodeId);
-            const requiresSecret = this.nodeVisitorAuth.has(targetNodeId) ? this.nodeVisitorAuth.get(targetNodeId) : !!this.nodeSecrets.get(targetNodeId);
-            ws.send(
-              JSON.stringify({
-                type: 'peer_status',
-                node_id: targetNodeId,
-                session_id: sessionId,
-                status: isOnline ? 'online' : 'offline',
-                requires_secret: requiresSecret,
-              })
-            );
-            break;
-          }
-
-          case 'offer': {
+        case 'candidate': {
+          if (att.role === 'agent') {
+            // Agent -> Client (Strict node attribution validation)
+            const clWs = this.clientBySession.get(msg.session_id);
+            if (clWs) {
+              const clientInfo = this.clients.get(clWs);
+              if (clientInfo && clientInfo.targetNodeId === att.agentNodeId) {
+                clWs.send(JSON.stringify(msg));
+              }
+            }
+          } else {
+            // Client -> Agent
             msg.session_id = sessionId;
-            msg.client_ip = clientIP === 'unknown' ? '' : clientIP;
             const targetNodeId = msg.node_id;
             const targetAgent = this.agents.get(targetNodeId);
             if (targetAgent) {
               targetAgent.send(JSON.stringify(msg));
-            } else {
-              ws.send(JSON.stringify({ type: 'error', error: `Target agent [${targetNodeId}] is offline` }));
             }
-            break;
           }
-
-          case 'answer': {
-            // Agent -> Client (Strict node attribution validation)
-            if (role === 'agent') {
-              const clWs = this.clientBySession.get(msg.session_id);
-              if (clWs) {
-                const clientInfo = this.clients.get(clWs);
-                if (clientInfo && clientInfo.targetNodeId === agentNodeId) {
-                  clWs.send(JSON.stringify(msg));
-                }
-              }
-            }
-            break;
-          }
-
-          case 'candidate': {
-            if (role === 'agent') {
-              // Agent -> Client (Strict node attribution validation)
-              const clWs = this.clientBySession.get(msg.session_id);
-              if (clWs) {
-                const clientInfo = this.clients.get(clWs);
-                if (clientInfo && clientInfo.targetNodeId === agentNodeId) {
-                  clWs.send(JSON.stringify(msg));
-                }
-              }
-            } else {
-              // Client -> Agent
-              msg.session_id = sessionId;
-              const targetNodeId = msg.node_id;
-              const targetAgent = this.agents.get(targetNodeId);
-              if (targetAgent) {
-                targetAgent.send(JSON.stringify(msg));
-              }
-            }
-            break;
-          }
-
-          case 'error': {
-            // Relay error message (e.g. auth rejection from agent to client with attribution validation)
-            if (role === 'agent' && msg.session_id) {
-              const clWs = this.clientBySession.get(msg.session_id);
-              if (clWs) {
-                const clientInfo = this.clients.get(clWs);
-                if (clientInfo && clientInfo.targetNodeId === agentNodeId) {
-                  clWs.send(JSON.stringify(msg));
-                }
-              }
-            }
-            break;
-          }
+          break;
         }
-      } catch (err) {
-        console.error('Signaling message error:', err);
-      }
-    });
 
-    ws.addEventListener('close', () => {
-      if (role === 'agent') {
-        const nodeId = this.agentNodeIds.get(ws);
-        if (nodeId) {
-          if (this.agents.get(nodeId) === ws) {
-            this.agents.delete(nodeId);
-            // Notify clients targeting this node that it went offline
-            for (const [clWs, clientInfo] of this.clients.entries()) {
-              if (clientInfo.targetNodeId === nodeId) {
-                try {
-                  clWs.send(
-                    JSON.stringify({
-                      type: 'peer_status',
-                      node_id: nodeId,
-                      session_id: clientInfo.sessionId,
-                      status: 'offline',
-                    })
-                  );
-                } catch {}
+        case 'error': {
+          // Relay error message with attribution validation
+          if (att.role === 'agent' && msg.session_id) {
+            const clWs = this.clientBySession.get(msg.session_id);
+            if (clWs) {
+              const clientInfo = this.clients.get(clWs);
+              if (clientInfo && clientInfo.targetNodeId === att.agentNodeId) {
+                clWs.send(JSON.stringify(msg));
               }
             }
           }
-          this.agentNodeIds.delete(ws);
-        }
-      } else {
-        const info = this.clients.get(ws);
-        if (info) {
-          this.clientBySession.delete(info.sessionId);
-          this.clients.delete(ws);
+          break;
         }
       }
-    });
+    } catch (err) {
+      console.error('Signaling message error:', err);
+    }
+  }
+
+  async webSocketClose(ws, code, reason, wasClean) {
+    this.handleWSClose(ws);
+  }
+
+  async webSocketError(ws, error) {
+    this.handleWSClose(ws);
+  }
+
+  handleWSClose(ws) {
+    let att = null;
+    try {
+      att = ws.deserializeAttachment();
+    } catch {}
+
+    const clientIP = att?.clientIP;
+    if (clientIP) {
+      const c = this.ipConns.get(clientIP) || 0;
+      if (c <= 1) this.ipConns.delete(clientIP);
+      else this.ipConns.set(clientIP, c - 1);
+    }
+
+    const role = att?.role || '';
+    if (role === 'agent') {
+      const nodeId = att?.agentNodeId || this.agentNodeIds.get(ws);
+      if (nodeId) {
+        if (this.agents.get(nodeId) === ws) {
+          this.agents.delete(nodeId);
+          // Notify clients targeting this node that it went offline
+          for (const [clWs, clientInfo] of this.clients.entries()) {
+            if (clientInfo.targetNodeId === nodeId) {
+              try {
+                clWs.send(
+                  JSON.stringify({
+                    type: 'peer_status',
+                    node_id: nodeId,
+                    session_id: clientInfo.sessionId,
+                    status: 'offline',
+                  })
+                );
+              } catch {}
+            }
+          }
+        }
+        this.agentNodeIds.delete(ws);
+      }
+    } else {
+      const info = this.clients.get(ws) || (att ? { sessionId: att.sessionId } : null);
+      if (info && info.sessionId) {
+        this.clientBySession.delete(info.sessionId);
+        this.clients.delete(ws);
+      }
+    }
   }
 }
 
@@ -282,8 +344,12 @@ export default {
         return new Response('Expected WebSocket upgrade at /ws', { status: 426 });
       }
 
-      // Unify all nodes and clients under the global signaling broker room
-      const id = env.ROOM.idFromName('global-broker');
+      // Dynamic node sharding with graceful fallback:
+      // If client or agent specifies ?node=<nodeId>, shard by node ID to isolate traffic.
+      // Otherwise, fall back to 'global-broker' for complete backward compatibility.
+      const nodeId = url.searchParams.get('node');
+      const roomId = nodeId ? `node:${nodeId}` : 'global-broker';
+      const id = env.ROOM.idFromName(roomId);
       const stub = env.ROOM.get(id);
 
       return stub.fetch(request);
@@ -295,6 +361,7 @@ export default {
         JSON.stringify({
           status: 'online',
           mode: 'integrated-worker-and-assets',
+          hibernation: true,
           time: new Date().toISOString(),
         }),
         {
@@ -312,6 +379,7 @@ export default {
       JSON.stringify({
         status: 'online',
         edge: 'cloudflare-durable-object',
+        hibernation: true,
         time: new Date().toISOString(),
       }),
       {

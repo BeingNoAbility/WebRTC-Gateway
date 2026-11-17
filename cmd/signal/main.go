@@ -313,6 +313,7 @@ type IPRateLimiter struct {
 	msgTimes        map[string][]time.Time
 	failedAuths     map[string][]time.Time
 	rejectedCount   uint64
+	stopCh          chan struct{}
 }
 
 func NewIPRateLimiter(maxConnsPerIP int, trustedPrefixes ...[]netip.Prefix) *IPRateLimiter {
@@ -325,12 +326,91 @@ func NewIPRateLimiter(maxConnsPerIP int, trustedPrefixes ...[]netip.Prefix) *IPR
 	} else {
 		prefixes = DefaultTrustedProxies()
 	}
-	return &IPRateLimiter{
+	limiter := &IPRateLimiter{
 		maxConns:        maxConnsPerIP,
 		trustedPrefixes: prefixes,
 		connsPerIP:      make(map[string]int),
 		msgTimes:        make(map[string][]time.Time),
 		failedAuths:     make(map[string][]time.Time),
+		stopCh:          make(chan struct{}),
+	}
+	go limiter.janitorLoop(2 * time.Minute)
+	return limiter
+}
+
+// janitorLoop periodically cleans up expired IP entries from memory maps to prevent chronic memory leaks.
+func (l *IPRateLimiter) janitorLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			l.pruneExpired()
+		case <-l.stopCh:
+			return
+		}
+	}
+}
+
+// pruneExpired removes expired message rate limit and failed authentication records,
+// and deletes IP keys from the map once their slices become empty.
+func (l *IPRateLimiter) pruneExpired() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	msgCutoff := now.Add(-10 * time.Second)
+	authCutoff := now.Add(-1 * time.Minute)
+
+	for ip, times := range l.msgTimes {
+		validCount := 0
+		for _, t := range times {
+			if t.After(msgCutoff) {
+				validCount++
+			}
+		}
+		if validCount == 0 {
+			delete(l.msgTimes, ip)
+		} else if validCount < len(times) {
+			valid := make([]time.Time, 0, validCount)
+			for _, t := range times {
+				if t.After(msgCutoff) {
+					valid = append(valid, t)
+				}
+			}
+			l.msgTimes[ip] = valid
+		}
+	}
+
+	for ip, times := range l.failedAuths {
+		validCount := 0
+		for _, t := range times {
+			if t.After(authCutoff) {
+				validCount++
+			}
+		}
+		if validCount == 0 {
+			delete(l.failedAuths, ip)
+		} else if validCount < len(times) {
+			valid := make([]time.Time, 0, validCount)
+			for _, t := range times {
+				if t.After(authCutoff) {
+					valid = append(valid, t)
+				}
+			}
+			l.failedAuths[ip] = valid
+		}
+	}
+}
+
+// Close gracefully stops the background janitor goroutine.
+func (l *IPRateLimiter) Close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	select {
+	case <-l.stopCh:
+		// already closed
+	default:
+		close(l.stopCh)
 	}
 }
 
@@ -618,7 +698,7 @@ func runHealthCheck(addr string, preferTLS bool, customURL string) int {
 }
 
 // Version represents the current release version of WebRTC Gateway Signal Server.
-var Version = "v1.9.3"
+var Version = "v2.0.0"
 
 func printSignalUsage(out io.Writer) {
 	fmt.Fprintf(out, "WebRTC Gateway Signal (%s)\n", Version)
@@ -830,6 +910,7 @@ func main() {
 
 	broker := NewSignalBroker(finalSecret)
 	limiter := NewIPRateLimiter(*maxIPConns, trustedPrefixes)
+	defer limiter.Close()
 
 	mux := http.NewServeMux()
 

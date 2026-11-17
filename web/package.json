@@ -1,6 +1,6 @@
 {
   "name": "webrtc-gateway-web",
-  "version": "1.9.3",
+  "version": "2.0.0",
   "description": "Zero-Client WebRTC P2P Gateway Web Portal & Service Worker",
   "main": "index.js",
   "scripts": {

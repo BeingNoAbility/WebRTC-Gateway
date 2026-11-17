@@ -718,3 +718,60 @@ func TestSignalServer_HelpAndVersionFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestIPRateLimiter_JanitorPrunesExpired(t *testing.T) {
+	limiter := NewIPRateLimiter(64)
+	defer limiter.Close()
+
+	// 1. Setup IP records
+	activeIP := "192.168.1.10"
+	expiredIP := "192.168.1.20"
+
+	// Add active entry
+	limiter.AllowMessage(activeIP)
+	limiter.RecordFailedAuth(activeIP)
+
+	// Simulate expired entries for expiredIP
+	limiter.mu.Lock()
+	limiter.msgTimes[expiredIP] = []time.Time{
+		time.Now().Add(-15 * time.Second),
+		time.Now().Add(-12 * time.Second),
+	}
+	limiter.failedAuths[expiredIP] = []time.Time{
+		time.Now().Add(-2 * time.Minute),
+		time.Now().Add(-70 * time.Second),
+	}
+	limiter.mu.Unlock()
+
+	// Verify before prune: both activeIP and expiredIP exist in maps
+	limiter.mu.Lock()
+	if _, exists := limiter.msgTimes[expiredIP]; !exists {
+		t.Fatalf("expiredIP should exist in msgTimes before prune")
+	}
+	if _, exists := limiter.failedAuths[expiredIP]; !exists {
+		t.Fatalf("expiredIP should exist in failedAuths before prune")
+	}
+	limiter.mu.Unlock()
+
+	// 2. Trigger pruneExpired
+	limiter.pruneExpired()
+
+	// 3. Verify after prune: expiredIP is pruned and map key is deleted (anti-memory-leak)
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+
+	if _, exists := limiter.msgTimes[expiredIP]; exists {
+		t.Errorf("expiredIP should be deleted from msgTimes after prune")
+	}
+	if _, exists := limiter.failedAuths[expiredIP]; exists {
+		t.Errorf("expiredIP should be deleted from failedAuths after prune")
+	}
+
+	// Active IP must be preserved
+	if times, exists := limiter.msgTimes[activeIP]; !exists || len(times) == 0 {
+		t.Errorf("activeIP must be retained in msgTimes")
+	}
+	if times, exists := limiter.failedAuths[activeIP]; !exists || len(times) == 0 {
+		t.Errorf("activeIP must be retained in failedAuths")
+	}
+}

@@ -278,6 +278,10 @@ async function handleTunneledRequest(request: Request, initialSession: PortalSes
     headers[key.toLowerCase()] = val;
   });
 
+  if (typeof DecompressionStream !== 'undefined') {
+    headers['x-p2p-client-decompress'] = 'gzip';
+  }
+
   const url = new URL(request.url);
   let path = url.pathname + url.search;
 
@@ -397,15 +401,21 @@ async function handleTunneledRequest(request: Request, initialSession: PortalSes
                           request.destination === 'sharedworker' ||
                           /(?:\.worker|_worker)\.js$/i.test(url.pathname)) &&
                          contentType.includes('javascript');
+        const isModuleWorker = isWorker && url.searchParams.get('_p2p_worker') === 'module';
+
+        const p2pEncoding = (msg.headers?.['x-p2p-content-encoding'] || '').toLowerCase();
+        const isGzipDecompressed = p2pEncoding === 'gzip' && typeof DecompressionStream !== 'undefined';
 
         const respHeaders = new Headers();
         if (msg.headers) {
           for (const [k, v] of Object.entries(msg.headers)) {
             try {
               const lk = k.toLowerCase();
-              // Strip content-length for modified streams (HTML or Worker script injection)
+              // Strip content-length for modified streams (HTML, Worker script injection, or client-decompressed)
               // Preserve content-length for media streaming (206 Range), images, and downloads!
-              if (lk === 'content-length' && (isHtml || isWorker)) continue;
+              if (lk === 'content-length' && (isHtml || isWorker || isGzipDecompressed)) continue;
+              // Strip internal p2p header so consumer web apps don't get confused
+              if (lk === 'x-p2p-content-encoding') continue;
               // Anti-iframe bypass: strip headers that forbid framing or break virtualization scripts
               if (lk === 'x-frame-options' || lk === 'cross-origin-embedder-policy' || lk === 'cross-origin-opener-policy' ||
                   lk === 'content-security-policy' || lk === 'content-security-policy-report-only') continue;
@@ -452,13 +462,19 @@ async function handleTunneledRequest(request: Request, initialSession: PortalSes
         // W3C Fetch Spec: Status 204, 205, 304 MUST have a null body; passing a stream throws a TypeError
         const isNullBodyStatus = msg.status === 204 || msg.status === 205 || msg.status === 304;
 
-        // Inject virtualization patch into HTML documents and Web Workers
+        // Task 1: Hardware-accelerated streaming decompression
+        // Pipe through DecompressionStream before patch injection or returning synthetic Response
         let finalStream: ReadableStream<Uint8Array> = stream;
+        if (!isNullBodyStatus && isGzipDecompressed) {
+          finalStream = (stream as any).pipeThrough(new DecompressionStream('gzip')) as ReadableStream<Uint8Array>;
+        }
+
+        // Inject virtualization patch into HTML documents and Web Workers
         if (!isNullBodyStatus) {
           if (isHtml) {
-            finalStream = injectScriptIntoHtmlStream(stream, session);
+            finalStream = injectScriptIntoHtmlStream(finalStream, session);
           } else if (isWorker) {
-            finalStream = injectScriptIntoWorkerStream(stream);
+            finalStream = injectScriptIntoWorkerStream(finalStream, isModuleWorker);
           }
         }
 
@@ -609,10 +625,13 @@ function injectScriptIntoHtmlStream(
   });
 }
 
-// Injects importScripts("/patch.js"); into the beginning of worker scripts
-function injectScriptIntoWorkerStream(inputStream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+// Injects importScripts("/patch.js"); (for classic workers) or import "/patch.js"; (for ES module workers)
+function injectScriptIntoWorkerStream(
+  inputStream: ReadableStream<Uint8Array>,
+  isModuleWorker: boolean
+): ReadableStream<Uint8Array> {
   const reader = inputStream.getReader();
-  const patchScript = 'importScripts("/patch.js");\n';
+  const patchScript = isModuleWorker ? 'import "/patch.js";\n' : 'importScripts("/patch.js");\n';
   let injected = false;
   const encoder = new TextEncoder();
 

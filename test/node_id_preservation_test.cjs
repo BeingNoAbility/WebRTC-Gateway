@@ -41,6 +41,9 @@ assert(swCode.includes('__P2P_ALLOWED_DOMAINS__') && swCode.includes('subarray')
 assert(swCode.includes('resultingClientId'), 'sw.js includes multi-tab iframe-to-portal session mapping via resultingClientId (P1-2)');
 assert(swCode.includes('matchAll') && swCode.includes('window'), 'sw.js includes Active GC against dead window sessions');
 assert(swCode.includes('clients.get') || swCode.includes('.clients.get'), 'sw.js includes Lazy GC client liveness verification');
+assert(swCode.includes('DecompressionStream') && swCode.includes('x-p2p-client-decompress'), 'sw.js supports hardware streaming decompression and x-p2p-client-decompress (v2.0.0 Task 1)');
+assert(swCode.includes('_p2p_worker') && swCode.includes('import "/patch.js";'), 'sw.js supports dynamic ES module worker import (v2.0.0 Task 2)');
+assert(patchCode.includes('_p2p_worker'), 'patch.js wraps Worker for dynamic module worker adaptation (v2.0.0 Task 2)');
 assert(!portalCode.includes('value="${this.peerId}"'), 'portal.js MUST NOT interpolate peerId into input value attribute (P0-2)');
 assert(!portalCode.includes('value="${this.secret}"'), 'portal.js MUST NOT interpolate secret into input value attribute (P0-2)');
 
@@ -184,6 +187,22 @@ function createMockDOM(options = {}) {
   windowObj.parent = windowObj;
   windowObj.top = windowObj;
 
+  class MockWorker {
+    constructor(scriptURL, options) {
+      this.scriptURL = scriptURL;
+      this.options = options;
+    }
+  }
+  class MockSharedWorker {
+    constructor(scriptURL, options) {
+      this.scriptURL = scriptURL;
+      this.options = options;
+    }
+  }
+
+  windowObj.Worker = MockWorker;
+  windowObj.SharedWorker = MockSharedWorker;
+
   const sandbox = {
     window: windowObj,
     globalThis: windowObj,
@@ -197,6 +216,8 @@ function createMockDOM(options = {}) {
     History,
     WebSocket,
     XMLHttpRequest,
+    Worker: MockWorker,
+    SharedWorker: MockSharedWorker,
     MutationObserver,
     MouseEvent,
     Event,
@@ -258,6 +279,17 @@ function createMockDOM(options = {}) {
   // window.open virtualization
   windowObj.open('https://www.bilibili.com/video/BV999', '_blank');
   assert(windowObj.__lastOpenedUrl && windowObj.__lastOpenedUrl.includes('peer=bili'), 'window.open opens URL with peer=bili');
+
+  // Web Worker & SharedWorker module adaptation virtualization (Task 2)
+  const mw1 = new sandbox.window.Worker('/worker.js', { type: 'module' });
+  assert(mw1.scriptURL.includes('_p2p_worker=module'), 'new Worker with type module appends _p2p_worker=module');
+  const mw2 = new sandbox.window.Worker('/worker.js?env=prod', { type: 'module' });
+  assert(mw2.scriptURL.includes('&_p2p_worker=module'), 'new Worker with query appends &_p2p_worker=module');
+  const cw = new sandbox.window.Worker('/worker.js');
+  assert(!cw.scriptURL.includes('_p2p_worker'), 'classic Worker does not append _p2p_worker');
+
+  const msw = new sandbox.window.SharedWorker('/shared.js', { type: 'module' });
+  assert(msw.scriptURL.includes('_p2p_worker=module'), 'new SharedWorker with type module appends _p2p_worker=module');
 }
 
 // Test Case 2: No injection, but stored active peer in sessionStorage or localStorage

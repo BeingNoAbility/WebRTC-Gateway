@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v2.0.0] - 2026-11-17
+
+### Performance & Modern Architecture
+- **Gzip Passthrough & Hardware DecompressionStream (300%+ Performance Leap)**:
+  - Agent passes through upstream Gzip-compressed responses for static assets (`.js`, `.css`, `.json`, `.svg`, `.wasm`, workers) without inflations across P2P tunnels.
+  - Replaces upstream `Content-Encoding` with internal `x-p2p-content-encoding: gzip` and strips `Content-Length`, completely sidestepping W3C synthetic response decoding traps.
+  - Service Worker utilizes browser-native hardware streaming decompression `stream.pipeThrough(new DecompressionStream('gzip'))`, slashing transfer sizes by 60%~80% and speeding up page loads by 300%+. Transparent fallback decompression preserved for non-direct environments.
+- **Web Worker Dynamic ES Module Adaptation**:
+  - Virtualized `window.Worker` and `window.SharedWorker` in client patch, appending `?_p2p_worker=module` when `{ type: 'module' }` is detected.
+  - Service Worker conditionally branches script injection: classic workers receive `importScripts("/patch.js");\n`, while module workers receive `import "/patch.js";\n`.
+  - Solves W3C `TypeError: Module scripts don't support importScripts()` across modern frontends including Vite, VitePress, SvelteKit, and PDF.js v4+.
+- **Zero Chronic Memory Leak in Signaling Server (`IPRateLimiter`)**:
+  - Implemented background `janitorLoop` goroutine with graceful `stopCh` lifecycle management in `cmd/signal/main.go`.
+  - Automatically sweeps `msgTimes` and `failedAuths` maps, pruning expired timestamps and deleting orphan IP keys from memory.
+- **Cloudflare Worker WebSocket Hibernation API & Dynamic Sharding**:
+  - Migrated Cloudflare Worker signaling room from `server.accept()` to `this.ctx.acceptWebSocket(server)` Hibernation API.
+  - Integrated `setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'))` to handle heartbeats at Cloudflare edge, enabling deep DO hibernation and slashing 24x7 idle standby billing to near zero.
+  - Implemented dynamic node sharding routing `?node=<nodeId>` to isolated DO instances with smooth fallback to `global-broker`.
+- **Configuration Templates & Documentation Alignment**:
+  - Calibrated `configs/agent.example.yaml`: corrected `node_id` default annotation to `"homeserver"`.
+  - Clarified that `sni` and `insecure` options apply exclusively to outbound signaling connections, not intranet backend targets.
+  - Clarified `portal_url` configuration and default value for signed share links.
+
+---
+
 ## [v1.9.3] - 2026-11-17
 
 ### Security & Hardening

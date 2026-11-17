@@ -5,7 +5,8 @@
 # Auto-detection files: agent.yaml, agent.yml, agent.json in current or binary dir.
 # ==============================================================================
 
-# Node ID registered on the signaling server (defaults to hostname if empty)
+# Node ID registered on the signaling server (default: "homeserver")
+# Unique identifier for this device in the signaling cluster.
 node_id: "nas-web"
 
 # WebSocket signaling server URL (required)
@@ -43,10 +44,12 @@ proxy: ""
 #   - "*.hdslb.com"
 #   - "*.bilivideo.com"
 
-# Custom SNI server name for HTTPS targets (leave empty to infer from target host)
+# Optional TLS SNI server name and Host header for signaling connections (env: SNI)
+# Applied to the WebSocket signaling handshake (e.g. CDN optimized IP / domain fronting), NOT the backend target.
 sni: ""
 
-# Skip TLS certificate verification for intranet self-signed targets
+# Skip TLS certificate verification for self-signed signaling servers (env: INSECURE)
+# Applied to the WebSocket signaling handshake, NOT the backend target.
 insecure: false
 
 # STUN servers for WebRTC ICE candidate discovery (string or list format supported)
@@ -65,6 +68,6 @@ max_streams: 512
 # Prometheus metrics scrape endpoint (e.g. ":9091", leave empty to disable)
 metrics_addr: ":9091"
 
-# Signaling web portal URL printed in CLI QR codes and share links
-# (inferred from signal URL if empty, e.g. wss://host/ws -> https://host/)
+# Base URL of the Web Portal used for generating temporary HMAC-SHA256 signed share links (-sign-link)
+# (default: "https://your-portal-domain.com", env: PORTAL_URL)
 portal_url: ""
