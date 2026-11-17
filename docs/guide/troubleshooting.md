@@ -54,7 +54,7 @@
 - **排查清单**：
   1. **检查控制面集群密钥**：确认信令服务端的 `-signal-secret` 与 Agent 启动时的 `-signal-secret` 完全一致；
   2. **检查数据面访客口令**：若 Agent 配置了 `-access-secret`，访客必须在弹窗中输入该口令，或使用对应的 HMAC-SHA256 签名分享链接（`#nodeId?exp=xxx&sign=yyy`）；
-  3. **升级提示**：旧版 `-secret` 已在 v1.5.0+ 废弃，请勿在 Agent 中继续传递 `-secret`。
+  3. **升级提示**：旧版 `-secret` 与 `SECRET` 已彻底废弃并完全移除，请勿在 Agent 或 Signal 服务端中继续传递 `-secret`，必须使用明确语义的 `-signal-secret`（集群注册）与 `-access-secret`（访客口令）。
 
 ---
 

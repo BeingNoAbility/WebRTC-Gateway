@@ -83,7 +83,7 @@ func (s *Session) Ping() error {
 
 type SignalBroker struct {
 	mu              sync.RWMutex
-	serverSecret    string              // Global server secret (if set via -signal-secret / -secret / SIGNAL_SECRET)
+	serverSecret    string              // Global server secret (if set via -signal-secret / SIGNAL_SECRET)
 	agents          map[string]*Session // node_id -> Session
 	nodeSecrets     map[string]string   // node_id -> registered secret (anti-hijack)
 	nodeVisitorAuth map[string]bool     // node_id -> whether visitors require authentication
@@ -104,7 +104,7 @@ func (b *SignalBroker) RegisterAgent(nodeID, secret string, requireVisitorAuth *
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// 1. Verify global server secret if server was started with -signal-secret / -secret
+	// 1. Verify global server secret if server was started with -signal-secret
 	if b.serverSecret != "" && subtle.ConstantTimeCompare([]byte(secret), []byte(b.serverSecret)) != 1 {
 		return fmt.Errorf("unauthorized: server secret mismatch")
 	}
@@ -724,8 +724,6 @@ func printSignalUsage(out io.Writer) {
 	fmt.Fprintf(out, "Security & Access Control Options:\n")
 	fmt.Fprintf(out, "  -signal-secret string\n")
 	fmt.Fprintf(out, "        Server-wide pre-shared secret required for agent registration and anti-hijacking (env: SIGNAL_SECRET)\n")
-	fmt.Fprintf(out, "  -secret string\n")
-	fmt.Fprintf(out, "        Alias for -signal-secret (env: SECRET)\n")
 	fmt.Fprintf(out, "  -trusted-proxies string\n")
 	fmt.Fprintf(out, "        Comma-separated trusted reverse proxy CIDRs/IPs for real client IP extraction via X-Forwarded-For\n")
 	fmt.Fprintf(out, "        (env: TRUSTED_PROXIES, default: loopback & RFC1918 private CIDRs; set to 'none' to disable)\n")
@@ -766,8 +764,13 @@ func main() {
 		printSignalUsage(flag.CommandLine.Output())
 	}
 
-	// 0. Early check for help / version
+	// 0. Early check for help / version / deprecated flags
 	for _, arg := range os.Args[1:] {
+		if arg == "-secret" || strings.HasPrefix(arg, "-secret=") || arg == "--secret" || strings.HasPrefix(arg, "--secret=") {
+			fmt.Fprintln(os.Stderr, "Error: flag -secret has been deprecated and removed.")
+			fmt.Fprintln(os.Stderr, "  - Use -signal-secret (SIGNAL_SECRET) for signaling cluster admission.")
+			os.Exit(1)
+		}
 		if arg == "help" {
 			printSignalUsage(os.Stdout)
 			os.Exit(0)
@@ -806,8 +809,6 @@ func main() {
 		}
 		if fileCfg.SignalSecret != "" {
 			cfgSignalSecret = fileCfg.SignalSecret
-		} else if fileCfg.Secret != "" {
-			cfgSignalSecret = fileCfg.Secret
 		}
 		if fileCfg.StaticDir != "" {
 			cfgStatic = fileCfg.StaticDir
@@ -852,8 +853,6 @@ func main() {
 	}
 	if env := os.Getenv("SIGNAL_SECRET"); env != "" {
 		cfgSignalSecret = env
-	} else if env := os.Getenv("SECRET"); env != "" {
-		cfgSignalSecret = env
 	}
 	if env := os.Getenv("MAX_IP_CONNS"); env != "" {
 		if v, err := strconv.Atoi(env); err == nil && v > 0 {
@@ -874,7 +873,6 @@ func main() {
 	tlsKey := flag.String("tls-key", cfgTLSKey, "Path to TLS private key PEM file (e.g. key.pem or privkey.pem, env: TLS_KEY)")
 	tlsAuto := flag.Bool("tls-auto", cfgTLSAuto, "Automatically generate in-memory self-signed ECDSA certificate for local/LAN HTTPS Secure Context (env: TLS_AUTO)")
 	signalSecret := flag.String("signal-secret", cfgSignalSecret, "Server-wide pre-shared secret for agent registration & anti-hijacking (env: SIGNAL_SECRET)")
-	serverSecretAlias := flag.String("secret", "", "Alias for -signal-secret (env: SECRET)")
 	configFlag := flag.String("config", "", "Path to configuration file (.yaml, .yml, or .json, env: CONFIG_FILE)")
 	maxIPConns := flag.Int("max-ip-conns", cfgMaxIPConns, "Maximum concurrent WebSocket connections per client IP (env: MAX_IP_CONNS)")
 	trustedProxies := flag.String("trusted-proxies", cfgTrustedProxies, "Comma-separated trusted proxy CIDRs/IPs for real client IP extraction (env: TRUSTED_PROXIES)")
@@ -896,9 +894,6 @@ func main() {
 	}
 
 	finalSecret := *signalSecret
-	if *serverSecretAlias != "" {
-		finalSecret = *serverSecretAlias
-	}
 
 	trustedPrefixes, err := ParseTrustedProxies(*trustedProxies)
 	if err != nil {

@@ -775,3 +775,15 @@ func TestIPRateLimiter_JanitorPrunesExpired(t *testing.T) {
 		t.Errorf("activeIP must be retained in failedAuths")
 	}
 }
+
+func TestSignalServer_FailFastDeprecatedSecret(t *testing.T) {
+	cmd := exec.Command("go", "run", ".", "-secret", "old-secret")
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("Expected signal server to fail fast on deprecated -secret, but it succeeded: %s", string(out))
+	}
+	if !strings.Contains(string(out), "flag -secret has been deprecated and removed") {
+		t.Errorf("Expected deprecation error message in output, got:\n%s", string(out))
+	}
+}

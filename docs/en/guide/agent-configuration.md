@@ -29,7 +29,7 @@ This document provides a comprehensive reference for all command-line flags and 
 | CLI Flag | Environment Variable | Default | Description |
 | :--- | :--- | :---: | :--- |
 | `-addr` | `ADDR` | `:8888` | Address and port to bind the server on. |
-| `-secret` | `SECRET` | `""` | Cluster signaling authorization secret. |
+| `-signal-secret` | `SIGNAL_SECRET` | `""` | Cluster signaling authorization secret (-secret is fully deprecated and removed). |
 | `-tls-cert` | `TLS_CERT` | `""` | Path to TLS certificate PEM file. |
 | `-tls-key` | `TLS_KEY` | `""` | Path to TLS private key PEM file. |
 | `-tls-auto` | `TLS_AUTO` | `false` | Auto-generate self-signed ECDSA SAN certificates for LAN IPs. |

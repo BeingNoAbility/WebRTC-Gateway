@@ -192,8 +192,8 @@ The Agent supports both command-line flags and environment variables:
 | `-portal-url` | - | `https://your-portal-domain.com` | Base URL of Web Portal used for `-sign-link` generation |
 
 > [!NOTE]
-> **Deprecation of `-secret` / `SECRET` (v1.5.0+)**:
-> The ambiguous `-secret` and `SECRET` flags are fully deprecated. If passed to the Agent, it fails fast with instructions to use `-signal-secret` (cluster admission) or `-access-secret` (visitor password).
+> **Complete Deprecation of `-secret` / `SECRET` (v1.5.0+)**:
+> The ambiguous `-secret` and `SECRET` flags are fully deprecated and removed with zero compatibility aliases. Passing `-secret` to either Agent or Signal server will fail fast and terminate with instructions to use `-signal-secret` (cluster admission) or `-access-secret` (visitor password).
 
 ---
 
@@ -203,7 +203,7 @@ The Agent supports both command-line flags and environment variables:
 | :--- | :--- | :--- | :--- |
 | `-addr` | `ADDR` / `PORT` | `:8888` | Listening port and address for HTTP/HTTPS & WebSocket |
 | `-config` | `CONFIG_FILE` / `CONFIG` | `""` | Optional YAML / JSON configuration file path (auto-detects `./server.yaml`, `./server.yml`, `./server.json`) |
-| `-signal-secret` | `SIGNAL_SECRET` / `SECRET` | `""` | Optional global cluster admission secret token (accepts `-secret` as alias) |
+| `-signal-secret` | `SIGNAL_SECRET` | `""` | Optional global cluster admission secret token (-secret is fully deprecated and removed) |
 | `-tls-cert` | `TLS_CERT` | `""` | Path to TLS certificate PEM file |
 | `-tls-key` | `TLS_KEY` | `""` | Path to TLS private key PEM file |
 | `-tls-auto` | `TLS_AUTO` | `false` | Automatically generates in-memory ECDSA SAN certificates for LAN IPs |

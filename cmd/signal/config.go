@@ -13,7 +13,6 @@ import (
 type ServerConfigFile struct {
 	Addr           string `json:"addr" yaml:"addr"`
 	SignalSecret   string `json:"signal_secret" yaml:"signal_secret"`
-	Secret         string `json:"secret" yaml:"secret"` // alias for signal_secret
 	StaticDir      string `json:"static" yaml:"static"`
 	TLSCert        string `json:"tls_cert" yaml:"tls_cert"`
 	TLSKey         string `json:"tls_key" yaml:"tls_key"`

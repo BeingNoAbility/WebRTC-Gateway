@@ -195,8 +195,8 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-h`, `-help` | - | `false` | 显示完整命令行帮助文档与运行模式示例并退出 |
 
 > [!NOTE]
-> **关于 `-secret` / `SECRET` 的升级说明 (v1.5.0+)**：
-> 旧版模糊命名的 `-secret` 与 `SECRET` 现已彻底解耦并废弃。若在 Agent 启动时传入，程序将直接退出并提示改用 `-signal-secret`（集群注册）或 `-access-secret`（访客口令）。
+> **关于 `-secret` / `SECRET` 的彻底弃用说明 (v1.5.0+)**：
+> 旧版模糊命名的 `-secret` 与 `SECRET` 现已彻底解耦并完全弃用（零兼容别名）。无论是 Agent 还是 Signal 服务端，传入 `-secret` 均会直接阻断退出（Fail-Fast），提示改用明确语义的 `-signal-secret`（集群注册）或 `-access-secret`（访客口令）。
 
 ### 6. 一体化服务端 (Signal Server) 命令行参数全量说明
 
@@ -204,7 +204,7 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | :--- | :--- | :--- | :--- |
 | `-addr` | `ADDR` / `PORT` | `:8888` | 服务端 HTTP/HTTPS 与 WebSocket 监听端口及地址 |
 | `-config` | `CONFIG_FILE` / `CONFIG` | `""` | 可选的 YAML / JSON 配置文件路径（默认自动探测 `./server.yaml`、`./server.yml`、`./server.json`） |
-| `-signal-secret` | `SIGNAL_SECRET` / `SECRET` | `""` | 可选的服务端全局集群准入密钥，仅允许匹配口令的 Agent 注册（兼容别名 `-secret`） |
+| `-signal-secret` | `SIGNAL_SECRET` | `""` | 可选的服务端全局集群准入密钥，仅允许匹配口令的 Agent 注册（-secret 已彻底废弃移除） |
 | `-tls-cert` | `TLS_CERT` | `""` | 加载的 TLS 证书 PEM 文件路径（如 fullchain.pem，开启原生 HTTPS） |
 | `-tls-key` | `TLS_KEY` | `""` | 加载的 TLS 私钥 PEM 文件路径（如 privkey.pem，开启原生 HTTPS） |
 | `-tls-auto` | `TLS_AUTO` | `false` | 一键内存自动签发包含当前局域网所有真实 IP 的 ECDSA SAN 证书 |
@@ -506,7 +506,7 @@ docker run --rm -e ACCESS_SECRET=your_visitor_password \
 | :--- | :--- | :--- | :--- |
 | `ADDR` / `PORT` | `:8888` | `-addr` | HTTP/WS 或 HTTPS/WSS 监听地址（例如 `:8888`、`:443`） |
 | `CONFIG_FILE` / `CONFIG` | 空 | `-config` | YAML / JSON 配置文件路径 |
-| `SIGNAL_SECRET` / `SECRET` | 空 | `-signal-secret` | 可选的服务端全局准入预共享密钥，仅允许匹配口令的 Agent 注册 |
+| `SIGNAL_SECRET` | 空 | `-signal-secret` | 可选的服务端全局准入预共享密钥，仅允许匹配口令的 Agent 注册 |
 | `TLS_AUTO` | `false` | `-tls-auto` | 是否在内存中自动签发覆盖本机所有局域网真实 IP 的 ECDSA SAN 证书 |
 | `TLS_CERT` | 空 | `-tls-cert` | 容器内的 SSL/TLS 证书文件 PEM 路径（需挂载外部证书） |
 | `TLS_KEY` | 空 | `-tls-key` | 容器内的 SSL/TLS 私钥文件 PEM 路径 |
