@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v2.0.3] - 2026-11-18
+
+### Security & Hardening
+- **SSRF Defense-in-Depth & Boundary Hardening (F-01)**:
+  - Blocked obfuscation and control characters (`@`, `\`, `/`, whitespace) in target hosts.
+  - Eliminated fuzzy subdomain wildcarding when the destination is an IP address or localhost.
+  - Expanded restricted IP ranges with `0.0.0.0/8`, multicast, broadcast, IPv4-mapped (`::ffff:`), NAT64 (`64:ff9b::/96`), and 6to4 (`2002::/16`).
+  - Stripped ambient environment proxies (`Proxy: nil`) to prevent accidental internal network reconnaissance.
+- **SDP DTLS Certificate Fingerprint Binding & Credential Derivation (F-02, F-04)**:
+  - Replaced plaintext secret transmission in signaling offers with HMAC-SHA256 signature bound to the client's local SDP DTLS certificate fingerprint (`sign = HMAC(authKey, peerId:exp:sdpFingerprint)`).
+  - Implemented Web Crypto single-direction key derivation (`authKey = HMAC(secret, "node-auth:" + peerId)`) on the portal, purging plaintext secrets from DOM and memory immediately upon entry.
+  - Strictly enforced positive expiration timestamps (`exp <= 0` rejected), closing timestamp bypass vulnerabilities.
+  - Hardened signaling brokers (Go and Cloudflare Worker) against unauthorized secret injection on active unauthenticated nodes.
+- **Cloudflare Worker TDZ Crash Fix & Anti-Brute-Force Rate Limiting (F-03, F-08)**:
+  - Fixed variable declaration order for `requireVisitorAuth` to resolve Temporal Dead Zone `ReferenceError` during agent registration.
+  - Added automated V8 syntax and TDZ guardrail (`test_worker_syntax.cjs`) to CI test pipelines.
+  - Added IP-based authentication failure rate limiting (429 Too Many Requests after 10 failures) and constant-time secret comparison (`crypto.subtle.timingSafeEqual`).
+- **Strict TLS Certificate Verification by Default (F-05)**:
+  - Eliminated hardcoded `InsecureSkipVerify: true`, defaulting to strict system CA root verification.
+  - Restricted insecure TLS skipping strictly to target host endpoints when `-insecure` is explicitly passed; external `--p2p-proxy` traffic strictly verifies CA certificates.
+- **FileProxy 301 Infinite Loop & Symlink Escape Resolution (F-06)**:
+  - Anchored physical root path via `filepath.EvalSymlinks`.
+  - Replaced `http.ServeFile` with `http.ServeContent` and custom directory rendering to eliminate `/subdir/` redirect recursion and enforce sandbox escape verification on `index.html`.
+- **Mux Backpressure Deadlock Fix, Stream ID Wraparound & Lifecycle Release (F-07, F-10)**:
+  - Fixed condition variable deadlock in `writeFrame` by checking `m.closed` and stream context cancellation before `m.bpCond.Wait()`.
+  - Explicitly invoked `mux.Close()` on session teardown and graceful shutdown; tightened unknown probe header buffer limit from 16MB to 64KB.
+  - Handled 32-bit stream ID wraparound beyond `0xFFFF0000` in both Go and TypeScript mux engines with tombstone resets.
+- **Bidirectional Cookie Virtualization & Namespace Isolation (F-09)**:
+  - Implemented virtualized `document.cookie` getter/setter in `ws_patch.ts` with transparent `__p2p_${nodeId}_` prefixing.
+  - Added `writeScopedCookie` in portal to ensure non-HttpOnly backend cookies (CSRF tokens) are properly namespaced.
+  - Fixed node switching dead code to ensure `clientToken` and derived keys are cleanly isolated per node.
+- **Quirks Mode Prevention in HTML Stream Injection (F-10)**:
+  - Positioned script injection strictly after `<!DOCTYPE ...>` when `<head>` and `<html>` are absent, preserving W3C standard rendering mode.
+
 ## [v2.0.2] - 2026-11-17
 
 ### Added & Enhanced

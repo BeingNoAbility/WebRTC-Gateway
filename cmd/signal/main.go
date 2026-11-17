@@ -717,7 +717,7 @@ func runHealthCheck(addr string, preferTLS bool, customURL string) int {
 }
 
 // Version represents the current release version of WebRTC Gateway Signal Server.
-var Version = "v2.0.2"
+var Version = "v2.0.3"
 
 func printSignalUsage(out io.Writer) {
 	fmt.Fprintf(out, "WebRTC Gateway Signal (%s)\n", Version)
