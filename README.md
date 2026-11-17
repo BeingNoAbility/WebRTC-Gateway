@@ -575,6 +575,30 @@ docker run -d --name webrtc-agent --restart unless-stopped \
   ghcr.io/beingnoability/webrtc-p2p-agent:latest
 ```
 
+#### 4. 容器安全加固与非特权用户支持 (`--user` / Non-Root)
+
+- **默认非特权运行 (Least Privilege by Default)**：
+  - 官方镜像默认已剔除 root 特权，以独立非特权用户 `appuser` (UID: 10001, GID: 10001) 运行；
+  - 严格遵循 CIS Docker Benchmark 与 Kubernetes Restricted Pod Security Standard，杜绝潜在的容器逃逸与提权风险。
+- **全格式支持 `--user` 任意指定身份 (NAS / 宿主机权限对齐)**：
+  - 在群晖 Synology、威联通 QNAP、Unraid 或 Linux 服务器上挂载本地目录/文件时，可直接传入 `--user $(id -u):$(id -g)`、`--user 1000:1000` 或 `--user nobody`，彻底杜绝权限不足或文件属主冲突：
+  ```bash
+  # 以 NAS 宿主机 1000:1000 身份启动 Agent 并只读挂载媒体库
+  docker run -d --name webrtc-agent --restart unless-stopped \
+    --user 1000:1000 \
+    --net=host \
+    -v /volume1/media:/media:ro \
+    -e NODE_ID=nas-vault \
+    -e SIGNAL_URL=wss://p2p.yourdomain.com/ws \
+    -e DIR_PATH=/media \
+    -e ACCESS_SECRET=YourPassword123 \
+    ghcr.io/beingnoability/webrtc-p2p-agent:latest
+  ```
+- **特权端口能力集绑定 (`CAP_NET_BIND_SERVICE`)**：
+  - `server` 镜像在构建时通过 Linux File Capability 为 `/app/server` 授予 `cap_net_bind_service=+ep`，即便以非特权用户身份运行，也支持直接在容器内监听 `:443` 或 `:80` 等低位特权端口，无需赋予容器 root 权限。
+- **纯内存只读文件系统兼容 (`--read-only`)**：
+  - 服务端与 Agent 全链路采用内存流式无状态调度，不向磁盘写任何临时文件，原生支持 `docker run --read-only` 与 Kubernetes `readOnlyRootFilesystem: true` 金融级沙箱加固。
+
 ---
 
 ## 💻 开发者指南 (Developer Guide)

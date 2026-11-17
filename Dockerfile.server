@@ -46,10 +46,18 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # ------------------------------------------------------------------------------
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata curl
+RUN apk add --no-cache ca-certificates tzdata libcap-setcap && \
+    addgroup -g 10001 -S appgroup && \
+    adduser -u 10001 -S appuser -G appgroup -H -D
 
 WORKDIR /app
 COPY --from=server-builder /build/server /app/server
+
+# Grant cap_net_bind_service so unprivileged user can bind to privileged ports (<1024, e.g. :443, :80)
+RUN setcap 'cap_net_bind_service=+ep' /app/server && \
+    apk del libcap-setcap && \
+    chown -R appuser:appgroup /app && \
+    chmod 0755 /app /app/server
 
 # Default environment variables
 ENV ADDR=:8888 \
@@ -64,6 +72,10 @@ ENV ADDR=:8888 \
     CONFIG_FILE=""
 
 EXPOSE 8888 443
+
+# Drop root privileges by default (UID 10001: appuser, GID 10001: appgroup)
+# Fully compatible with arbitrary --user <uid>:<gid> specifications at runtime.
+USER 10001:10001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD /app/server -health || exit 1

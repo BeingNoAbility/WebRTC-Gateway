@@ -29,10 +29,15 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # ------------------------------------------------------------------------------
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -g 10001 -S appgroup && \
+    adduser -u 10001 -S appuser -G appgroup -H -D
 
 WORKDIR /app
 COPY --from=agent-builder /build/agent /app/agent
+
+RUN chown -R appuser:appgroup /app && \
+    chmod 0755 /app /app/agent
 
 # Default environment variables for agent
 ENV NODE_ID=homeserver \
@@ -53,5 +58,9 @@ ENV NODE_ID=homeserver \
     STUN_SERVERS="" \
     MAX_STREAMS=512 \
     METRICS_ADDR=""
+
+# Drop root privileges by default (UID 10001: appuser, GID 10001: appgroup)
+# Fully compatible with arbitrary --user <uid>:<gid> specifications at runtime.
+USER 10001:10001
 
 ENTRYPOINT ["/app/agent"]

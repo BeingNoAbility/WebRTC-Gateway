@@ -26,6 +26,13 @@ services:
     image: ghcr.io/beingnoability/webrtc-p2p-server:latest
     container_name: webrtc-p2p-server
     restart: unless-stopped
+
+    # [安全加固 - 非特权用户运行]
+    # 镜像默认已以非 root 身份 (UID 10001: appuser, GID 10001: appgroup) 运行。
+    # 若需在宿主机/NAS 上指定为特定用户（如当前用户 1000:1000），可直接配置：
+    # user: "1000:1000"
+    # user: "${UID:-10001}:${GID:-10001}"
+
     healthcheck:
       test: ["CMD", "/app/server", "-health"]
       interval: 30s
@@ -117,6 +124,13 @@ services:
     image: ghcr.io/beingnoability/webrtc-p2p-agent:latest
     container_name: webrtc-p2p-agent
     restart: unless-stopped
+
+    # [安全加固 - 非特权用户运行]
+    # 镜像默认已以非 root 身份 (UID 10001: appuser, GID 10001: appgroup) 运行。
+    # 当挂载宿主机只读目录 (-dir /data) 或单文件 (-file /data/file.zip) 时，
+    # 强烈推荐指定为与宿主机挂载文件属主一致的 UID:GID，防止只读文件读取权限受限：
+    # user: "1000:1000"
+    # user: "${UID:-10001}:${GID:-10001}"
 
     # --------------------------------------------------------------------------
     # 网络模式建议：
