@@ -31,28 +31,38 @@ export class SignalingRoom extends DurableObject {
     this.ipConns = new Map();
     // failedAttempts: clientIP (string) -> count (number)
     this.failedAttempts = new Map();
+    this.stateRestored = false;
   }
 
   // Restore in-memory state from WebSocket attachments if Durable Object woke up from hibernation
   ensureState() {
-    if (this.agents.size === 0 && this.clients.size === 0 && this.ctx.getWebSockets) {
-      for (const ws of this.ctx.getWebSockets()) {
-        try {
-          const att = ws.deserializeAttachment();
-          if (!att) continue;
-          if (att.role === 'agent' && att.agentNodeId) {
-            this.agents.set(att.agentNodeId, ws);
-            this.agentNodeIds.set(ws, att.agentNodeId);
-          } else if (att.role === 'client' && att.sessionId) {
-            this.clients.set(ws, { sessionId: att.sessionId, targetNodeId: att.targetNodeId });
-            this.clientBySession.set(att.sessionId, ws);
-          }
-        } catch {}
-      }
+    if (this.stateRestored) return;
+    this.stateRestored = true;
+    if (!this.ctx.getWebSockets) return;
+
+    this.ipConns.clear();
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        const att = ws.deserializeAttachment();
+        if (!att) continue;
+        if (att.clientIP) {
+          this.ipConns.set(att.clientIP, (this.ipConns.get(att.clientIP) || 0) + 1);
+        }
+        if (att.role === 'agent' && att.agentNodeId) {
+          this.agents.set(att.agentNodeId, ws);
+          this.agentNodeIds.set(ws, att.agentNodeId);
+          if (att.secret) this.nodeSecrets.set(att.agentNodeId, att.secret);
+          if (att.requireVisitorAuth !== undefined) this.nodeVisitorAuth.set(att.agentNodeId, att.requireVisitorAuth);
+        } else if (att.role === 'client' && att.sessionId) {
+          this.clients.set(ws, { sessionId: att.sessionId, targetNodeId: att.targetNodeId });
+          this.clientBySession.set(att.sessionId, ws);
+        }
+      } catch {}
     }
   }
 
   async fetch(request) {
+    this.ensureState();
     const clientIP = request.headers.get('cf-connecting-ip') || 'unknown';
     const currentConns = this.ipConns.get(clientIP) || 0;
     if (currentConns >= 64) {
@@ -78,6 +88,7 @@ export class SignalingRoom extends DurableObject {
       role: '',
       agentNodeId: '',
       targetNodeId: '',
+      ipCleaned: false,
     });
 
     return new Response(null, {
@@ -154,6 +165,8 @@ export class SignalingRoom extends DurableObject {
 
           att.role = 'agent';
           att.agentNodeId = nodeId;
+          att.secret = secret;
+          att.requireVisitorAuth = requireVisitorAuth;
           ws.serializeAttachment(att);
 
           this.agents.set(nodeId, ws);
@@ -287,16 +300,18 @@ export class SignalingRoom extends DurableObject {
   }
 
   handleWSClose(ws) {
+    this.ensureState();
     let att = null;
     try {
       att = ws.deserializeAttachment();
     } catch {}
 
-    const clientIP = att?.clientIP;
-    if (clientIP) {
-      const c = this.ipConns.get(clientIP) || 0;
-      if (c <= 1) this.ipConns.delete(clientIP);
-      else this.ipConns.set(clientIP, c - 1);
+    if (att && !att.ipCleaned && att.clientIP) {
+      att.ipCleaned = true;
+      try { ws.serializeAttachment(att); } catch {}
+      const c = this.ipConns.get(att.clientIP) || 0;
+      if (c <= 1) this.ipConns.delete(att.clientIP);
+      else this.ipConns.set(att.clientIP, c - 1);
     }
 
     const role = att?.role || '';

@@ -516,6 +516,96 @@ func TestHTTPProxy_GzipPassthrough(t *testing.T) {
 	}
 }
 
+// 5c. Test HEAD request disables Gzip passthrough to prevent browser DecompressionStream truncation errors
+func TestHTTPProxy_HeadRequestDisablesGzipPassthrough(t *testing.T) {
+	clientDecompressHeaderReceived := ""
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clientDecompressHeaderReceived = r.Header.Get("x-p2p-client-decompress")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		// HEAD request returns no body
+	}))
+	defer ts.Close()
+
+	cm := NewSessionCookieManager()
+	hp, err := NewHTTPProxy(ts.URL, cm)
+	if err != nil {
+		t.Fatalf("NewHTTPProxy failed: %v", err)
+	}
+
+	tClient, tAgent := newMemoryTransportPair()
+	defer tClient.Close()
+	defer tAgent.Close()
+
+	clientMux := mux.NewMux(tClient, true)
+	agentMux := mux.NewMux(tAgent, false)
+
+	tClient.mu.Lock()
+	tClient.onMsg = func(d []byte) { _ = clientMux.HandleIncomingMessage(d) }
+	tClient.mu.Unlock()
+
+	tAgent.mu.Lock()
+	tAgent.onMsg = func(d []byte) { _ = agentMux.HandleIncomingMessage(d) }
+	tAgent.mu.Unlock()
+
+	defer clientMux.Close()
+	defer agentMux.Close()
+
+	go func() {
+		stream, err := agentMux.AcceptStream(context.Background())
+		if err != nil {
+			return
+		}
+		hp.HandleStream("test-session-head-gz", "127.0.0.1", stream)
+	}()
+
+	clientStream, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+
+	reqMeta := RequestMetadata{
+		Method: "HEAD",
+		Path:   "/assets/bundle.js",
+		Headers: map[string]string{
+			"Accept-Encoding":          "gzip",
+			"x-p2p-client-decompress": "gzip",
+		},
+	}
+	reqData, _ := json.Marshal(reqMeta)
+	if err := clientStream.WriteHeaders(reqData); err != nil {
+		t.Fatalf("WriteHeaders failed: %v", err)
+	}
+	_ = clientStream.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	respHeadersBytes, err := clientStream.ReadHeaders(ctx)
+	if err != nil {
+		t.Fatalf("ReadHeaders failed: %v", err)
+	}
+
+	var respMeta ResponseMetadata
+	if err := json.Unmarshal(respHeadersBytes, &respMeta); err != nil {
+		t.Fatalf("Unmarshal respMeta failed: %v", err)
+	}
+
+	if respMeta.Status != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", respMeta.Status)
+	}
+
+	// Internal x-p2p-client-decompress must be stripped from upstream backend request
+	if clientDecompressHeaderReceived != "" {
+		t.Errorf("x-p2p-client-decompress leaked to backend: %q", clientDecompressHeaderReceived)
+	}
+
+	// HEAD request must not enable x-p2p-content-encoding gzip passthrough
+	if p2pEnc := respMeta.Headers["x-p2p-content-encoding"]; p2pEnc != "" {
+		t.Errorf("HEAD request must not set x-p2p-content-encoding, got %q", p2pEnc)
+	}
+}
+
 // 6. Test Range request bypasses Gzip to allow proper 206 binary streaming
 func TestHTTPProxy_RangeRequestBypassesGzip(t *testing.T) {
 	acceptEncodingReceived := ""

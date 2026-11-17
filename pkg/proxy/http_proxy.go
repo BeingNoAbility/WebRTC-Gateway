@@ -346,6 +346,8 @@ func (p *HTTPProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream)
 	req.Header.Del("Proxy-Connection")
 	req.Header.Del("Transfer-Encoding")
 	req.Header.Del("Upgrade")
+	req.Header.Del("x-p2p-client-decompress")
+	req.Header.Del("x-p2p-dest-host")
 
 	// Standard reverse proxy headers
 	req.Host = targetHost
@@ -431,9 +433,15 @@ func (p *HTTPProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream)
 	// Check if client supports browser-side hardware streaming decompression (DecompressionStream)
 	clientSupportsDecompress := strings.Contains(strings.ToLower(reqMeta.Headers["x-p2p-client-decompress"]), "gzip")
 
-	// Handle gzip compression from backend
+	// Handle gzip compression from backend:
+	// Exclude HEAD requests and bodyless responses (204, 304, Content-Length == 0)
+	// from Gzip decompression/passthrough to prevent browser DecompressionStream truncation errors.
 	var respBody io.Reader = resp.Body
-	isGzip := strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip")
+	isGzip := method != http.MethodHead &&
+		resp.StatusCode != http.StatusNoContent &&
+		resp.StatusCode != http.StatusNotModified &&
+		resp.ContentLength != 0 &&
+		strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip")
 	gzipPassthrough := false
 
 	if isGzip {

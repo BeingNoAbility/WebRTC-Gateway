@@ -262,6 +262,12 @@ export class P2PMux {
 
       let stream = this.streams.get(frame.streamId);
       if (!stream) {
+        // Strict stream ID parity check:
+        // Client only accepts even stream IDs (0, 2, 4...) initiated by Agent peer.
+        // Drops stray orphan frames of client-initiated odd streams (1, 3, 5...) that were already closed locally.
+        const isExpectedPeerId = this.isClient ? frame.streamId % 2 === 0 : frame.streamId % 2 === 1;
+        if (!isExpectedPeerId) return;
+
         if (
           frame.type === FrameType.HEADERS ||
           frame.type === FrameType.DATA ||

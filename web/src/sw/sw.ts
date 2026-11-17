@@ -459,13 +459,13 @@ async function handleTunneledRequest(request: Request, initialSession: PortalSes
           },
         });
 
-        // W3C Fetch Spec: Status 204, 205, 304 MUST have a null body; passing a stream throws a TypeError
-        const isNullBodyStatus = msg.status === 204 || msg.status === 205 || msg.status === 304;
+        // W3C Fetch Spec: Status 204, 205, 304 and HEAD requests MUST have a null body; passing a stream throws a TypeError
+        const isNullBodyStatus = msg.status === 204 || msg.status === 205 || msg.status === 304 || request.method === 'HEAD';
 
         // Task 1: Hardware-accelerated streaming decompression
         // Pipe through DecompressionStream before patch injection or returning synthetic Response
         let finalStream: ReadableStream<Uint8Array> = stream;
-        if (!isNullBodyStatus && isGzipDecompressed) {
+        if (!isNullBodyStatus && request.method !== 'HEAD' && isGzipDecompressed) {
           finalStream = (stream as any).pipeThrough(new DecompressionStream('gzip')) as ReadableStream<Uint8Array>;
         }
 
