@@ -117,17 +117,7 @@ class PortalApp {
     this.initialSubpath = config.path || '/';
 
     // Long-lived client token for persisting HttpOnly sessions across page reloads (F5), isolated by peerId
-    let token = '';
-    try {
-      token = sessionStorage.getItem('p2p_client_token_' + this.peerId) || '';
-      if (!token) {
-        token = 'cl_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36));
-        sessionStorage.setItem('p2p_client_token_' + this.peerId, token);
-      }
-    } catch {
-      token = 'cl_' + Math.random().toString(36).substring(2);
-    }
-    this.clientToken = token;
+    this.updateClientToken(this.peerId);
 
     if (this.peerVal) this.peerVal.textContent = this.peerId;
     if (this.signalVal) this.signalVal.textContent = this.signalUrl;
@@ -198,6 +188,38 @@ class PortalApp {
       }
     })();
     return this.authKeyPromise;
+  }
+
+  // Dynamic client token management for session isolation across node changes
+  private updateClientToken(nodeId: string) {
+    let token = '';
+    try {
+      token = sessionStorage.getItem('p2p_client_token_' + nodeId) || '';
+      if (!token) {
+        token = 'cl_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36));
+        sessionStorage.setItem('p2p_client_token_' + nodeId, token);
+      }
+    } catch {
+      token = 'cl_' + Math.random().toString(36).substring(2);
+    }
+    this.clientToken = token;
+  }
+
+  // Scoped Cookie writer: automatically prefixes backend non-HttpOnly cookies with __p2p_${nodeId}_ for isolation
+  private writeScopedCookie(rawCookie: string) {
+    if (!rawCookie || !this.peerId) return;
+    const prefix = `__p2p_${this.peerId}_`;
+    const parts = rawCookie.split(';');
+    const firstPart = parts[0].trim();
+    const eqIdx = firstPart.indexOf('=');
+    if (eqIdx === -1) return;
+    const k = firstPart.slice(0, eqIdx).trim();
+    const v = firstPart.slice(eqIdx + 1);
+    const remainder = parts.slice(1).join(';');
+    const finalKey = k.startsWith('__p2p_') ? k : `${prefix}${k}`;
+    try {
+      document.cookie = `${finalKey}=${v}${remainder ? ';' + remainder : ''}`;
+    } catch {}
   }
 
   // Extracts explicit Node ID from subdomain with ".p2p." delimiter (e.g. bili.p2p.example.com)
@@ -495,6 +517,7 @@ class PortalApp {
           this.shareExp = newExp;
           this.shareSign = newSign;
           this.authKey = (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('p2p_auth_' + newHash) : '') || '';
+          this.updateClientToken(newHash);
           if (newSecret) {
             this.initAuthKey(newSecret);
             try {
@@ -1459,10 +1482,11 @@ class PortalApp {
 
       this.peerId = newNodeId;
       this.signalUrl = newSignalUrl;
+      this.updateClientToken(newNodeId);
       if (newSecret) {
         await this.initAuthKey(newSecret);
         inputSecret.value = '';
-      } else if (newNodeId !== this.peerId) {
+      } else {
         this.authKey = (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('p2p_auth_' + newNodeId) : '') || '';
       }
       try {
@@ -1965,11 +1989,11 @@ class PortalApp {
 
     // Handle response headers from Go Agent
     stream.onHeaders((respMeta: any) => {
-      // Sync non-HttpOnly cookies to document.cookie
+      // Sync non-HttpOnly cookies to document.cookie with node prefix (Defect 1)
       if (respMeta.c && Array.isArray(respMeta.c)) {
         for (const cookieStr of respMeta.c) {
           try {
-            document.cookie = cookieStr;
+            this.writeScopedCookie(cookieStr);
           } catch {}
         }
       }
@@ -2055,9 +2079,9 @@ class PortalApp {
       if (!msg) return;
 
       if (msg.type === 'TUNNEL_COOKIE_UPDATE') {
-        // Sync document.cookie
+        // Sync document.cookie with node prefix (Defect 1)
         try {
-          document.cookie = msg.cookie;
+          this.writeScopedCookie(msg.cookie);
         } catch {}
       } else if (msg.type === 'TUNNEL_WS_CONNECT') {
         this.handleWSConnect(msg, event.ports[0]);

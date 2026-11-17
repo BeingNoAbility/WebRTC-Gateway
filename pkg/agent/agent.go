@@ -363,13 +363,13 @@ func (a *Agent) VerifyAuth(nodeID, accessSecret, reqSecret string, exp int64, si
 		return true
 	}
 
-	if sign == "" {
+	if sign == "" || exp <= 0 {
 		return false
 	}
 
 	now := time.Now().Unix()
-	// Allow 60 seconds clock skew tolerance if exp > 0
-	if exp > 0 && now > exp+60 {
+	// Allow 60 seconds clock skew tolerance
+	if now > exp+60 {
 		log.Printf("[Agent] Signature expired: exp=%d, now=%d", exp, now)
 		return false
 	}

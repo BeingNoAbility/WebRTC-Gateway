@@ -217,6 +217,16 @@ func TestAgent_HMACShareSignature(t *testing.T) {
 		t.Fatalf("Replay attack with mismatched DTLS fingerprint must be rejected!")
 	}
 
+	// 5. Zero or negative exp must be strictly rejected (Defect 3)
+	zeroExpSign := ComputeHMAC(authKey, fmt.Sprintf("%s:%d:%s", nodeID, 0, dtlsFingerprint))
+	if ag.VerifyAuth(nodeID, secret, "", 0, zeroExpSign, dtlsFingerprint) {
+		t.Fatalf("Signature with exp=0 must be rejected to prevent eternal signatures!")
+	}
+	negExpSign := ComputeHMAC(authKey, fmt.Sprintf("%s:%d:%s", nodeID, -100, dtlsFingerprint))
+	if ag.VerifyAuth(nodeID, secret, "", -100, negExpSign, dtlsFingerprint) {
+		t.Fatalf("Signature with negative exp must be rejected!")
+	}
+
 	// 6. GenerateShareLink formatting
 	link := GenerateShareLink("https://gateway.example.com", nodeID, secret, 1*time.Hour)
 	if !strings.HasPrefix(link, "https://gateway.example.com/#test-home?exp=") || !strings.Contains(link, "&sign=") {

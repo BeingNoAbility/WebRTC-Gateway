@@ -468,7 +468,7 @@
             try {
               const target = realPortalWindow || (typeof window !== 'undefined' && window.parent && window.parent !== window ? window.parent : null);
               if (target) {
-                target.postMessage({ type: 'TUNNEL_COOKIE_UPDATE', cookie: val }, '*');
+                target.postMessage({ type: 'TUNNEL_COOKIE_UPDATE', cookie: rewrittenVal }, '*');
               }
             } catch {}
           },

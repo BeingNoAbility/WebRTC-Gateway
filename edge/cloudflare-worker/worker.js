@@ -181,6 +181,16 @@ export class SignalingRoom extends DurableObject {
               } catch {}
               return;
             }
+          } else if (this.agents.has(nodeId) && secret) {
+            // An active agent session exists without a secret. Prohibit an anonymous connection from injecting a secret mid-way to hijack it.
+            try {
+              ws.send(JSON.stringify({
+                type: 'error',
+                error: `Unauthorized: node_id "${nodeId}" is actively in use without cluster secret; hijacking prohibited`,
+              }));
+              ws.close(4003, 'Unauthorized');
+            } catch {}
+            return;
           }
 
           // Clear failed attempts upon successful authentication
