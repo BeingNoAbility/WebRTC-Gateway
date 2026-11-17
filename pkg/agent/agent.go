@@ -703,26 +703,27 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 			return
 		}
 
+		transport := &countedTransport{DataChannel: dc, txCounter: &a.txBytesTotal}
+		m := mux.NewMux(transport, false)
+
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			atomic.AddUint64(&a.rxBytesTotal, uint64(len(msg.Data)))
+			if err := m.HandleIncomingMessage(msg.Data); err != nil {
+				log.Printf("[Agent] Mux handle message error: %v", err)
+			}
+		})
+
+		dc.OnClose(func() {
+			log.Printf("[Agent] [Session %s] DataChannel closed", sessionID)
+			_ = m.Close()
+		})
+
 		dc.OnOpen(func() {
 			log.Printf("[Agent] [Session %s] DataChannel p2pmux OPENED! (cookieSession: %s)", sessionID, cookieSession)
-			transport := &countedTransport{DataChannel: dc, txCounter: &a.txBytesTotal}
-			m := mux.NewMux(transport, false)
-
-			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				atomic.AddUint64(&a.rxBytesTotal, uint64(len(msg.Data)))
-				if err := m.HandleIncomingMessage(msg.Data); err != nil {
-					log.Printf("[Agent] Mux handle message error: %v", err)
-				}
-			})
-
-			dc.OnClose(func() {
-				log.Printf("[Agent] [Session %s] DataChannel closed", sessionID)
-				_ = m.Close()
-			})
-
-			// Accept incoming streams and route to Reverse Proxy
-			go a.streamAcceptLoop(sessionID, cookieSession, m)
 		})
+
+		// Accept incoming streams and route to Reverse Proxy
+		go a.streamAcceptLoop(sessionID, cookieSession, m)
 	})
 
 	// Set Remote Description (Offer) before registering into activeConns to avoid ICE candidate races

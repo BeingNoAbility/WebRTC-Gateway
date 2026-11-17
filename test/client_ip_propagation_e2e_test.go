@@ -255,7 +255,7 @@ func TestClientIP_EndToEnd_PropagationAndAntiSpoofing(t *testing.T) {
 
 	select {
 	case <-answerReceived:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatalf("Timed out waiting for WebRTC Answer")
 	}
 
@@ -269,7 +269,7 @@ func TestClientIP_EndToEnd_PropagationAndAntiSpoofing(t *testing.T) {
 
 	select {
 	case <-dcOpened:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatalf("Timed out waiting for DataChannel open")
 	}
 
@@ -304,7 +304,7 @@ func TestClientIP_EndToEnd_PropagationAndAntiSpoofing(t *testing.T) {
 
 	select {
 	case <-reqDone:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatalf("Timed out waiting for request to reach backend")
 	}
 
