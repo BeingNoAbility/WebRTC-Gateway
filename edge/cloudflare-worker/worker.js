@@ -163,6 +163,11 @@ export class SignalingRoom extends DurableObject {
             this.agentNodeIds.delete(oldWs);
           }
 
+          const requireVisitorAuth = msg.require_visitor_auth !== undefined
+            ? !!msg.require_visitor_auth
+            : (msg.requires_secret !== undefined ? !!msg.requires_secret : !!secret);
+          this.nodeVisitorAuth.set(nodeId, requireVisitorAuth);
+
           att.role = 'agent';
           att.agentNodeId = nodeId;
           att.secret = secret;
@@ -171,11 +176,6 @@ export class SignalingRoom extends DurableObject {
 
           this.agents.set(nodeId, ws);
           this.agentNodeIds.set(ws, nodeId);
-
-          const requireVisitorAuth = msg.require_visitor_auth !== undefined
-            ? !!msg.require_visitor_auth
-            : (msg.requires_secret !== undefined ? !!msg.requires_secret : !!secret);
-          this.nodeVisitorAuth.set(nodeId, requireVisitorAuth);
           ws.send(JSON.stringify({ type: 'registered', node_id: nodeId }));
 
           // Notify all clients waiting for this node

@@ -270,6 +270,12 @@ func (a *Agent) ExportPrometheusMetrics() string {
 // SetInsecureTLS enables or disables skipping TLS certificate verification (useful for self-signed certificates).
 func (a *Agent) SetInsecureTLS(insecure bool) {
 	a.InsecureTLS = insecure
+	if a.httpProxy != nil {
+		a.httpProxy.SetInsecureTLS(insecure)
+	}
+	if a.wsProxy != nil {
+		a.wsProxy.SetInsecureTLS(insecure)
+	}
 }
 
 // SetSNI sets custom TLS ServerName and Host header for signaling (useful when dialing Cloudflare Anycast IP directly).

@@ -689,22 +689,29 @@ func TestHTTPProxy_OutboundProxyConfiguration(t *testing.T) {
 	// 1. Explicit SOCKS5 proxy
 	hp.SetProxy("socks5://127.0.0.1:10808")
 	dummyReq, _ := http.NewRequest("GET", "https://www.example.com", nil)
-	proxyURL, err := hp.transport.Proxy(dummyReq)
+	proxyURL, err := hp.secureTransport.Proxy(dummyReq)
 	if err != nil || proxyURL == nil || proxyURL.String() != "socks5://127.0.0.1:10808" {
-		t.Errorf("SOCKS5 proxy not configured properly: %v", proxyURL)
+		t.Errorf("SOCKS5 proxy not configured properly on secureTransport: %v", proxyURL)
+	}
+	insecureProxyURL, err := hp.insecureTransport.Proxy(dummyReq)
+	if err != nil || insecureProxyURL == nil || insecureProxyURL.String() != "socks5://127.0.0.1:10808" {
+		t.Errorf("SOCKS5 proxy not configured properly on insecureTransport: %v", insecureProxyURL)
 	}
 
 	// 2. Explicit HTTP proxy
 	hp.SetProxy("http://proxy.corp.internal:8080")
-	proxyURL, err = hp.transport.Proxy(dummyReq)
+	proxyURL, err = hp.secureTransport.Proxy(dummyReq)
 	if err != nil || proxyURL == nil || proxyURL.String() != "http://proxy.corp.internal:8080" {
 		t.Errorf("HTTP proxy not configured properly: %v", proxyURL)
 	}
 
-	// 3. Reset to empty (should fallback to ProxyFromEnvironment)
+	// 3. Reset to empty (must be nil to cut ambient environment proxy leakage)
 	hp.SetProxy("")
-	if hp.transport.Proxy == nil {
-		t.Errorf("Proxy func should not be nil when reset")
+	if hp.secureTransport.Proxy != nil {
+		t.Errorf("Proxy func must be nil when reset to prevent environment proxy leakage")
+	}
+	if hp.insecureTransport.Proxy != nil {
+		t.Errorf("Insecure Proxy func must be nil when reset to prevent environment proxy leakage")
 	}
 }
 

@@ -577,3 +577,212 @@ func TestFileProxy_SingleFile_MediaAndPDF_MimeTypes(t *testing.T) {
 		t.Errorf("Expected x-p2p-file-name specification.pdf, got %q", respMeta.Headers["x-p2p-file-name"])
 	}
 }
+
+func TestFileProxy_SubdirNotRedirectLoop(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create a subdirectory with index.html
+	subDir := filepath.Join(tempDir, "docs")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+	idxFile := filepath.Join(subDir, "index.html")
+	if err := os.WriteFile(idxFile, []byte("<h1>Documentation Index</h1>"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	// Create an empty subdirectory without index.html
+	emptySubDir := filepath.Join(tempDir, "downloads")
+	if err := os.Mkdir(emptySubDir, 0755); err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+
+	fpDir, err := NewDirProxy(tempDir)
+	if err != nil {
+		t.Fatalf("NewDirProxy failed: %v", err)
+	}
+
+	// 1. Request /docs/ with trailing slash: MUST return 200 OK and index content, NOT 301 loop
+	{
+		clientMux, agentMux, cleanup := createConnectedMuxPair()
+		defer cleanup()
+
+		go func() {
+			stream, err := agentMux.AcceptStream(context.Background())
+			if err != nil {
+				return
+			}
+			fpDir.HandleStream("sess-docs-slash", stream)
+		}()
+
+		s, err := clientMux.OpenStream()
+		if err != nil {
+			t.Fatalf("OpenStream failed: %v", err)
+		}
+		reqBytes, _ := json.Marshal(RequestMetadata{Method: "GET", Path: "/docs/"})
+		_ = s.WriteHeaders(reqBytes)
+		_ = s.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		hRaw, err := s.ReadHeaders(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("ReadHeaders failed: %v", err)
+		}
+
+		var respMeta ResponseMetadata
+		_ = json.Unmarshal(hRaw, &respMeta)
+		if respMeta.Status != 200 {
+			t.Fatalf("Expected 200 OK for /docs/, got %d (Headers: %v)", respMeta.Status, respMeta.Headers)
+		}
+
+		body, _ := io.ReadAll(s)
+		if !strings.Contains(string(body), "Documentation Index") {
+			t.Fatalf("Expected index content, got: %s", string(body))
+		}
+	}
+
+	// 2. Request /downloads/ with trailing slash: MUST return 200 OK directory listing, NOT 301 loop
+	{
+		clientMux, agentMux, cleanup := createConnectedMuxPair()
+		defer cleanup()
+
+		go func() {
+			stream, err := agentMux.AcceptStream(context.Background())
+			if err != nil {
+				return
+			}
+			fpDir.HandleStream("sess-downloads-slash", stream)
+		}()
+
+		s, err := clientMux.OpenStream()
+		if err != nil {
+			t.Fatalf("OpenStream failed: %v", err)
+		}
+		reqBytes, _ := json.Marshal(RequestMetadata{Method: "GET", Path: "/downloads/"})
+		_ = s.WriteHeaders(reqBytes)
+		_ = s.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		hRaw, err := s.ReadHeaders(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("ReadHeaders failed: %v", err)
+		}
+
+		var respMeta ResponseMetadata
+		_ = json.Unmarshal(hRaw, &respMeta)
+		if respMeta.Status != 200 {
+			t.Fatalf("Expected 200 OK for /downloads/, got %d (Headers: %v)", respMeta.Status, respMeta.Headers)
+		}
+
+		body, _ := io.ReadAll(s)
+		if !strings.Contains(string(body), "Index of /downloads") {
+			t.Fatalf("Expected directory listing, got: %s", string(body))
+		}
+	}
+
+	// 3. Request /downloads without trailing slash: MUST return 301 to /downloads/
+	{
+		clientMux, agentMux, cleanup := createConnectedMuxPair()
+		defer cleanup()
+
+		go func() {
+			stream, err := agentMux.AcceptStream(context.Background())
+			if err != nil {
+				return
+			}
+			fpDir.HandleStream("sess-downloads-noslash", stream)
+		}()
+
+		s, err := clientMux.OpenStream()
+		if err != nil {
+			t.Fatalf("OpenStream failed: %v", err)
+		}
+		reqBytes, _ := json.Marshal(RequestMetadata{Method: "GET", Path: "/downloads"})
+		_ = s.WriteHeaders(reqBytes)
+		_ = s.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		hRaw, err := s.ReadHeaders(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("ReadHeaders failed: %v", err)
+		}
+
+		var respMeta ResponseMetadata
+		_ = json.Unmarshal(hRaw, &respMeta)
+		if respMeta.Status != 301 {
+			t.Fatalf("Expected 301 Moved Permanently for /downloads, got %d", respMeta.Status)
+		}
+		if loc := respMeta.Headers["location"]; loc != "/downloads/" {
+			t.Fatalf("Expected Location /downloads/, got %q", loc)
+		}
+	}
+}
+
+func TestFileProxy_SymlinkIndexHtmlBlocked(t *testing.T) {
+	tempDir := t.TempDir()
+	publicDir := filepath.Join(tempDir, "public")
+	secretDir := filepath.Join(tempDir, "secret")
+	if err := os.Mkdir(publicDir, 0755); err != nil {
+		t.Fatalf("Mkdir public failed: %v", err)
+	}
+	if err := os.Mkdir(secretDir, 0755); err != nil {
+		t.Fatalf("Mkdir secret failed: %v", err)
+	}
+
+	secretFile := filepath.Join(secretDir, "confidential.txt")
+	if err := os.WriteFile(secretFile, []byte("TOP-SECRET-DATA-DO-NOT-LEAK"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	// Create symlink: public/index.html -> secret/confidential.txt
+	symlinkPath := filepath.Join(publicDir, "index.html")
+	if err := os.Symlink(secretFile, symlinkPath); err != nil {
+		t.Skipf("Skipping symlink test (OS does not permit unprivileged symlinks): %v", err)
+		return
+	}
+
+	fpDir, err := NewDirProxy(publicDir)
+	if err != nil {
+		t.Fatalf("NewDirProxy failed: %v", err)
+	}
+
+	clientMux, agentMux, cleanup := createConnectedMuxPair()
+	defer cleanup()
+
+	go func() {
+		stream, err := agentMux.AcceptStream(context.Background())
+		if err != nil {
+			return
+		}
+		fpDir.HandleStream("sess-symlink-test", stream)
+	}()
+
+	s, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+	reqBytes, _ := json.Marshal(RequestMetadata{Method: "GET", Path: "/"})
+	_ = s.WriteHeaders(reqBytes)
+	_ = s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	hRaw, err := s.ReadHeaders(ctx)
+	cancel()
+	if err != nil {
+		t.Fatalf("ReadHeaders failed: %v", err)
+	}
+
+	var respMeta ResponseMetadata
+	_ = json.Unmarshal(hRaw, &respMeta)
+	if respMeta.Status != 403 {
+		t.Fatalf("Expected 403 Forbidden for symlinked index.html escaping root, got %d", respMeta.Status)
+	}
+
+	body, _ := io.ReadAll(s)
+	if strings.Contains(string(body), "TOP-SECRET-DATA-DO-NOT-LEAK") {
+		t.Fatalf("CRITICAL SECURITY FLAW: Escaped file content leaked: %s", string(body))
+	}
+}

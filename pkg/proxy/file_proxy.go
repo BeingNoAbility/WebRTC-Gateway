@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"mime"
 	"net/http"
@@ -69,17 +70,22 @@ func NewDirProxy(dirPath string) (*FileProxy, error) {
 		return nil, fmt.Errorf("resolve directory path: %w", err)
 	}
 
-	fi, err := os.Stat(cleanPath)
+	realDir, err := filepath.EvalSymlinks(cleanPath)
 	if err != nil {
-		return nil, fmt.Errorf("stat directory %s: %w", cleanPath, err)
+		return nil, fmt.Errorf("eval symlinks for directory %s: %w", cleanPath, err)
+	}
+
+	fi, err := os.Stat(realDir)
+	if err != nil {
+		return nil, fmt.Errorf("stat directory %s: %w", realDir, err)
 	}
 	if !fi.IsDir() {
-		return nil, fmt.Errorf("path %s is a file, not a directory (use -file instead)", cleanPath)
+		return nil, fmt.Errorf("path %s is a file, not a directory (use -file instead)", realDir)
 	}
 
 	return &FileProxy{
 		mode:       FileModeDirectory,
-		targetPath: cleanPath,
+		targetPath: realDir,
 	}, nil
 }
 
@@ -189,7 +195,20 @@ func (fp *FileProxy) HandleStream(sessionID string, stream *mux.Stream) {
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fp.fileName))
 		}
 		w.Header().Set("Accept-Ranges", "bytes")
-		http.ServeFile(w, req, fp.targetPath)
+
+		f, err := os.Open(fp.targetPath)
+		if err != nil {
+			http.NotFound(w, req)
+			return
+		}
+		defer f.Close()
+
+		fi, err := f.Stat()
+		var modTime time.Time
+		if err == nil {
+			modTime = fi.ModTime()
+		}
+		http.ServeContent(w, req, fp.fileName, modTime, f)
 		return
 	}
 
@@ -228,22 +247,120 @@ func (fp *FileProxy) HandleStream(sessionID string, stream *mux.Stream) {
 	}
 
 	w.Header().Set("X-P2P-Mode", "dir")
-	if !fi.IsDir() {
-		w.Header().Set("X-P2P-File-Name", fi.Name())
-		w.Header().Set("X-P2P-File-Size", fmt.Sprintf("%d", fi.Size()))
-		if mimeType := detectMimeType(realPath); mimeType != "" {
-			w.Header().Set("Content-Type", mimeType)
+	if fi.IsDir() {
+		indexPath := filepath.Join(realPath, "index.html")
+		if idxFi, err := os.Stat(indexPath); err == nil && !idxFi.IsDir() {
+			idxRealPath, err := filepath.EvalSymlinks(indexPath)
+			if err != nil {
+				http.NotFound(w, req)
+				return
+			}
+			idxRel, err := filepath.Rel(fp.targetPath, idxRealPath)
+			if err != nil || idxRel == ".." || strings.HasPrefix(idxRel, ".."+string(filepath.Separator)) {
+				http.Error(w, "Forbidden: Symlink target escapes root directory", http.StatusForbidden)
+				return
+			}
+
+			f, err := os.Open(idxRealPath)
+			if err != nil {
+				http.NotFound(w, req)
+				return
+			}
+			defer f.Close()
+
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Accept-Ranges", "bytes")
+			http.ServeContent(w, req, "index.html", idxFi.ModTime(), f)
+			return
 		}
-		if isInlineExtension(filepath.Ext(realPath)) {
-			w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", fi.Name()))
-		} else {
-			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fi.Name()))
+
+		// index.html does not exist in directory
+		rawPath := reqMeta.Path
+		hasSlash := strings.HasSuffix(rawPath, "/") || rawPath == "" || cleanReqPath == "/"
+		if !hasSlash {
+			redirectTarget := cleanReqPath + "/"
+			http.Redirect(w, req, redirectTarget, http.StatusMovedPermanently)
+			return
 		}
-		w.Header().Set("Accept-Ranges", "bytes")
+
+		fp.renderDirectoryListing(w, req, realPath, cleanReqPath)
+		return
 	}
 
-	// Serve the verified file or directory (handles index.html or directory listing automatically)
-	http.ServeFile(w, req, realPath)
+	w.Header().Set("X-P2P-File-Name", fi.Name())
+	w.Header().Set("X-P2P-File-Size", fmt.Sprintf("%d", fi.Size()))
+	if mimeType := detectMimeType(realPath); mimeType != "" {
+		w.Header().Set("Content-Type", mimeType)
+	}
+	if isInlineExtension(filepath.Ext(realPath)) {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", fi.Name()))
+	} else {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fi.Name()))
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	f, err := os.Open(realPath)
+	if err != nil {
+		http.NotFound(w, req)
+		return
+	}
+	defer f.Close()
+
+	http.ServeContent(w, req, fi.Name(), fi.ModTime(), f)
+}
+
+func (fp *FileProxy) renderDirectoryListing(w http.ResponseWriter, req *http.Request, dirPath, reqPath string) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		http.Error(w, "Failed to read directory", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+
+	escapedPath := html.EscapeString(reqPath)
+	fmt.Fprintf(w, "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Index of %s</title></head><body>\n", escapedPath)
+	fmt.Fprintf(w, "<h2>Index of %s</h2><hr>\n<pre>\n", escapedPath)
+
+	if reqPath != "/" && reqPath != "" {
+		fmt.Fprintf(w, "<a href=\"../\">../</a>\n")
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		displayName := html.EscapeString(name)
+		link := url.PathEscape(name)
+		if entry.IsDir() {
+			displayName += "/"
+			link += "/"
+		}
+		info, err := entry.Info()
+		sizeStr := "-"
+		modTimeStr := ""
+		if err == nil {
+			modTimeStr = info.ModTime().Format("2006-01-02 15:04:05")
+			if !entry.IsDir() {
+				sizeStr = formatByteSize(info.Size())
+			}
+		}
+		fmt.Fprintf(w, "<a href=\"%s\">%-30s</a> %20s %10s\n", link, displayName, modTimeStr, sizeStr)
+	}
+
+	fmt.Fprintf(w, "</pre><hr></body></html>\n")
+}
+
+func formatByteSize(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
 func (fp *FileProxy) sendError(stream *mux.Stream, statusCode int, message string) {

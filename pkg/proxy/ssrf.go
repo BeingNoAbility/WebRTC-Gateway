@@ -9,6 +9,17 @@ import (
 	"time"
 )
 
+var (
+	nat64Net = func() *net.IPNet {
+		_, n, _ := net.ParseCIDR("64:ff9b::/96")
+		return n
+	}()
+	sixToFourNet = func() *net.IPNet {
+		_, n, _ := net.ParseCIDR("2002::/16")
+		return n
+	}()
+)
+
 // IsRestrictedIP checks whether an IP address belongs to private (RFC 1918),
 // loopback, link-local, multicast, carrier-grade NAT, or cloud metadata ranges.
 func IsRestrictedIP(ip net.IP) bool {
@@ -16,12 +27,16 @@ func IsRestrictedIP(ip net.IP) bool {
 		return true
 	}
 
-	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified() || ip.Equal(net.IPv4bcast) {
 		return true
 	}
 
 	// Check IPv4 specific ranges
 	if ip4 := ip.To4(); ip4 != nil {
+		// Entire 0.0.0.0/8 network (e.g. 0.0.0.1 which resolves to loopback on Linux)
+		if ip4[0] == 0 {
+			return true
+		}
 		// Carrier-Grade NAT (RFC 6598: 100.64.0.0/10)
 		if ip4[0] == 100 && (ip4[1]&0xC0) == 64 {
 			return true
@@ -41,6 +56,14 @@ func IsRestrictedIP(ip net.IP) bool {
 	} else {
 		// IPv6 cloud metadata fd00:ec2::254
 		if ip.String() == "fd00:ec2::254" {
+			return true
+		}
+		// IPv6 NAT64 translation prefix (64:ff9b::/96)
+		if nat64Net != nil && nat64Net.Contains(ip) {
+			return true
+		}
+		// IPv6 6to4 translation prefix (2002::/16)
+		if sixToFourNet != nil && sixToFourNet.Contains(ip) {
 			return true
 		}
 	}

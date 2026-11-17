@@ -72,12 +72,15 @@ func ExtractRootDomain(hostname string) string {
 
 // HTTPProxy bridges multiplexed P2P streams with local HTTP backend services.
 type HTTPProxy struct {
-	targetURL      *url.URL
-	rootDomain     string
-	allowedDomains []string
-	cookieManager  *SessionCookieManager
-	httpClient     *http.Client
-	transport      *http.Transport
+	targetURL         *url.URL
+	rootDomain        string
+	allowedDomains    []string
+	cookieManager     *SessionCookieManager
+	insecureTLS       bool
+	secureTransport   *http.Transport
+	insecureTransport *http.Transport
+	secureClient      *http.Client
+	insecureClient    *http.Client
 }
 
 // NewHTTPProxy creates a new HTTPProxy targeting targetURLString.
@@ -87,44 +90,65 @@ func NewHTTPProxy(targetURLString string, cm *SessionCookieManager) (*HTTPProxy,
 		return nil, fmt.Errorf("invalid target URL: %w", err)
 	}
 
-	transport := &http.Transport{
-		Proxy:               http.ProxyFromEnvironment,
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true, // Decompression handled explicitly
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
-		DialContext:         CreateSafeDialContext(u),
+	createTransport := func(insecure bool) *http.Transport {
+		return &http.Transport{
+			Proxy:               nil, // Cut ambient environment proxy leakage
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+			DisableCompression:  true, // Decompression handled explicitly
+			TLSClientConfig:     &tls.Config{InsecureSkipVerify: insecure},
+			DialContext:         CreateSafeDialContext(u),
+		}
+	}
+
+	secureTransport := createTransport(false)
+	insecureTransport := createTransport(true)
+
+	checkRedirect := func(req *http.Request, via []*http.Request) error {
+		// Don't follow redirects automatically; let the browser receive 3xx
+		return http.ErrUseLastResponse
 	}
 
 	return &HTTPProxy{
-		targetURL:     u,
-		rootDomain:    ExtractRootDomain(u.Hostname()),
-		cookieManager: cm,
-		transport:     transport,
-		httpClient: &http.Client{
-			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				// Don't follow redirects automatically; let the browser receive 3xx
-				return http.ErrUseLastResponse
-			},
-			Timeout: 0, // No blanket timeout, support long streaming downloads
+		targetURL:         u,
+		rootDomain:        ExtractRootDomain(u.Hostname()),
+		cookieManager:     cm,
+		insecureTLS:       false,
+		secureTransport:   secureTransport,
+		insecureTransport: insecureTransport,
+		secureClient: &http.Client{
+			Transport:     secureTransport,
+			CheckRedirect: checkRedirect,
+			Timeout:       0,
+		},
+		insecureClient: &http.Client{
+			Transport:     insecureTransport,
+			CheckRedirect: checkRedirect,
+			Timeout:       0,
 		},
 	}, nil
 }
 
+// SetInsecureTLS enables or disables skipping TLS certificate verification for the target host.
+func (p *HTTPProxy) SetInsecureTLS(insecure bool) {
+	p.insecureTLS = insecure
+}
+
 // SetProxy configures an outbound HTTP/HTTPS/SOCKS5 proxy for backend requests.
 func (p *HTTPProxy) SetProxy(proxyURL string) {
-	if p.transport == nil {
-		return
-	}
+	var proxyFunc func(*http.Request) (*url.URL, error)
 	if proxyURL != "" {
 		if pu, err := url.Parse(proxyURL); err == nil {
-			p.transport.Proxy = http.ProxyURL(pu)
-			return
+			proxyFunc = http.ProxyURL(pu)
 		}
 	}
-	p.transport.Proxy = http.ProxyFromEnvironment
+	if p.secureTransport != nil {
+		p.secureTransport.Proxy = proxyFunc
+	}
+	if p.insecureTransport != nil {
+		p.insecureTransport.Proxy = proxyFunc
+	}
 }
 
 // SetAllowedDomains configures explicit domain patterns (e.g. "*.hdslb.com") allowed for cross-origin proxying.
@@ -143,13 +167,19 @@ func (p *HTTPProxy) isDomainAllowed(hostOnly string) bool {
 	if hostOnly == "" {
 		return false
 	}
-	// 1. Same target host or subdomain of target rootDomain
-	if strings.EqualFold(hostOnly, p.targetURL.Hostname()) {
+	targetHost := strings.ToLower(p.targetURL.Hostname())
+
+	// 1. Same target host
+	if strings.EqualFold(hostOnly, targetHost) {
 		return true
 	}
-	if p.rootDomain != "" && (hostOnly == p.rootDomain || strings.HasSuffix(hostOnly, "."+p.rootDomain)) {
+
+	// Subdomain matching ONLY permitted if targetHost is a legitimate domain name (NOT an IP address or localhost)
+	isTargetIP := net.ParseIP(targetHost) != nil || strings.EqualFold(targetHost, "localhost")
+	if !isTargetIP && p.rootDomain != "" && (hostOnly == p.rootDomain || strings.HasSuffix(hostOnly, "."+p.rootDomain)) {
 		return true
 	}
+
 	// 2. Explicit allowed domain patterns
 	for _, pattern := range p.allowedDomains {
 		if strings.HasPrefix(pattern, "*.") {
@@ -191,7 +221,17 @@ func (p *HTTPProxy) resolveTargetURL(reqPath string, headers map[string]string) 
 	}
 
 	if destHost != "" {
-		hostOnly := strings.ToLower(strings.Split(destHost, ":")[0])
+		// Strict input validation: prohibit @, \, /, and whitespace to prevent SSRF authority confusion
+		if strings.ContainsAny(destHost, "@\\/ \t\r\n") {
+			return nil, "", fmt.Errorf("SSRF blocked: invalid characters in target host %q", destHost)
+		}
+
+		parsedURL, err := url.Parse("http://" + destHost)
+		if err != nil || parsedURL.User != nil || parsedURL.Hostname() == "" {
+			return nil, "", fmt.Errorf("SSRF blocked: malformed authority in target host %q", destHost)
+		}
+
+		hostOnly := strings.ToLower(parsedURL.Hostname())
 
 		// SSRF Defense: If destHost is a raw IP, reject if it is a private/restricted IP (unless it is the target backend itself)
 		if parsedIP := net.ParseIP(hostOnly); parsedIP != nil {
@@ -214,9 +254,7 @@ func (p *HTTPProxy) resolveTargetURL(reqPath string, headers map[string]string) 
 			}
 			return u, destHost, nil
 		}
-		if strings.HasPrefix(cleanPath, proxyPrefix) {
-			return nil, "", fmt.Errorf("cross-origin proxying to %s is restricted", destHost)
-		}
+		return nil, "", fmt.Errorf("cross-origin proxy access to %s is forbidden (not in allowed-proxy-domains whitelist)", destHost)
 	}
 
 	// Standard path targeting p.targetURL
@@ -421,8 +459,12 @@ func (p *HTTPProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream)
 		}
 	}
 
-	// 4. Forward to local backend service
-	resp, err := p.httpClient.Do(req)
+	// 4. Forward to local backend service (with strict TLS validation unless -insecure targets backend)
+	client := p.secureClient
+	if p.insecureTLS && IsTargetHost(destURL.Hostname(), destURL.Port(), p.targetURL) {
+		client = p.insecureClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[Proxy] Stream %d request to %s failed: %v", stream.ID(), destURL, err)
 		p.sendErrorResponse(stream, http.StatusBadGateway, fmt.Sprintf("Backend service error: %v", err))

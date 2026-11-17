@@ -37,7 +37,9 @@ type WSProxy struct {
 	rootDomain     string
 	allowedDomains []string
 	cookieManager  *SessionCookieManager
-	dialer         *websocket.Dialer
+	insecureTLS    bool
+	secureDialer   *websocket.Dialer
+	insecureDialer *websocket.Dialer
 }
 
 // NewWSProxy creates a new WSProxy targeting the given base URL.
@@ -53,31 +55,44 @@ func NewWSProxy(targetBaseURL string, cm *SessionCookieManager) (*WSProxy, error
 	}
 	u.Scheme = wsScheme
 
-	return &WSProxy{
-		targetBase:    u,
-		rootDomain:    ExtractRootDomain(u.Hostname()),
-		cookieManager: cm,
-		dialer: &websocket.Dialer{
-			Proxy:            http.ProxyFromEnvironment,
+	createDialer := func(insecure bool) *websocket.Dialer {
+		return &websocket.Dialer{
+			Proxy:            nil, // Cut ambient environment proxy leakage
 			HandshakeTimeout: 10 * time.Second,
-			TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig:  &tls.Config{InsecureSkipVerify: insecure},
 			NetDialContext:   CreateSafeDialContext(u),
-		},
+		}
+	}
+
+	return &WSProxy{
+		targetBase:     u,
+		rootDomain:     ExtractRootDomain(u.Hostname()),
+		cookieManager:  cm,
+		insecureTLS:    false,
+		secureDialer:   createDialer(false),
+		insecureDialer: createDialer(true),
 	}, nil
+}
+
+// SetInsecureTLS enables or disables skipping TLS certificate verification for the target host.
+func (wp *WSProxy) SetInsecureTLS(insecure bool) {
+	wp.insecureTLS = insecure
 }
 
 // SetProxy configures an outbound HTTP/HTTPS/SOCKS5 proxy for WebSocket backend requests.
 func (wp *WSProxy) SetProxy(proxyURL string) {
-	if wp.dialer == nil {
-		return
-	}
+	var proxyFunc func(*http.Request) (*url.URL, error)
 	if proxyURL != "" {
 		if pu, err := url.Parse(proxyURL); err == nil {
-			wp.dialer.Proxy = http.ProxyURL(pu)
-			return
+			proxyFunc = http.ProxyURL(pu)
 		}
 	}
-	wp.dialer.Proxy = http.ProxyFromEnvironment
+	if wp.secureDialer != nil {
+		wp.secureDialer.Proxy = proxyFunc
+	}
+	if wp.insecureDialer != nil {
+		wp.insecureDialer.Proxy = proxyFunc
+	}
 }
 
 // SetAllowedDomains configures explicit domain patterns (e.g. "*.hdslb.com") allowed for cross-origin proxying.
@@ -96,12 +111,17 @@ func (wp *WSProxy) isDomainAllowed(hostOnly string) bool {
 	if hostOnly == "" {
 		return false
 	}
-	if strings.EqualFold(hostOnly, wp.targetBase.Hostname()) {
+	targetHost := strings.ToLower(wp.targetBase.Hostname())
+
+	if strings.EqualFold(hostOnly, targetHost) {
 		return true
 	}
-	if wp.rootDomain != "" && (hostOnly == wp.rootDomain || strings.HasSuffix(hostOnly, "."+wp.rootDomain)) {
+
+	isTargetIP := net.ParseIP(targetHost) != nil || strings.EqualFold(targetHost, "localhost")
+	if !isTargetIP && wp.rootDomain != "" && (hostOnly == wp.rootDomain || strings.HasSuffix(hostOnly, "."+wp.rootDomain)) {
 		return true
 	}
+
 	for _, pattern := range wp.allowedDomains {
 		if strings.HasPrefix(pattern, "*.") {
 			suffix := pattern[1:]
@@ -141,7 +161,17 @@ func (wp *WSProxy) resolveTargetWSURL(reqPath string, headers map[string]string)
 	}
 
 	if destHost != "" {
-		hostOnly := strings.ToLower(strings.Split(destHost, ":")[0])
+		// Strict input validation: prohibit @, \, /, and whitespace to prevent SSRF authority confusion
+		if strings.ContainsAny(destHost, "@\\/ \t\r\n") {
+			return nil, "", fmt.Errorf("SSRF blocked: invalid characters in target host %q", destHost)
+		}
+
+		parsedURL, err := url.Parse("http://" + destHost)
+		if err != nil || parsedURL.User != nil || parsedURL.Hostname() == "" {
+			return nil, "", fmt.Errorf("SSRF blocked: malformed authority in target host %q", destHost)
+		}
+
+		hostOnly := strings.ToLower(parsedURL.Hostname())
 
 		// SSRF Defense: If destHost is a raw IP, reject if it is a private/restricted IP (unless it is the target backend itself)
 		if parsedIP := net.ParseIP(hostOnly); parsedIP != nil {
@@ -164,6 +194,7 @@ func (wp *WSProxy) resolveTargetWSURL(reqPath string, headers map[string]string)
 			}
 			return u, destHost, nil
 		}
+		return nil, "", fmt.Errorf("cross-origin proxy access to %s is forbidden (not in allowed-proxy-domains whitelist)", destHost)
 	}
 
 	basePath := strings.TrimRight(wp.targetBase.Path, "/")
@@ -243,8 +274,12 @@ func (wp *WSProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream) 
 	dialHeaders.Set("X-Forwarded-Proto", wsProto)
 	dialHeaders.Set("Referer", wp.targetBase.Scheme+"://"+wp.targetBase.Host+"/")
 
-	// Prepare dialer with subprotocols if specified
-	dialer := *wp.dialer
+	// Prepare dialer with subprotocols if specified (strict TLS unless -insecure targets backend)
+	baseDialer := wp.secureDialer
+	if wp.insecureTLS && IsTargetHost(targetWSURL.Hostname(), targetWSURL.Port(), wp.targetBase) {
+		baseDialer = wp.insecureDialer
+	}
+	dialer := *baseDialer
 	if len(meta.Protocols) > 0 {
 		dialer.Subprotocols = meta.Protocols
 	}
