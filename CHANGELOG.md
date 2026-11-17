@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v2.0.2] - 2026-11-17
+
+### Added & Enhanced
+- **Observability & Startup Banner Enhancement**:
+  - `agent` and `signal` startup banners now explicitly output the release version (`v2.0.2`) on the first log line, resolving container and systemd triage ambiguities.
+  - Agent banner displays active runtime topology: signaling endpoint, cluster vs visitor authentication status, concurrent stream limits, STUN/TURN configurations, proxy URL, and TLS SNI.
+  - Allowed Proxy Domains consolidated cleanly inside the banner boundary; explicit security warning printed when `-insecure` is active.
+  - Signal server banner resolves host/port bindings cleanly, eliminating legacy `localhost0.0.0.0:8888` concatenation issues, and specifies static asset source (`Embedded (v2.0.2)` vs `Local Directory`).
+  - Strict adherence to CWE-532: all secret tokens and passwords are masked into status indicators (`Enabled (Protected)` / `Disabled (Public)`).
+- **Engineering Quality & Shift-Left Defenses**:
+  - Implemented automated CI machine assertion `git diff --exit-code dist` in `.github/workflows/ci.yml` to prevent uncommitted frontend asset drift.
+  - Introduced GitHub PR template (`.github/pull_request_template.md`) with a Systemic Invariants self-check card for atomic review guideline and code updates.
+  - Added gate 5.6 to Release Checklist for retrospective post-mortem and review guideline auditing.
+- **100% Bilingual Documentation Suite**:
+  - Created comprehensive English guides for `file-server.md`, `security.md`, `troubleshooting.md`, and `RELEASE_CHECKLIST.md`.
+  - Introduced dialectical review guidelines (`REVIEW_GUIDELINES.md` and `en/REVIEW_GUIDELINES.md`) featuring the 5 Golden Principles, machine vs human review division, 5 foundational systemic invariants, and post-mortem case studies.
+  - Synchronized VitePress bilingual navigation and MiniSearch localized indexes.
+
 ## [v2.0.1] - 2026-11-17
 
 ### Fixed & Hardened
