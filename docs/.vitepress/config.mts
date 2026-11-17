@@ -126,7 +126,7 @@ export default withMermaid(
               collapsed: false,
               items: [
                 { text: '📋 Release Quality Checklist', link: '/RELEASE_CHECKLIST' },
-                { text: '🛡️ Dialectical Review Guidelines', link: '/REVIEW_GUIDELINES' },
+                { text: '🛡️ Dialectical Review Guidelines', link: '/en/REVIEW_GUIDELINES' },
               ],
             },
           ],

@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [ master, main, dev ]
   pull_request:
-    branches: [ master, main ]
+    branches: [ master, main, dev ]
 
 jobs:
   test-and-build:
@@ -25,11 +25,12 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Verify Web Frontend Build
+      - name: Verify Web Frontend Build & Embedded Asset Cleanliness
         working-directory: ./web
         run: |
           npm ci
           npm run build
+          git diff --exit-code dist
 
       - name: Run Web & Routing Tests
         run: npm --prefix web test
