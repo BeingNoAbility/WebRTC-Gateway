@@ -87,6 +87,13 @@ flowchart TD
     ```
   - **判定标准**：确保所有修改或新增的 Go 代码严格遵守官方排版风格，无额外排版 diff。
 
+- [ ] **2.4 VitePress 官方文档站静态构建预检**
+  - **验证命令**：
+    ```bash
+    npm --prefix docs run docs:build
+    ```
+  - **判定标准**：必须以退出码 `0` 成功完成全量中英文页面静态 SSR 渲染与打包，零构建异常、零死链警告。防止代码合入 `main` 后 GitHub Pages 部署 CI 报错阻断。
+
 ---
 
 ## 阶段三：自动化测试矩阵验证 (Tests & Race Detection)
@@ -157,6 +164,19 @@ flowchart TD
   - **位置**：[docker-compose.yml](file:///docker-compose.yml)
   - **核对项**：检查镜像标签、环境变量示例、端口映射与 `user: "1000:1000"` 注释清晰完备。
 
+- [ ] **4.4 本地 Docker 多阶段构建与非特权冒烟预检（双镜像）**
+  - **目的**：提前在本地环境验证 Dockerfile 编译流程与基础镜像包依赖，杜绝因第三方包名变更或构建参数失效导致推 Tag 后 GHCR Actions 编译报错紧急撤标。
+  - **验证命令**：
+    ```bash
+    # 预构建服务端与 Agent 镜像，并以 10001:10001 非特权身份探测版本
+    docker build -f Dockerfile.server -t webrtc-p2p-server:smoke-test .
+    docker run --rm --user 10001:10001 webrtc-p2p-server:smoke-test -v
+
+    docker build -f Dockerfile.agent -t webrtc-p2p-agent:smoke-test .
+    docker run --rm --user 10001:10001 webrtc-p2p-agent:smoke-test -v
+    ```
+  - **判定标准**：双镜像多阶段构建成功完成，且容器在受限非特权 UID (10001:10001) 下均正常打印出新版本号并以退出码 `0` 退出。
+
 ---
 
 ## 阶段五：文档与发布说明审计 (Release Notes & Docs Audit)
@@ -201,11 +221,12 @@ flowchart TD
     git checkout main
     git merge dev
     ```
-  - **整洁度检查**：
+  - **整洁度与零残留绝对断言**：
     ```bash
     git status
+    git status --porcelain
     ```
-    确认提示 `nothing to commit, working tree clean`。
+    确认输出完全为空且提示 `nothing to commit, working tree clean`，确保没有任何未被 `.gitignore` 捕获的临时本地调试脚本、中间产物或未提交修改带入发版 Tag。
 
 - [ ] **6.2 创建语义化 Git 附注标签 (Annotated Tag)**
   - **标签格式**：严格使用 `v` 前缀加语义化版本号（如 `v1.9.2`）；
@@ -233,13 +254,14 @@ flowchart TD
 
 - [ ] **7.1 跨平台编译矩阵与 GitHub Release 验收 (`release.yml`)**
   - 打开 GitHub 仓库 Actions 页面，确认 `Release` 工作流全绿通过；
-  - 打开 GitHub Releases 页面，确认本次发版已自动草拟/发布，且挂载了 **6 大操作系统与芯片架构**的可执行压缩包：
+  - 打开 GitHub Releases 页面，确认本次发版已自动草拟/发布，且挂载了 **6 大操作系统与芯片架构**的可执行压缩包及 **`SHA256SUMS.txt` 全局校验和清单**：
     - `webrtc-gateway_vX.Y.Z_linux_amd64.tar.gz`
     - `webrtc-gateway_vX.Y.Z_linux_arm64.tar.gz`
     - `webrtc-gateway_vX.Y.Z_windows_amd64.zip`
     - `webrtc-gateway_vX.Y.Z_windows_arm64.zip`
     - `webrtc-gateway_vX.Y.Z_darwin_amd64.tar.gz`
     - `webrtc-gateway_vX.Y.Z_darwin_arm64.tar.gz` (Apple Silicon)
+    - `SHA256SUMS.txt`（包含上述 6 大制品 SHA256 校验和的明文清单）
 
 - [ ] **7.2 GHCR 多架构 Docker 镜像验收 (`docker.yml`)**
   - 确认 `Build and Push Docker Images` 工作流构建成功；
