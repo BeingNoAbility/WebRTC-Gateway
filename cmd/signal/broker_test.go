@@ -444,7 +444,7 @@ func TestSignalBroker_WebSocketKeepalivePingPong(t *testing.T) {
 				return nil
 			}
 			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5 * time.Second))
+			err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
 			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
 			return err
 		})

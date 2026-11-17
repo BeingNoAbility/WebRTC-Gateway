@@ -372,13 +372,13 @@ var builtinMimeTypes = map[string]string{
 	".ico":  "image/x-icon",
 	".bmp":  "image/bmp",
 	// Archives & Binaries
-	".zip":  "application/zip",
-	".tar":  "application/x-tar",
-	".gz":   "application/gzip",
-	".tgz":  "application/gzip",
-	".rar":  "application/vnd.rar",
-	".7z":   "application/x-7z-compressed",
-	".iso":  "application/x-iso9660-image",
+	".zip": "application/zip",
+	".tar": "application/x-tar",
+	".gz":  "application/gzip",
+	".tgz": "application/gzip",
+	".rar": "application/vnd.rar",
+	".7z":  "application/x-7z-compressed",
+	".iso": "application/x-iso9660-image",
 }
 
 // detectMimeType returns the MIME Content-Type for a given file path based on its extension.

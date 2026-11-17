@@ -49,10 +49,10 @@ type Frame struct {
 }
 
 var (
-	ErrPayloadTooLarge     = errors.New("frame payload exceeds maximum size")
-	ErrInvalidHeader       = errors.New("invalid frame header")
-	ErrBufferTooShort      = errors.New("buffer too short for frame header")
-	ErrInvalidFrameLength  = errors.New("frame length mismatch: packet size does not match declared payload length")
+	ErrPayloadTooLarge    = errors.New("frame payload exceeds maximum size")
+	ErrInvalidHeader      = errors.New("invalid frame header")
+	ErrBufferTooShort     = errors.New("buffer too short for frame header")
+	ErrInvalidFrameLength = errors.New("frame length mismatch: packet size does not match declared payload length")
 )
 
 // NewFrame creates a new Frame with length automatically set.

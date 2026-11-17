@@ -61,22 +61,22 @@ func (s StringOrSlice) String() string {
 
 // AgentConfigFile represents the deserialized structure of an agent configuration file (YAML or JSON).
 type AgentConfigFile struct {
-	NodeID       string        `json:"node_id" yaml:"node_id"`
-	SignalURL    string        `json:"signal" yaml:"signal"`
-	SignalSecret string        `json:"signal_secret" yaml:"signal_secret"`
-	AccessSecret string        `json:"access_secret" yaml:"access_secret"`
-	TargetURL    string        `json:"target" yaml:"target"`
-	Dir          string        `json:"dir" yaml:"dir"`
-	File         string        `json:"file" yaml:"file"`
-	ProxyURL     string        `json:"proxy" yaml:"proxy"`
-	SNI          string        `json:"sni" yaml:"sni"`
-	Insecure     *bool         `json:"insecure" yaml:"insecure"`
-	TurnURL      string        `json:"turn_url" yaml:"turn_url"`
-	TurnUser     string        `json:"turn_user" yaml:"turn_user"`
-	TurnPass     string        `json:"turn_pass" yaml:"turn_pass"`
-	StunServers  StringOrSlice `json:"stun_servers" yaml:"stun_servers"`
-	MaxStreams   int           `json:"max_streams" yaml:"max_streams"`
-	MetricsAddr  string        `json:"metrics_addr" yaml:"metrics_addr"`
+	NodeID              string        `json:"node_id" yaml:"node_id"`
+	SignalURL           string        `json:"signal" yaml:"signal"`
+	SignalSecret        string        `json:"signal_secret" yaml:"signal_secret"`
+	AccessSecret        string        `json:"access_secret" yaml:"access_secret"`
+	TargetURL           string        `json:"target" yaml:"target"`
+	Dir                 string        `json:"dir" yaml:"dir"`
+	File                string        `json:"file" yaml:"file"`
+	ProxyURL            string        `json:"proxy" yaml:"proxy"`
+	SNI                 string        `json:"sni" yaml:"sni"`
+	Insecure            *bool         `json:"insecure" yaml:"insecure"`
+	TurnURL             string        `json:"turn_url" yaml:"turn_url"`
+	TurnUser            string        `json:"turn_user" yaml:"turn_user"`
+	TurnPass            string        `json:"turn_pass" yaml:"turn_pass"`
+	StunServers         StringOrSlice `json:"stun_servers" yaml:"stun_servers"`
+	MaxStreams          int           `json:"max_streams" yaml:"max_streams"`
+	MetricsAddr         string        `json:"metrics_addr" yaml:"metrics_addr"`
 	PortalURL           string        `json:"portal_url" yaml:"portal_url"`
 	AllowedProxyDomains StringOrSlice `json:"allowed_proxy_domains" yaml:"allowed_proxy_domains"`
 }

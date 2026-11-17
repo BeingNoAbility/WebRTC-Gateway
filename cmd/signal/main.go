@@ -78,7 +78,7 @@ func (s *Session) Ping() error {
 		return nil
 	}
 	_ = s.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	return s.Conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5 * time.Second))
+	return s.Conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second))
 }
 
 type SignalBroker struct {
@@ -618,7 +618,7 @@ func runHealthCheck(addr string, preferTLS bool, customURL string) int {
 }
 
 // Version represents the current release version of WebRTC Gateway Signal Server.
-var Version = "v1.9.1"
+var Version = "v1.9.2"
 
 func printSignalUsage(out io.Writer) {
 	fmt.Fprintf(out, "WebRTC Gateway Signal (%s)\n", Version)
@@ -920,7 +920,7 @@ func main() {
 				return nil
 			}
 			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5 * time.Second))
+			err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
 			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
 			return err
 		})

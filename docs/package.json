@@ -1,6 +1,6 @@
 {
   "name": "webrtc-gateway-docs",
-  "version": "1.0.0",
+  "version": "1.9.2",
   "private": true,
   "description": "Official documentation site for Zero-Client WebRTC P2P Gateway",
   "scripts": {

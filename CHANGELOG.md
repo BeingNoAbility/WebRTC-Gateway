@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.9.2] - 2026-11-17
+
+### Added
+- **Container Non-Root Security Hardening & Arbitrary `--user` Support**:
+  - Official multi-architecture Docker images run as unprivileged user `appuser` (`UID: 10001, GID: 10001`) by default, conforming to CIS Docker Benchmarks and Kubernetes Restricted Pod Security Standard.
+  - Native runtime compatibility with arbitrary `--user $(id -u):$(id -g)` and `--user 1000:1000`, solving NAS (Synology, QNAP, Unraid) volume permission mismatches.
+  - Bound `cap_net_bind_service=+ep` capability to `/app/server` binary via Linux File Capabilities, allowing unprivileged containers to listen on low privileged ports (e.g. `:443`, `:80`).
+  - Full compatibility with read-only root filesystems (`--read-only` / `readOnlyRootFilesystem: true`).
+- **Structured CLI Usage Help & Version Options**:
+  - Implemented `-v` / `-version` flags for `agent` and `signal` binaries to output formatted version information with exit code `0`.
+  - Implemented `-h` / `-help` flags for structured CLI usage, environment variables, operational modes, and security sharing examples.
+- **VitePress Standalone Documentation Site & i18n Bilingual Support**:
+  - Upgraded legacy GitHub Wiki to modern VitePress documentation site deployed to GitHub Pages (`https://beingnoability.github.io/WebRTC-Gateway/`).
+  - Implemented path-based i18n routing (`zh-CN` default and `/en/` English), localized MiniSearch offline full-text indexing, and interactive Mermaid architecture diagrams.
+  - Archived GitHub Wiki with prominent redirect banners and direct links to live documentation chapters.
+- **Industrial Quality Gate Protocol & Release Checklist**:
+  - Established 7-stage official release checklist (`docs/RELEASE_CHECKLIST.md`) enforcing strict typechecks, test matrices, Docker smoke tests, and git cleanliness.
+  - Streamlined GitHub Actions workflows to eliminate redundant Docker builds and automate SHA256 checksum generation.
+
+---
+
 ## [v1.9.1] - 2026-11-17
 
 ### Fixed

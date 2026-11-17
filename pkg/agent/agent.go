@@ -34,8 +34,8 @@ type Agent struct {
 	AccessSecret string
 	Target       string
 	ProxyURL     string
-	SNI         string
-	InsecureTLS bool
+	SNI          string
+	InsecureTLS  bool
 
 	wsConn *websocket.Conn
 	wsMu   sync.Mutex
@@ -304,7 +304,7 @@ func (a *Agent) sendPing() error {
 		return nil
 	}
 	_ = a.wsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	return a.wsConn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5 * time.Second))
+	return a.wsConn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second))
 }
 
 // GenerateShareSignature calculates an HMAC-SHA256 signature for a temporary share link.
@@ -543,7 +543,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 			return nil
 		}
 		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5 * time.Second))
+		err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
 		_ = conn.SetReadDeadline(time.Now().Add(readTo))
 		return err
 	})
