@@ -210,6 +210,11 @@ flowchart TD
     - 本版本新增或调整的配置项（如新安全参数、白名单规则、流控参数）已在示例文件中列出，且默认值与 Go 二进制常量严格一致（例如 agent 的 `max_streams: 512`，signal 的 `addr: ":8888"`, `max_ip_conns: 64`）；
     - 严格审核配置文件中的文字注释，确保说明准确严谨，严禁出现与实际代码能力不符的夸大或误导性注释。
 
+- [ ] **5.6 架构审查准则与案例库回溯审计 (Review Guidelines & Post-Mortem Audit)**
+  - **位置**：[docs/REVIEW_GUIDELINES.md](file:///docs/REVIEW_GUIDELINES.md) 与 [docs/en/REVIEW_GUIDELINES.md](file:///docs/en/REVIEW_GUIDELINES.md)
+  - **核对项**：回溯本版本迭代中解决的所有重大缺陷与引入的核心特性。
+  - **判定标准**：若本版本曾经历过深水区架构排错（如 W3C/RFC 规范陷阱、极限网络乱序、内存泄漏、沙箱逃逸）或引入了新运行环境（如 Serverless 休眠、新编译目标），确认这些经验已提炼为《辩证审查指南》中的经典案例库（Case Studies），或对 5 大系统级根本不变量（规范不对称、并发时序、背压限额、拓扑漂移、跨引擎沙箱）进行了充实。作为发版封版前的最终守门兜底防线。
+
 ---
 
 ## 阶段六：Git 工作流与标签发布 (Git Release Flow & Tagging)

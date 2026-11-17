@@ -135,6 +135,10 @@ flowchart TD
 - [ ] **5.4 Configuration Template & Comment Precision**
   - **Audit**: `configs/server.example.yaml` and `configs/agent.example.yaml` default values strictly match Go runtime constants.
 
+- [ ] **5.5 Architecture Review Guidelines & Post-Mortem Audit**
+  - **Location**: `docs/REVIEW_GUIDELINES.md` and `docs/en/REVIEW_GUIDELINES.md`
+  - **Audit**: Retrospectively verify whether major bugs or architectural features resolved in this iteration were distilled into the Case Studies or enriched the 5 systemic invariants (spec asymmetry, concurrency leaks, backpressure bounds, topology roaming, cross-engine sandbox). Serves as the ultimate retrospective safety net prior to tagging.
+
 ---
 
 ## Phase 6: Git Workflow & Tag Release
