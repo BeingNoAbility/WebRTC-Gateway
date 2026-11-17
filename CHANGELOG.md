@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v2.0.1] - 2026-11-17
+
+### Fixed & Hardened
+- **Cloudflare DO Hibernation State Recovery**:
+  - Persisted node secrets, visitor authentication flags (`requireVisitorAuth`), and IP connection cleanup markers (`ipCleaned`) in WebSocket attachments during agent registration.
+  - Restored in-memory `nodeSecrets`, `nodeVisitorAuth`, and `ipConns` state maps upon Durable Object hibernation wake-up in both `fetch()` and `handleWSClose()`, guaranteeing visitor authorization and anti-hijacking defenses persist indefinitely across idle intervals.
+- **Hardware Gzip Streaming Decompression Bypass for HEAD & Empty Responses**:
+  - Excluded `HEAD` requests, `204 No Content`, `304 Not Modified`, and responses with `Content-Length: 0` from Gzip compression passthrough in both backend HTTP proxy and browser Service Worker.
+  - Stripped internal proxy control headers (`x-p2p-client-decompress`, `x-p2p-dest-host`) prior to upstream dispatch.
+  - Eliminated browser `DecompressionStream('gzip')` throwing `TypeError: Compressed input was truncated` and Service Worker `new Response()` null-body specification violations on `HEAD` requests.
+- **Frontend Mux Stream Parity Validation**:
+  - Added stream ID parity checks (`frame.streamId % 2 === 0` for client) in `web/src/protocol/mux.ts` before creating inbound multiplexed streams, perfectly aligned with Go backend `pkg/mux/mux.go`.
+  - Safely drops stray chunks from client-cancelled requests to eliminate ghost stream leaks.
+- **Signaling Server Flag Hardening**:
+  - Completely removed the legacy `-secret` alias flag in `cmd/signal/main.go` and enforced fail-fast exit with clear remediation instructions, requiring explicit `-signal-secret` to eliminate accidental unauthenticated deployments.
+
 ## [v2.0.0] - 2026-11-17
 
 ### Performance & Modern Architecture

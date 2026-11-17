@@ -457,7 +457,7 @@ func TestHTTPProxy_GzipPassthrough(t *testing.T) {
 		Method: "GET",
 		Path:   "/assets/app.js",
 		Headers: map[string]string{
-			"Accept-Encoding":          "gzip",
+			"Accept-Encoding":         "gzip",
 			"x-p2p-client-decompress": "gzip",
 		},
 	}
@@ -569,7 +569,7 @@ func TestHTTPProxy_HeadRequestDisablesGzipPassthrough(t *testing.T) {
 		Method: "HEAD",
 		Path:   "/assets/bundle.js",
 		Headers: map[string]string{
-			"Accept-Encoding":          "gzip",
+			"Accept-Encoding":         "gzip",
 			"x-p2p-client-decompress": "gzip",
 		},
 	}
