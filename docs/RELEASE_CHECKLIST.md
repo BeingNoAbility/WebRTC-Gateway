@@ -180,8 +180,8 @@ flowchart TD
   - **位置**：[README.md](file:///README.md)、[README_en.md](file:///README_en.md)
   - **核对项**：最新版本号提及、CLI 参数说明表、Docker 部署命令是否与新功能同步。
 
-- [ ] **5.4 Wiki 知识库对齐**
-  - **位置**：`wiki/` 目录（例如 `Agent-Configuration.md`、`Deployment-Guide.md` 等）
+- [ ] **5.4 官方技术文档与专题指南对齐**
+  - **位置**：[docs/guide/](file:///docs/guide/) 目录（例如 `agent-configuration.md`、`deployment.md` 等）
   - **核对项**：检查所有引用参数、特性说明与操作步骤是否同步更新。
 
 - [ ] **5.5 配置文件示例模板与注释严谨性审计**
@@ -247,8 +247,8 @@ flowchart TD
     - `ghcr.io/beingnoability/webrtc-p2p-server:vX.Y.Z` & `:latest` (含 `linux/amd64` 与 `linux/arm64`)
     - `ghcr.io/beingnoability/webrtc-p2p-agent:vX.Y.Z` & `:latest` (含 `linux/amd64` 与 `linux/arm64`)
 
-- [ ] **7.3 Wiki 自动化同步验收 (`wiki-sync.yml`)**
-  - 确认 `Sync Wiki` 工作流执行成功，GitHub Wiki 页面内容与代码库 `wiki/` 目录自动保持一致。
+- [ ] **7.3 官方文档站 GitHub Pages 部署验收 (`deploy-pages.yml`)**
+  - 确认 `Deploy Documentation to Pages` 工作流执行成功，官方文档站页面（https://beingnoability.github.io/WebRTC-Gateway/）自动保持最新。
 
 - [ ] **7.4 线上制品冒烟抽检 (Smoke Sanity Check)**
   - 在 Linux 生产或测试环境拉取新镜像，执行非特权冒烟探针：

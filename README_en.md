@@ -6,7 +6,7 @@
 ### End-to-End P2P WebRTC Reverse Proxy Gateway with Zero Client Dependencies in Visitor Browsers
 
 <p align="center">
-  <a href="README.md"><b>简体中文</b></a> · <a href="README_en.md"><b>English</b></a> · <a href="https://github.com/BeingNoAbility/WebRTC-Gateway/wiki"><b>📖 GitHub Wiki</b></a>
+  <a href="README.md"><b>简体中文</b></a> · <a href="README_en.md"><b>English</b></a> · <a href="https://beingnoability.github.io/WebRTC-Gateway/"><b>📖 Official Docs</b></a>
 </p>
 
 [![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go)](https://go.dev/)
@@ -480,10 +480,13 @@ webrtc-gateway/
 ├── configs/                        # Configuration templates
 │   ├── agent.example.yaml          # Agent configuration reference
 │   └── server.example.yaml         # Server configuration reference
-├── docs/                           # Technical documentation & specifications
+├── docs/                           # VitePress documentation site & specifications
+│   ├── .vitepress/                 # VitePress config (nav, sidebar, search, Mermaid)
+│   ├── guide/                      # Guides (architecture, deployment, configs, security, FAQ)
 │   ├── BROWSER_COMPATIBILITY.md    # Browser compatibility & limitation matrix
 │   ├── RELEASE_CHECKLIST.md        # Release quality gate audit protocol
-│   └── RELEASE_NOTES.md            # Latest single-version release notes (GitHub Release)
+│   ├── RELEASE_NOTES.md            # Latest single-version release notes (GitHub Release)
+│   └── package.json                # Isolated docs dependencies & build scripts
 ├── test/                           # Automated test suites
 │   ├── advanced_e2e_scenarios_test.go # HTTP 206 Partial Content / Range / Gzip / Headers
 │   ├── secret_auth_test.go         # SECRET authentication & 401 instant rejection
@@ -496,7 +499,8 @@ webrtc-gateway/
 ├── .github/workflows/              # GitHub Actions CI/CD workflows
 │   ├── ci.yml                      # CI build & automated test matrix
 │   ├── release.yml                 # Multi-arch GitHub Release packager
-│   └── docker.yml                  # Multi-arch Docker image GHCR publisher
+│   ├── docker.yml                  # Multi-arch Docker image GHCR publisher
+│   └── deploy-pages.yml            # Automated GitHub Pages docs deployment
 ├── docker-compose.yml              # Production orchestration template
 ├── Dockerfile.agent                # Minimal multi-stage agent image (~20MB)
 ├── Dockerfile.server               # Minimal multi-stage server image (~16MB)

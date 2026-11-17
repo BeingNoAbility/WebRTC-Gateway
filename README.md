@@ -6,7 +6,7 @@
 ### 浏览器零客户端依赖的 P2P WebRTC 端到端内网穿透网关
 
 <p align="center">
-  <a href="README.md"><b>简体中文</b></a> · <a href="README_en.md"><b>English</b></a> · <a href="https://github.com/BeingNoAbility/WebRTC-Gateway/wiki"><b>📖 GitHub Wiki</b></a>
+  <a href="README.md"><b>简体中文</b></a> · <a href="README_en.md"><b>English</b></a> · <a href="https://beingnoability.github.io/WebRTC-Gateway/"><b>📖 官方文档 (Docs)</b></a>
 </p>
 
 [![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go)](https://go.dev/)
@@ -756,10 +756,13 @@ webrtc-gateway/
 ├── configs/                        # 配置文件模板
 │   ├── agent.example.yaml          # Agent 配置文件参考
 │   └── server.example.yaml         # Server 配置文件参考
-├── docs/                           # 项目工程与发版技术文档
+├── docs/                           # VitePress 官方文档站与技术规范
+│   ├── .vitepress/                 # VitePress 配置中心 (导航、侧边栏、搜索、Mermaid)
+│   ├── guide/                      # 核心指南 (架构、部署、参数手册、安全沙箱、FAQ)
 │   ├── BROWSER_COMPATIBILITY.md    # 浏览器兼容性与限制矩阵
 │   ├── RELEASE_CHECKLIST.md        # 正式发版全流程质量审计门禁清单
-│   └── RELEASE_NOTES.md            # 当前最新版本单版本发布说明 (供 GitHub Release 抓取)
+│   ├── RELEASE_NOTES.md            # 当前最新单版本发布说明 (供 GitHub Release 抓取)
+│   └── package.json                # 文档独立依赖与构建脚本
 ├── test/                           # 自动化测试套件
 │   ├── advanced_e2e_scenarios_test.go # HTTP 206 Partial Content / Range / Gzip / 标头反射透传
 │   ├── secret_auth_test.go         # SECRET 鉴权校验、防冒领与未授权拦截 (401 实时断开)
@@ -772,7 +775,8 @@ webrtc-gateway/
 ├── .github/workflows/              # GitHub Actions CI/CD 工作流
 │   ├── ci.yml                      # CI 构建与自动化测试矩阵
 │   ├── release.yml                 # 多架构 GitHub Release 自动化打包发布
-│   └── docker.yml                  # 多架构 Docker 镜像构建与 GHCR 推送
+│   ├── docker.yml                  # 多架构 Docker 镜像构建与 GHCR 推送
+│   └── deploy-pages.yml            # 官方文档站 GitHub Pages 自动化部署
 ├── docker-compose.yml              # 一键编排全套服务配置
 ├── Dockerfile.agent                # Agent 极简多阶段构建文件 (~20MB)
 ├── Dockerfile.server               # 一体化服务端多阶段构建文件 (~16MB)
