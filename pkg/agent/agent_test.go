@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -167,37 +168,53 @@ func TestAgent_HMACShareSignature(t *testing.T) {
 	defer ag.Close()
 
 	// 1. Direct secret token verification
-	if !ag.VerifyAuth(nodeID, secret, secret, 0, "") {
+	if !ag.VerifyAuth(nodeID, secret, secret, 0, "", "") {
 		t.Fatalf("Direct secret should be authorized")
 	}
-	if ag.VerifyAuth(nodeID, secret, "wrong-secret", 0, "") {
+	if ag.VerifyAuth(nodeID, secret, "wrong-secret", 0, "", "") {
 		t.Fatalf("Wrong direct secret should be rejected")
 	}
 
-	// 2. Valid HMAC signature verification (future expiration)
+	// 2. Valid HMAC signature verification (future expiration, legacy share link)
 	futureExp := time.Now().Add(24 * time.Hour).Unix()
 	validSign := GenerateShareSignature(nodeID, futureExp, secret)
-	if !ag.VerifyAuth(nodeID, secret, "", futureExp, validSign) {
+	if !ag.VerifyAuth(nodeID, secret, "", futureExp, validSign, "") {
 		t.Fatalf("Valid HMAC signature was rejected")
 	}
 
 	// 3. Expired HMAC signature verification (past expiration)
 	pastExp := time.Now().Add(-2 * time.Hour).Unix()
 	expiredSign := GenerateShareSignature(nodeID, pastExp, secret)
-	if ag.VerifyAuth(nodeID, secret, "", pastExp, expiredSign) {
+	if ag.VerifyAuth(nodeID, secret, "", pastExp, expiredSign, "") {
 		t.Fatalf("Expired HMAC signature should have been rejected")
 	}
 
 	// 4. Tampered signature verification
 	tamperedSign := validSign[:len(validSign)-2] + "ff"
-	if ag.VerifyAuth(nodeID, secret, "", futureExp, tamperedSign) {
+	if ag.VerifyAuth(nodeID, secret, "", futureExp, tamperedSign, "") {
 		t.Fatalf("Tampered signature should have been rejected")
 	}
 
 	// 5. Signature for different nodeID
 	otherNodeSign := GenerateShareSignature("other-node", futureExp, secret)
-	if ag.VerifyAuth(nodeID, secret, "", futureExp, otherNodeSign) {
+	if ag.VerifyAuth(nodeID, secret, "", futureExp, otherNodeSign, "") {
 		t.Fatalf("Signature for other node should have been rejected")
+	}
+
+	// 6. F-04: SDP DTLS Certificate Fingerprint HMAC Proof & Replay Defense
+	dtlsFingerprint := "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
+	authKey := ComputeHMAC(secret, "node-auth:"+nodeID)
+	fpSign := ComputeHMAC(authKey, fmt.Sprintf("%s:%d:%s", nodeID, futureExp, dtlsFingerprint))
+
+	// Legitimate client with matching DTLS fingerprint
+	if !ag.VerifyAuth(nodeID, secret, "", futureExp, fpSign, dtlsFingerprint) {
+		t.Fatalf("Valid SDP fingerprint HMAC signature was rejected")
+	}
+
+	// Attacker attempts to replay the signature with a different DTLS fingerprint
+	attackerFingerprint := "11:22:33:44:55:66:77:88:99:00:AA:BB:CC:DD:EE:FF:11:22:33:44:55:66:77:88:99:00:AA:BB:CC:DD:EE:FF"
+	if ag.VerifyAuth(nodeID, secret, "", futureExp, fpSign, attackerFingerprint) {
+		t.Fatalf("Replay attack with mismatched DTLS fingerprint must be rejected!")
 	}
 
 	// 6. GenerateShareLink formatting

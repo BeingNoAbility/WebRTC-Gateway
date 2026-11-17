@@ -110,10 +110,14 @@ func (b *SignalBroker) RegisterAgent(nodeID, secret string, requireVisitorAuth *
 	}
 
 	// 2. Node ownership protection (anti-hijack)
-	if boundSecret, exists := b.nodeSecrets[nodeID]; exists && boundSecret != "" {
+	boundSecret, hasBoundSecret := b.nodeSecrets[nodeID]
+	if hasBoundSecret && boundSecret != "" {
 		if subtle.ConstantTimeCompare([]byte(secret), []byte(boundSecret)) != 1 {
 			return fmt.Errorf("unauthorized: node_id %q is protected by a different secret", nodeID)
 		}
+	} else if _, isConnected := b.agents[nodeID]; isConnected && secret != "" {
+		// An active agent session exists without a secret. Prohibit an anonymous connection from injecting a secret mid-way to hijack it.
+		return fmt.Errorf("unauthorized: node_id %q is actively in use without cluster secret; hijacking prohibited", nodeID)
 	}
 
 	if old, exists := b.agents[nodeID]; exists {
@@ -124,6 +128,21 @@ func (b *SignalBroker) RegisterAgent(nodeID, secret string, requireVisitorAuth *
 	}
 	b.agents[nodeID] = s
 	if secret != "" {
+		// Cap nodeSecrets capacity to prevent memory exhaustion
+		const maxNodeSecrets = 10000
+		if len(b.nodeSecrets) >= maxNodeSecrets {
+			if _, exists := b.nodeSecrets[nodeID]; !exists {
+				// Evict orphaned secrets (nodes not currently connected)
+				for k := range b.nodeSecrets {
+					if _, connected := b.agents[k]; !connected {
+						delete(b.nodeSecrets, k)
+						if len(b.nodeSecrets) < maxNodeSecrets {
+							break
+						}
+					}
+				}
+			}
+		}
 		b.nodeSecrets[nodeID] = secret
 	}
 	if requireVisitorAuth != nil {

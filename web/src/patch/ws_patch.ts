@@ -200,9 +200,6 @@
       if (!nodeId) {
         try {
           nodeId = sessionStorage.getItem('p2p_active_peer_id') || localStorage.getItem('p2p_peer_id') || '';
-          if (!secret) {
-            secret = sessionStorage.getItem('p2p_secret') || (nodeId ? localStorage.getItem('p2p_secret_' + nodeId) : '') || '';
-          }
         } catch {}
       }
 
@@ -425,7 +422,7 @@
     } catch {}
   }
 
-  // 2. Hook document.cookie (Window / Document scope only)
+  // 2. Hook document.cookie (Window / Document scope only) with multi-node virtual isolation
   if (typeof document !== 'undefined') {
     try {
       const originalCookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie') ||
@@ -433,10 +430,41 @@
       if (originalCookieDesc && originalCookieDesc.set) {
         Object.defineProperty(document, 'cookie', {
           get() {
-            return originalCookieDesc.get?.call(document) || '';
+            const raw = originalCookieDesc.get?.call(document) || '';
+            const nodeId = (globalScope.__P2P_NODE_ID__ as string) || '';
+            if (!nodeId) return raw;
+
+            const prefix = `__p2p_${nodeId}_`;
+            const cookies = raw.split(';');
+            const filtered: string[] = [];
+            for (const item of cookies) {
+              const trimmed = item.trim();
+              const eqIdx = trimmed.indexOf('=');
+              if (eqIdx === -1) continue;
+              const k = trimmed.slice(0, eqIdx).trim();
+              const v = trimmed.slice(eqIdx + 1);
+              if (k.startsWith(prefix)) {
+                filtered.push(`${k.slice(prefix.length)}=${v}`);
+              }
+            }
+            return filtered.join('; ');
           },
           set(val: string) {
-            originalCookieDesc.set?.call(document, val);
+            const nodeId = (globalScope.__P2P_NODE_ID__ as string) || '';
+            let rewrittenVal = val;
+            if (nodeId) {
+              const prefix = `__p2p_${nodeId}_`;
+              const parts = val.split(';');
+              const firstPart = parts[0].trim();
+              const eqIdx = firstPart.indexOf('=');
+              if (eqIdx !== -1) {
+                const k = firstPart.slice(0, eqIdx).trim();
+                const v = firstPart.slice(eqIdx + 1);
+                const remainder = parts.slice(1).join(';');
+                rewrittenVal = `${prefix}${k}=${v}${remainder ? ';' + remainder : ''}`;
+              }
+            }
+            originalCookieDesc.set?.call(document, rewrittenVal);
             try {
               const target = realPortalWindow || (typeof window !== 'undefined' && window.parent && window.parent !== window ? window.parent : null);
               if (target) {

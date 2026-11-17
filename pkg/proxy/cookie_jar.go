@@ -86,6 +86,22 @@ func (m *SessionCookieManager) GetJar(sessionID string) http.CookieJar {
 		return entry.jar
 	}
 
+	// Cap session count to prevent memory exhaustion
+	const maxSessions = 1024
+	if len(m.entries) >= maxSessions {
+		var oldestID string
+		var oldestTime time.Time
+		for id, entry := range m.entries {
+			if oldestID == "" || entry.lastActive.Before(oldestTime) {
+				oldestID = id
+				oldestTime = entry.lastActive
+			}
+		}
+		if oldestID != "" {
+			delete(m.entries, oldestID)
+		}
+	}
+
 	newJar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil

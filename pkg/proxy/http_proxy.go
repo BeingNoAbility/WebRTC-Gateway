@@ -449,6 +449,10 @@ func (p *HTTPProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream)
 			if parts := strings.SplitN(raw, "=", 2); len(parts) == 2 {
 				name := strings.TrimSpace(parts[0])
 				val := strings.TrimSpace(parts[1])
+				// Security: Drop any cookie that starts with __p2p_ (virtualized cookie belonging to other nodes)
+				if strings.HasPrefix(name, "__p2p_") {
+					continue
+				}
 				if name != "" {
 					req.AddCookie(&http.Cookie{
 						Name:  name,

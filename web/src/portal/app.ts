@@ -21,6 +21,15 @@ async function computeHMACSHA256Hex(keyStr: string, message: string): Promise<st
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+async function deriveAuthKey(secret: string, peerId: string): Promise<string> {
+  return computeHMACSHA256Hex(secret, 'node-auth:' + peerId);
+}
+
+function extractSDPFingerprint(sdp: string): string {
+  const match = sdp.match(/a=fingerprint:\S+\s+([A-Fa-f0-9:]{20,})/i);
+  return match ? match[1].toUpperCase().trim() : '';
+}
+
 interface WebRTCHUDInfo {
   transportType: 'direct' | 'relay' | 'unknown';
   localType: string;
@@ -41,7 +50,8 @@ interface WebRTCHUDInfo {
 class PortalApp {
   private peerId: string;
   private signalUrl: string;
-  private secret: string = '';
+  private authKey: string = '';
+  private authKeyPromise: Promise<string> | null = null;
   private shareExp: number = 0;
   private shareSign: string = '';
   private isIceRestarting: boolean = false;
@@ -98,18 +108,21 @@ class PortalApp {
     const config = this.resolveInitialConfig();
     this.peerId = config.peerId;
     this.signalUrl = config.signalUrl;
-    this.secret = config.secret;
+    this.authKey = (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('p2p_auth_' + this.peerId) : '') || '';
+    if (config.secret) {
+      this.initAuthKey(config.secret);
+    }
     this.shareExp = config.exp || 0;
     this.shareSign = config.sign || '';
     this.initialSubpath = config.path || '/';
 
-    // Long-lived client token for persisting HttpOnly sessions across page reloads (F5)
+    // Long-lived client token for persisting HttpOnly sessions across page reloads (F5), isolated by peerId
     let token = '';
     try {
-      token = sessionStorage.getItem('p2p_client_token') || '';
+      token = sessionStorage.getItem('p2p_client_token_' + this.peerId) || '';
       if (!token) {
         token = 'cl_' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36));
-        sessionStorage.setItem('p2p_client_token', token);
+        sessionStorage.setItem('p2p_client_token_' + this.peerId, token);
       }
     } catch {
       token = 'cl_' + Math.random().toString(36).substring(2);
@@ -148,9 +161,7 @@ class PortalApp {
     if (!this.peerId) return;
     try {
       const hashParams = new URLSearchParams();
-      if (this.secret) {
-        hashParams.set('secret', this.secret);
-      } else if (this.shareSign && this.shareExp) {
+      if (this.shareSign && this.shareExp) {
         hashParams.set('exp', this.shareExp.toString());
         hashParams.set('sign', this.shareSign);
       }
@@ -163,6 +174,30 @@ class PortalApp {
         window.history.replaceState(null, '', newHash);
       }
     } catch {}
+  }
+
+  // One-way derived auth key generation and secure in-memory/sessionStorage persistence (F-02)
+  private async initAuthKey(secret: string): Promise<string> {
+    if (!secret) return '';
+    this.authKeyPromise = (async () => {
+      try {
+        const derived = await deriveAuthKey(secret, this.peerId);
+        this.authKey = derived;
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.setItem('p2p_auth_' + this.peerId, derived);
+          sessionStorage.removeItem('p2p_secret');
+        }
+        try {
+          localStorage.removeItem('p2p_secret');
+          localStorage.removeItem('p2p_secret_' + this.peerId);
+        } catch {}
+        return derived;
+      } catch (e) {
+        console.error('[Portal] Failed to derive auth key:', e);
+        return '';
+      }
+    })();
+    return this.authKeyPromise;
   }
 
   // Extracts explicit Node ID from subdomain with ".p2p." delimiter (e.g. bili.p2p.example.com)
@@ -331,8 +366,20 @@ class PortalApp {
       peerId = DEFAULT_NODE_ID;
     }
 
-    if (!secret && peerId) {
-      secret = sessionStorage.getItem('p2p_secret') || localStorage.getItem('p2p_secret_' + peerId) || '';
+    if (secret) {
+      // Security Hardening: Immediately strip secret/token from URL hash to prevent leakage in browser history/referrer
+      try {
+        const cleanParams = new URLSearchParams();
+        if (exp && sign) {
+          cleanParams.set('exp', exp.toString());
+          cleanParams.set('sign', sign);
+        }
+        if (initialPath && initialPath !== '/') {
+          cleanParams.set('path', initialPath);
+        }
+        const cleanHash = '#' + peerId + (cleanParams.toString() ? '?' + cleanParams.toString() : '');
+        window.history.replaceState(null, '', window.location.pathname + window.location.search + cleanHash);
+      } catch {}
     }
 
     // 2. Signaling URL: ?signal= -> localStorage -> auto-detected co-located /ws on server hosts
@@ -355,14 +402,14 @@ class PortalApp {
     }
 
     // Persist active settings in sessionStorage and localStorage for future visits / windows
+    // F-02: Plaintext secrets are strictly barred from localStorage
     try {
       sessionStorage.setItem('p2p_active_peer_id', peerId);
       localStorage.setItem('p2p_peer_id', peerId);
       localStorage.setItem('p2p_signal_url', signalUrl);
-      if (secret) {
-        sessionStorage.setItem('p2p_secret', secret);
-        localStorage.setItem('p2p_secret_' + peerId, secret);
-      }
+      sessionStorage.removeItem('p2p_secret');
+      localStorage.removeItem('p2p_secret');
+      localStorage.removeItem('p2p_secret_' + peerId);
     } catch {}
 
     return { peerId, signalUrl, secret, path: initialPath, exp, sign };
@@ -440,25 +487,32 @@ class PortalApp {
         if (
           newHash &&
           (newHash !== this.peerId ||
-            (newSecret && newSecret !== this.secret) ||
+            newSecret ||
             (newSign && newSign !== this.shareSign))
         ) {
           this.log(`URL hash changed to #${rawHash}, switching peer...`);
           this.peerId = newHash;
           this.shareExp = newExp;
           this.shareSign = newSign;
+          this.authKey = (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('p2p_auth_' + newHash) : '') || '';
           if (newSecret) {
-            this.secret = newSecret;
+            this.initAuthKey(newSecret);
             try {
-              sessionStorage.setItem('p2p_secret', newSecret);
-              localStorage.setItem('p2p_secret_' + newHash, newSecret);
+              const cleanParams = new URLSearchParams();
+              if (newExp && newSign) {
+                cleanParams.set('exp', newExp.toString());
+                cleanParams.set('sign', newSign);
+              }
+              const cleanHash = '#' + newHash + (cleanParams.toString() ? '?' + cleanParams.toString() : '');
+              window.history.replaceState(null, '', cleanHash);
             } catch {}
-          } else if (!newSign) {
-            this.secret = sessionStorage.getItem('p2p_secret') || localStorage.getItem('p2p_secret_' + newHash) || '';
           }
           try {
             sessionStorage.setItem('p2p_active_peer_id', newHash);
             localStorage.setItem('p2p_peer_id', newHash);
+            sessionStorage.removeItem('p2p_secret');
+            localStorage.removeItem('p2p_secret');
+            localStorage.removeItem('p2p_secret_' + newHash);
           } catch {}
           const sw = navigator.serviceWorker?.controller;
           if (sw) {
@@ -550,7 +604,10 @@ class PortalApp {
         }
         if (msg.status === 'online') {
           this.hideOfflinePrompt();
-          if (msg.requires_secret && !this.secret && !this.shareSign) {
+          if (this.authKeyPromise) {
+            await this.authKeyPromise;
+          }
+          if (msg.requires_secret && !this.authKey && !this.shareSign) {
             this.log(`Node [${this.peerId}] requires an access token (secret).`);
             if (this.signalVal) this.signalVal.textContent = 'Auth Required';
             this.showAuthPrompt(this.peerId);
@@ -696,16 +753,32 @@ class PortalApp {
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
 
+    let sign = this.shareSign || undefined;
+    let exp = this.shareExp || undefined;
+
+    if (this.authKeyPromise) {
+      await this.authKeyPromise;
+    }
+
+    // F-04: DTLS certificate fingerprint binding with derived authKey
+    if (this.authKey && offer.sdp) {
+      const sdpFingerprint = extractSDPFingerprint(offer.sdp);
+      if (sdpFingerprint) {
+        const expTime = exp || Math.floor(Date.now() / 1000) + 300;
+        exp = expTime;
+        sign = await computeHMACSHA256Hex(this.authKey, `${this.peerId}:${expTime}:${sdpFingerprint}`);
+      }
+    }
+
     this.log('Generated WebRTC Offer. Sending to Agent via Signaling...');
     this.ws?.send(
       JSON.stringify({
         type: 'offer',
         node_id: this.peerId,
         sdp: offer,
-        secret: this.secret,
         client_token: this.clientToken,
-        exp: this.shareExp || undefined,
-        sign: this.shareSign || undefined,
+        exp: exp,
+        sign: sign,
       })
     );
   }
@@ -1325,7 +1398,7 @@ class PortalApp {
     const initSignal = document.getElementById('inputSignalUrl') as HTMLInputElement;
     if (initSignal) initSignal.value = this.signalUrl;
     const initSecret = document.getElementById('inputSecret') as HTMLInputElement;
-    if (initSecret) initSecret.value = this.secret;
+    if (initSecret) initSecret.value = '';
 
     document.querySelectorAll('.node-chip').forEach((chip) => {
       chip.addEventListener('click', () => {
@@ -1367,7 +1440,7 @@ class PortalApp {
       modal.style.display = 'none';
     });
 
-    document.getElementById('btnSaveReconnect')?.addEventListener('click', () => {
+    document.getElementById('btnSaveReconnect')?.addEventListener('click', async () => {
       const inputNode = document.getElementById('inputNodeId') as HTMLInputElement;
       const inputSignal = document.getElementById('inputSignalUrl') as HTMLInputElement;
       const inputSecret = document.getElementById('inputSecret') as HTMLInputElement;
@@ -1386,18 +1459,19 @@ class PortalApp {
 
       this.peerId = newNodeId;
       this.signalUrl = newSignalUrl;
-      this.secret = newSecret;
+      if (newSecret) {
+        await this.initAuthKey(newSecret);
+        inputSecret.value = '';
+      } else if (newNodeId !== this.peerId) {
+        this.authKey = (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('p2p_auth_' + newNodeId) : '') || '';
+      }
       try {
         sessionStorage.setItem('p2p_active_peer_id', newNodeId);
         localStorage.setItem('p2p_peer_id', newNodeId);
         localStorage.setItem('p2p_signal_url', newSignalUrl);
-        if (newSecret) {
-          sessionStorage.setItem('p2p_secret', newSecret);
-          localStorage.setItem('p2p_secret_' + newNodeId, newSecret);
-        } else {
-          sessionStorage.removeItem('p2p_secret');
-          localStorage.removeItem('p2p_secret_' + newNodeId);
-        }
+        sessionStorage.removeItem('p2p_secret');
+        localStorage.removeItem('p2p_secret');
+        localStorage.removeItem('p2p_secret_' + newNodeId);
 
         if (inputTurnUrl && inputTurnUrl.value.trim()) {
           localStorage.setItem('p2p_turn_url', inputTurnUrl.value.trim());
@@ -1434,17 +1508,21 @@ class PortalApp {
         alert('Invalid Node ID format. Only alphanumeric characters, dots, dashes, and underscores are allowed (1-64 chars).');
         return;
       }
-      const secretKey = inputSecret?.value.trim() || this.secret;
+      const secretKey = inputSecret?.value.trim();
       const durationSec = parseInt(selDuration?.value || '86400', 10);
 
       const base = window.location.origin + window.location.pathname;
 
       if (!secretKey) {
-        // Node has no secret configured
-        const directLink = `${base}#${targetNode}`;
-        if (inputLink) inputLink.value = directLink;
-        if (container) container.style.display = 'flex';
-        return;
+        if (!this.authKey) {
+          const directLink = `${base}#${targetNode}`;
+          if (inputLink) inputLink.value = directLink;
+          if (container) container.style.display = 'flex';
+          return;
+        } else {
+          alert('请在上方“访问口令 / 密钥”输入框中输入口令以生成签名分享链接。');
+          return;
+        }
       }
 
       try {
@@ -1503,7 +1581,7 @@ class PortalApp {
       const inputSignal = document.getElementById('inputSignalUrl') as HTMLInputElement;
       if (inputSignal) inputSignal.value = this.signalUrl;
       const inputSecret = document.getElementById('inputSecret') as HTMLInputElement;
-      if (inputSecret) inputSecret.value = this.secret;
+      if (inputSecret) inputSecret.value = '';
 
       const inputTurnUrl = document.getElementById('inputTurnUrl') as HTMLInputElement;
       if (inputTurnUrl) inputTurnUrl.value = localStorage.getItem('p2p_turn_url') || '';
@@ -1612,7 +1690,7 @@ class PortalApp {
 
     const input = document.getElementById('inputAuthSecret') as HTMLInputElement;
     if (input) {
-      input.value = this.secret;
+      input.value = '';
       setTimeout(() => input.focus(), 50);
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
@@ -1621,15 +1699,15 @@ class PortalApp {
       });
     }
 
-    const doSubmit = () => {
+    const doSubmit = async () => {
       const val = input ? input.value.trim() : '';
-      const remember = (document.getElementById('chkRememberSecret') as HTMLInputElement)?.checked;
-      this.secret = val;
-      if (remember) {
-        try { localStorage.setItem('p2p_secret_' + peerId, val); } catch {}
-      } else {
-        try { localStorage.removeItem('p2p_secret_' + peerId); } catch {}
-      }
+      if (!val) return;
+      await this.initAuthKey(val);
+      if (input) input.value = '';
+      try {
+        localStorage.removeItem('p2p_secret');
+        localStorage.removeItem('p2p_secret_' + peerId);
+      } catch {}
       this.hideAuthPrompt();
       this.reconnect();
     };
@@ -1677,17 +1755,33 @@ class PortalApp {
       const offer = await this.pc.createOffer({ iceRestart: true });
       await this.pc.setLocalDescription(offer);
 
+      let sign = this.shareSign || undefined;
+      let exp = this.shareExp || undefined;
+
+      if (this.authKeyPromise) {
+        await this.authKeyPromise;
+      }
+
+      // F-04: DTLS certificate fingerprint binding with derived authKey
+      if (this.authKey && offer.sdp) {
+        const sdpFingerprint = extractSDPFingerprint(offer.sdp);
+        if (sdpFingerprint) {
+          const expTime = exp || Math.floor(Date.now() / 1000) + 300;
+          exp = expTime;
+          sign = await computeHMACSHA256Hex(this.authKey, `${this.peerId}:${expTime}:${sdpFingerprint}`);
+        }
+      }
+
       this.log('Transmitting ICE Restart Offer to Agent via Signaling...');
       this.ws?.send(
         JSON.stringify({
           type: 'offer',
           node_id: this.peerId,
           sdp: offer,
-          secret: this.secret,
           client_token: this.clientToken,
           ice_restart: true,
-          exp: this.shareExp || undefined,
-          sign: this.shareSign || undefined,
+          exp: exp,
+          sign: sign,
         })
       );
     } catch (err: any) {
@@ -1763,9 +1857,7 @@ class PortalApp {
     this.log(`Reconnecting to node [${this.peerId}] via ${this.signalUrl}...`);
 
     const hashParams = new URLSearchParams();
-    if (this.secret) {
-      hashParams.set('secret', this.secret);
-    } else if (this.shareSign && this.shareExp) {
+    if (this.shareSign && this.shareExp) {
       hashParams.set('exp', this.shareExp.toString());
       hashParams.set('sign', this.shareSign);
     }
@@ -1781,10 +1873,9 @@ class PortalApp {
     try {
       sessionStorage.setItem('p2p_active_peer_id', this.peerId);
       localStorage.setItem('p2p_peer_id', this.peerId);
-      if (this.secret) {
-        sessionStorage.setItem('p2p_secret', this.secret);
-        localStorage.setItem('p2p_secret_' + this.peerId, this.secret);
-      }
+      sessionStorage.removeItem('p2p_secret');
+      localStorage.removeItem('p2p_secret');
+      localStorage.removeItem('p2p_secret_' + this.peerId);
     } catch {}
 
     const sw = navigator.serviceWorker?.controller;

@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,7 @@ type Agent struct {
 
 	webrtcConfig     webrtc.Configuration
 	activeConns      map[string]*webrtc.PeerConnection
+	activeMuxes      map[string]*mux.Mux
 	clientIPs        map[string]string
 	connMu           sync.Mutex
 	pendingTeardowns map[string]*time.Timer
@@ -110,6 +112,7 @@ func New(nodeID, signalURL, signalSecret, accessSecret, target string) *Agent {
 			},
 		},
 		activeConns:          make(map[string]*webrtc.PeerConnection),
+		activeMuxes:          make(map[string]*mux.Mux),
 		clientIPs:            make(map[string]string),
 		pendingTeardowns:     make(map[string]*time.Timer),
 		maxConcurrentStreams: 512,
@@ -313,12 +316,28 @@ func (a *Agent) sendPing() error {
 	return a.wsConn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second))
 }
 
+var fingerprintRegex = regexp.MustCompile(`(?i)a=fingerprint:\S+\s+([A-Fa-f0-9:]{20,})`)
+
+// ExtractSDPFingerprint extracts the DTLS certificate fingerprint from an SDP string.
+func ExtractSDPFingerprint(sdp string) string {
+	match := fingerprintRegex.FindStringSubmatch(sdp)
+	if len(match) > 1 {
+		return strings.ToUpper(strings.TrimSpace(match[1]))
+	}
+	return ""
+}
+
+// ComputeHMAC calculates an HMAC-SHA256 hex string with the given key and data.
+func ComputeHMAC(key, data string) string {
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write([]byte(data))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 // GenerateShareSignature calculates an HMAC-SHA256 signature for a temporary share link.
 func GenerateShareSignature(nodeID string, exp int64, secret string) string {
 	data := fmt.Sprintf("%s:%d", nodeID, exp)
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(data))
-	return hex.EncodeToString(mac.Sum(nil))
+	return ComputeHMAC(secret, data)
 }
 
 // GenerateShareLink formats a ready-to-share URL with HMAC signature.
@@ -332,33 +351,54 @@ func GenerateShareLink(baseURL, nodeID, secret string, duration time.Duration) s
 }
 
 // VerifyAuth validates whether a client connection request is authorized.
-// It supports both direct access secret tokens and time-limited HMAC-SHA256 signatures.
-func (a *Agent) VerifyAuth(nodeID, accessSecret, reqSecret string, exp int64, sign string) bool {
+// It supports DTLS fingerprint replay defense (F-04), one-way derived auth keys (F-02),
+// and backward-compatible temporary share link signatures.
+func (a *Agent) VerifyAuth(nodeID, accessSecret, reqSecret string, exp int64, sign, sdpFingerprint string) bool {
 	if accessSecret == "" {
 		return true // No authentication configured on agent (public access)
 	}
 
-	// 1. Direct access secret token verification
+	// 1. Direct access secret token verification (legacy)
 	if reqSecret != "" && subtle.ConstantTimeCompare([]byte(reqSecret), []byte(accessSecret)) == 1 {
 		return true
 	}
 
-	// 2. Stateless HMAC-SHA256 signed temporary link verification
-	if sign != "" && exp > 0 {
-		now := time.Now().Unix()
-		// Allow 60 seconds clock skew tolerance
-		if now > exp+60 {
-			log.Printf("[Agent] Share signature expired: exp=%d, now=%d", exp, now)
-			return false
-		}
-		expectedSign := GenerateShareSignature(nodeID, exp, accessSecret)
-		if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedSign))) == 1 {
-			return true
-		}
-		log.Printf("[Agent] Share signature mismatch for node %s", nodeID)
+	if sign == "" {
 		return false
 	}
 
+	now := time.Now().Unix()
+	// Allow 60 seconds clock skew tolerance if exp > 0
+	if exp > 0 && now > exp+60 {
+		log.Printf("[Agent] Signature expired: exp=%d, now=%d", exp, now)
+		return false
+	}
+
+	// Derived authKey: HMAC-SHA256(accessSecret, "node-auth:" + nodeID)
+	authKey := ComputeHMAC(accessSecret, "node-auth:"+nodeID)
+
+	// Tier 1: DTLS certificate fingerprint binding with derived authKey
+	if sdpFingerprint != "" {
+		expectedSign := ComputeHMAC(authKey, fmt.Sprintf("%s:%d:%s", nodeID, exp, sdpFingerprint))
+		if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedSign))) == 1 {
+			return true
+		}
+		// Tier 2: DTLS certificate fingerprint binding with direct accessSecret
+		expectedSignDirect := ComputeHMAC(accessSecret, fmt.Sprintf("%s:%d:%s", nodeID, exp, sdpFingerprint))
+		if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedSignDirect))) == 1 {
+			return true
+		}
+	}
+
+	// Tier 3: Backward-compatible share link without fingerprint (nodeID:exp)
+	if exp > 0 {
+		expectedShareSign := GenerateShareSignature(nodeID, exp, accessSecret)
+		if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedShareSign))) == 1 {
+			return true
+		}
+	}
+
+	log.Printf("[Agent] Auth verification failed for node %s", nodeID)
 	return false
 }
 
@@ -393,6 +433,10 @@ func (a *Agent) cancelPendingTeardown(sessionID string) {
 
 func (a *Agent) teardownSession(sessionID, cookieSession string, pc *webrtc.PeerConnection) {
 	a.connMu.Lock()
+	if oldMux, exists := a.activeMuxes[sessionID]; exists {
+		_ = oldMux.Close()
+		delete(a.activeMuxes, sessionID)
+	}
 	currPC, exists := a.activeConns[sessionID]
 	if !exists || currPC == pc || pc == nil {
 		delete(a.activeConns, sessionID)
@@ -423,6 +467,10 @@ func (a *Agent) Close() {
 	a.pendingMu.Unlock()
 
 	a.connMu.Lock()
+	for id, m := range a.activeMuxes {
+		_ = m.Close()
+		delete(a.activeMuxes, id)
+	}
 	for id, pc := range a.activeConns {
 		_ = pc.Close()
 		delete(a.activeConns, id)
@@ -588,8 +636,12 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 			log.Printf("[Agent] Server confirmed registration for node: %s", msg.NodeID)
 
 		case signaling.TypeOffer:
-			log.Printf("[Agent] Received Offer from client session=%s (ice_restart=%v, exp=%d, client_ip=%s)", msg.SessionID, msg.IceRestart, msg.Exp, msg.ClientIP)
-			if !a.VerifyAuth(a.NodeID, a.AccessSecret, msg.Secret, msg.Exp, msg.Sign) {
+			var sdpFingerprint string
+			if msg.SDP != nil {
+				sdpFingerprint = ExtractSDPFingerprint(msg.SDP.SDP)
+			}
+			log.Printf("[Agent] Received Offer from client session=%s (ice_restart=%v, exp=%d, client_ip=%s, fp=%s)", msg.SessionID, msg.IceRestart, msg.Exp, msg.ClientIP, sdpFingerprint)
+			if !a.VerifyAuth(a.NodeID, a.AccessSecret, msg.Secret, msg.Exp, msg.Sign, sdpFingerprint) {
 				log.Printf("[Agent] Rejected unauthorized Offer for session=%s (invalid access secret or expired/invalid signature)", msg.SessionID)
 				_ = a.sendSignal(&signaling.Message{
 					Type:      signaling.TypeError,
@@ -651,7 +703,13 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 		}
 	}
 
-	// Close old PC if replacing session
+	// Close old PC and Mux if replacing session
+	a.connMu.Lock()
+	if oldMux, muxExists := a.activeMuxes[sessionID]; muxExists {
+		_ = oldMux.Close()
+		delete(a.activeMuxes, sessionID)
+	}
+	a.connMu.Unlock()
 	if exists && existingPC != nil {
 		_ = existingPC.Close()
 	}
@@ -711,6 +769,10 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 
 		transport := &countedTransport{DataChannel: dc, txCounter: &a.txBytesTotal}
 		m := mux.NewMux(transport, false)
+
+		a.connMu.Lock()
+		a.activeMuxes[sessionID] = m
+		a.connMu.Unlock()
 
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			atomic.AddUint64(&a.rxBytesTotal, uint64(len(msg.Data)))
@@ -846,7 +908,7 @@ func (a *Agent) streamAcceptLoop(sessionID, cookieSession string, m *mux.Mux) {
 				// Raw data stream (e.g. echo or direct raw pipe)
 				defer s.Close()
 				buf := new(bytes.Buffer)
-				_, _ = io.Copy(buf, io.LimitReader(s, 16*1024*1024))
+				_, _ = io.Copy(buf, io.LimitReader(s, 64*1024))
 				_, _ = s.Write(buf.Bytes())
 				return
 			}

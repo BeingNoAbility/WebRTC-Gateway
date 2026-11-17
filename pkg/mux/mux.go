@@ -288,6 +288,12 @@ func (m *Mux) reapIdleStreams() {
 	}
 }
 
+func (m *Mux) getStream(id uint32) *Stream {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.streams[id]
+}
+
 // writeFrame writes an encoded frame to the underlying transport with backpressure flow control.
 // High-priority control frames (PING, PONG, RST, HEADERS, stream 0) bypass data buffer backpressure,
 // preventing Head-of-Line (HoL) blocking when large data streams saturate the buffer.
@@ -303,13 +309,40 @@ func (m *Mux) writeFrame(f *protocol.Frame) error {
 	if !isHighPriority {
 		m.bpMu.Lock()
 		for m.transport.BufferedAmount() > DefaultBufferedHighWaterMark {
-			m.bpCond.Wait()
 			m.mu.RLock()
 			closed := m.closed
 			m.mu.RUnlock()
 			if closed {
 				m.bpMu.Unlock()
 				return ErrMuxClosed
+			}
+
+			if s := m.getStream(f.StreamID); s != nil {
+				select {
+				case <-s.Context().Done():
+					m.bpMu.Unlock()
+					return s.Context().Err()
+				default:
+				}
+			}
+
+			m.bpCond.Wait()
+
+			m.mu.RLock()
+			closed = m.closed
+			m.mu.RUnlock()
+			if closed {
+				m.bpMu.Unlock()
+				return ErrMuxClosed
+			}
+
+			if s := m.getStream(f.StreamID); s != nil {
+				select {
+				case <-s.Context().Done():
+					m.bpMu.Unlock()
+					return s.Context().Err()
+				default:
+				}
 			}
 		}
 		m.bpMu.Unlock()
