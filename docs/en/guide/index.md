@@ -22,7 +22,10 @@ This project introduces a revolutionary intranet penetration and remote access a
 | **[📐 Architecture & Design](./architecture)** | P2PMux v1 binary framing protocol, Service Worker interception, DOM virtualization monkey patches, and isolated CookieJars. | Architects & Developers |
 | **[🚀 Production Deployment](./deployment)** | Cloudflare Workers edge deployment, single self-contained Go binaries, and Docker / Docker Compose orchestration. | DevOps & Self-Hosters |
 | **[⚙️ Agent Configuration](./agent-configuration)** | Complete CLI flags, environment variables, YAML configuration templates, and priority resolution. | All Users & NAS Admins |
+| **[📂 P2P File & Directory Server](./file-server)** | Zero-port in-memory file sharing, private AirDrop / Wormhole, and static directory hosting. | All Users & Collaborators |
+| **[🔒 Security & Access Control](./security)** | Dual-secret decoupling, HMAC-SHA256 expiring links, and authoritative client IP propagation. | Security & System Admins |
 | **[🌐 Browser Compatibility](./browser-compatibility)** | Tier 1 (Chrome, Edge, Firefox) & Tier 2 (Safari, WebKit) support details, background hibernation, and mobile recovery. | Frontend Engineers |
+| **[❓ Troubleshooting & FAQ](./troubleshooting)** | Symmetric NAT diagnosis, TURN relay setup, self-signed HTTPS certificates, and roaming ICE Restart. | Troubleshooting & Support |
 
 ---
 

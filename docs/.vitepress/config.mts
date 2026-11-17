@@ -99,7 +99,7 @@ export default withMermaid(
             { text: 'Overview', link: '/en/guide/' },
             { text: 'Architecture', link: '/en/guide/architecture' },
             { text: 'Deployment', link: '/en/guide/deployment' },
-            { text: 'Checklist', link: '/RELEASE_CHECKLIST' },
+            { text: 'Checklist', link: '/en/RELEASE_CHECKLIST' },
             { text: 'GitHub', link: 'https://github.com/BeingNoAbility/WebRTC-Gateway' },
           ],
 
@@ -119,13 +119,16 @@ export default withMermaid(
               items: [
                 { text: '🚀 Production Deployment', link: '/en/guide/deployment' },
                 { text: '⚙️ Agent & Server Configuration', link: '/en/guide/agent-configuration' },
+                { text: '📂 P2P File & Directory Server', link: '/en/guide/file-server' },
+                { text: '🔒 Security & Access Control', link: '/en/guide/security' },
+                { text: '❓ Troubleshooting & FAQ', link: '/en/guide/troubleshooting' },
               ],
             },
             {
               text: 'Engineering Specifications',
               collapsed: false,
               items: [
-                { text: '📋 Release Quality Checklist', link: '/RELEASE_CHECKLIST' },
+                { text: '📋 Release Quality Checklist', link: '/en/RELEASE_CHECKLIST' },
                 { text: '🛡️ Dialectical Review Guidelines', link: '/en/REVIEW_GUIDELINES' },
               ],
             },
