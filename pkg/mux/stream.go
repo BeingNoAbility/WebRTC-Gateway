@@ -267,7 +267,11 @@ func (s *Stream) pushInboundData(payload []byte, fin bool) {
 			s.err = errors.New("stream inbound buffer exceeded limit")
 			s.cancel()
 			s.cond.Broadcast()
-			go s.mux.removeStream(s.id)
+			go func() {
+				rstFrame := protocol.NewFrame(s.id, protocol.TypeRstStream, protocol.FlagNone, nil)
+				_ = s.mux.writeFrame(rstFrame)
+				s.mux.removeStream(s.id)
+			}()
 			return
 		}
 		cp := make([]byte, len(payload))

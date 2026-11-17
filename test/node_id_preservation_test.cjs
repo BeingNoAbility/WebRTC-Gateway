@@ -37,7 +37,7 @@ assert(swCode.includes('window.__P2P_PORTAL_ORIGIN__'), 'sw.js injects window.__
 assert(swCode.includes('NODE_CHANGE'), 'sw.js listens for NODE_CHANGE');
 assert(!swCode.includes('__P2P_SECRET__'), 'sw.js MUST NOT inject window.__P2P_SECRET__ (P0-3)');
 assert(!swCode.includes("includes('/worker')") && !swCode.includes('includes("/worker")'), 'sw.js MUST NOT use fuzzy url.pathname.includes("/worker") (P1-4)');
-assert(swCode.includes('stream: true') || swCode.includes('stream:!0') || swCode.includes('{stream:!0}'), 'sw.js uses TextDecoder { stream: true } (P1-4)');
+assert(swCode.includes('__P2P_ALLOWED_DOMAINS__') && swCode.includes('subarray'), 'sw.js uses pure byte stream injection without UTF-8 slicing corruption (P1-4)');
 assert(swCode.includes('resultingClientId'), 'sw.js includes multi-tab iframe-to-portal session mapping via resultingClientId (P1-2)');
 assert(swCode.includes('matchAll') && swCode.includes('window'), 'sw.js includes Active GC against dead window sessions');
 assert(swCode.includes('clients.get') || swCode.includes('.clients.get'), 'sw.js includes Lazy GC client liveness verification');

@@ -53,8 +53,12 @@ export class SignalingRoom extends DurableObject {
   handleWS(ws, clientIP) {
     let role = '';
     let sessionId = crypto.randomUUID();
+    let agentNodeId = '';
 
+    let ipCleaned = false;
     const cleanupIP = () => {
+      if (ipCleaned) return;
+      ipCleaned = true;
       const c = this.ipConns.get(clientIP) || 0;
       if (c <= 1) this.ipConns.delete(clientIP);
       else this.ipConns.set(clientIP, c - 1);
@@ -73,6 +77,20 @@ export class SignalingRoom extends DurableObject {
             const nodeId = msg.node_id;
             const secret = msg.secret || '';
             if (!nodeId) return;
+            agentNodeId = nodeId;
+
+            // Global cluster secret verification
+            if (this.env && this.env.SIGNAL_SECRET && this.env.SIGNAL_SECRET !== secret) {
+              try {
+                ws.send(JSON.stringify({
+                  type: 'error',
+                  code: 4003,
+                  message: 'unauthorized: invalid cluster signal secret',
+                }));
+                ws.close(4003, 'Unauthorized');
+              } catch {}
+              return;
+            }
 
             // Anti-hijack protection: verify node secret if already bound
             const boundSecret = this.nodeSecrets.get(nodeId);
@@ -164,20 +182,28 @@ export class SignalingRoom extends DurableObject {
           }
 
           case 'answer': {
-            // Agent -> Client
-            const clWs = this.clientBySession.get(msg.session_id);
-            if (clWs) {
-              clWs.send(JSON.stringify(msg));
+            // Agent -> Client (Strict node attribution validation)
+            if (role === 'agent') {
+              const clWs = this.clientBySession.get(msg.session_id);
+              if (clWs) {
+                const clientInfo = this.clients.get(clWs);
+                if (clientInfo && clientInfo.targetNodeId === agentNodeId) {
+                  clWs.send(JSON.stringify(msg));
+                }
+              }
             }
             break;
           }
 
           case 'candidate': {
             if (role === 'agent') {
-              // Agent -> Client
+              // Agent -> Client (Strict node attribution validation)
               const clWs = this.clientBySession.get(msg.session_id);
               if (clWs) {
-                clWs.send(JSON.stringify(msg));
+                const clientInfo = this.clients.get(clWs);
+                if (clientInfo && clientInfo.targetNodeId === agentNodeId) {
+                  clWs.send(JSON.stringify(msg));
+                }
               }
             } else {
               // Client -> Agent
@@ -192,11 +218,14 @@ export class SignalingRoom extends DurableObject {
           }
 
           case 'error': {
-            // Relay error message (e.g. auth rejection from agent to client)
+            // Relay error message (e.g. auth rejection from agent to client with attribution validation)
             if (role === 'agent' && msg.session_id) {
               const clWs = this.clientBySession.get(msg.session_id);
               if (clWs) {
-                clWs.send(JSON.stringify(msg));
+                const clientInfo = this.clients.get(clWs);
+                if (clientInfo && clientInfo.targetNodeId === agentNodeId) {
+                  clWs.send(JSON.stringify(msg));
+                }
               }
             }
             break;

@@ -618,7 +618,7 @@ func runHealthCheck(addr string, preferTLS bool, customURL string) int {
 }
 
 // Version represents the current release version of WebRTC Gateway Signal Server.
-var Version = "v1.9.2"
+var Version = "v1.9.3"
 
 func printSignalUsage(out io.Writer) {
 	fmt.Fprintf(out, "WebRTC Gateway Signal (%s)\n", Version)
@@ -1023,17 +1023,19 @@ func main() {
 				}
 
 			case signaling.TypeAnswer:
-				// Agent returns Answer to specific Client
-				client := broker.GetClient(msg.SessionID)
-				if client != nil {
-					_ = client.Send(&msg)
+				// Agent returns Answer to specific Client (Strict node attribution validation)
+				if session.Role == "agent" {
+					client := broker.GetClient(msg.SessionID)
+					if client != nil && client.NodeID == session.NodeID {
+						_ = client.Send(&msg)
+					}
 				}
 
 			case signaling.TypeCandidate:
 				// Relay ICE candidates
 				if session.Role == "agent" {
 					client := broker.GetClient(msg.SessionID)
-					if client != nil {
+					if client != nil && client.NodeID == session.NodeID {
 						_ = client.Send(&msg)
 					}
 				} else {
@@ -1045,10 +1047,10 @@ func main() {
 				}
 
 			case signaling.TypeError:
-				// Relay error messages (e.g. auth rejection from agent to client)
+				// Relay error messages (e.g. auth rejection from agent to client with attribution validation)
 				if session.Role == "agent" && msg.SessionID != "" {
 					client := broker.GetClient(msg.SessionID)
-					if client != nil {
+					if client != nil && client.NodeID == session.NodeID {
 						_ = client.Send(&msg)
 					}
 				}

@@ -28,6 +28,7 @@ interface PortalSession {
   nodeId: string;
   backendOrigin?: string;
   backendRootDomain?: string;
+  allowedDomains?: string[];
   lastActive: number;
 }
 
@@ -166,6 +167,28 @@ async function getPortalClient(preferredClientId?: string): Promise<Client | nul
   return allClients.length > 0 ? allClients[0] : null;
 }
 
+function isDomainAllowed(hostname: string, allowedDomains?: string[], rootDomain?: string): boolean {
+  const host = hostname.toLowerCase();
+  if (rootDomain && (host === rootDomain || host.endsWith('.' + rootDomain))) {
+    return true;
+  }
+  if (!allowedDomains || allowedDomains.length === 0) {
+    return false;
+  }
+  for (const pattern of allowedDomains) {
+    const p = pattern.toLowerCase().trim();
+    if (p.startsWith('*.')) {
+      const suffix = p.slice(1);
+      if (host.endsWith(suffix) || host === p.slice(2)) {
+        return true;
+      }
+    } else if (host === p) {
+      return true;
+    }
+  }
+  return false;
+}
+
 sw.addEventListener('fetch', (event: FetchEvent) => {
   const request = event.request;
   const url = new URL(request.url);
@@ -187,29 +210,16 @@ sw.addEventListener('fetch', (event: FetchEvent) => {
   const session = resolveSession(event.clientId);
 
   // 1. Check bypass rules:
-  // Tunnel same-origin requests, proxy paths (/--p2p-proxy/), backend origin, sibling subdomains, and media streams
+  // Tunnel same-origin requests, proxy paths (/--p2p-proxy/), backend origin, and whitelisted proxy domains
   const isProxyPath = url.pathname.startsWith('/--p2p-proxy/');
   const currentBackendOrigin = session?.backendOrigin;
   const currentBackendRootDomain = session?.backendRootDomain;
 
   const isTargetOrigin = currentBackendOrigin && url.origin === currentBackendOrigin;
-  const isSiblingDomain = currentBackendRootDomain && (
-    url.hostname === currentBackendRootDomain ||
-    url.hostname.endsWith('.' + currentBackendRootDomain)
-  );
+  const isAllowed = isDomainAllowed(url.hostname, session?.allowedDomains, currentBackendRootDomain);
 
-  const brand = currentBackendRootDomain ? currentBackendRootDomain.split('.')[0] : '';
-  const brandShort = brand.length > 4 ? brand.slice(0, 4).toLowerCase() : brand.toLowerCase();
-  const isRelatedBrand = brandShort ? url.hostname.toLowerCase().includes(brandShort) : false;
-  const lowerPath = url.pathname.toLowerCase();
-  const isMedia = lowerPath.includes('.m4s') || lowerPath.includes('.mp4') || lowerPath.includes('.m4v') ||
-                  lowerPath.includes('.webm') || lowerPath.includes('.mkv') || lowerPath.includes('.ts') ||
-                  lowerPath.includes('.m3u8') || lowerPath.includes('.mp3') || lowerPath.includes('.wav') ||
-                  lowerPath.includes('.flac') || lowerPath.includes('.aac') || lowerPath.includes('.m4a') ||
-                  lowerPath.includes('/upgcxcode/');
-
-  if (url.origin !== sw.location.origin && !isProxyPath && !isTargetOrigin && !isSiblingDomain && !isRelatedBrand && !isMedia) {
-    return; // Bypass truly external cross-origin requests
+  if (url.origin !== sw.location.origin && !isProxyPath && !isTargetOrigin && !isAllowed) {
+    return; // Bypass non-whitelisted cross-origin requests directly to native visitor network
   }
 
   // Bypass portal shell assets
@@ -374,6 +384,10 @@ async function handleTunneledRequest(request: Request, initialSession: PortalSes
           if (msg.headers?.['x-p2p-target-root-domain']) {
             session.backendRootDomain = msg.headers['x-p2p-target-root-domain'];
           }
+          if (msg.headers?.['x-p2p-allowed-domains']) {
+            const raw = msg.headers['x-p2p-allowed-domains'];
+            session.allowedDomains = raw ? raw.split(',').map((d: string) => d.trim()).filter(Boolean) : [];
+          }
         }
 
         const contentType = (msg.headers?.['content-type'] || '').toLowerCase();
@@ -470,7 +484,66 @@ async function handleTunneledRequest(request: Request, initialSession: PortalSes
   });
 }
 
-// Injects <script src="/patch.js"></script> and <meta name="referrer" content="no-referrer"> into the first chunk of HTML stream
+// Helper to scan a byte buffer for an ASCII HTML tag opening (case-insensitive) and return the index right after '>'
+function findAsciiTagEnd(bytes: Uint8Array, tagName: string): number {
+  const target = tagName.toLowerCase();
+  const len = bytes.length;
+  const tagLen = target.length; // e.g. 4 for "head", 4 for "html"
+
+  for (let i = 0; i <= len - tagLen - 1; i++) {
+    if (bytes[i] === 0x3C) { // '<'
+      let match = true;
+      for (let j = 0; j < tagLen; j++) {
+        const b = bytes[i + 1 + j];
+        if ((b >= 0x41 && b <= 0x5A ? b + 0x20 : b) !== target.charCodeAt(j)) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        const nextByte = bytes[i + 1 + tagLen];
+        // Must be followed by space, tab, newline, '>', or '/'
+        if (
+          nextByte === 0x3E || // '>'
+          nextByte === 0x20 || // ' '
+          nextByte === 0x09 || // '\t'
+          nextByte === 0x0A || // '\n'
+          nextByte === 0x0D || // '\r'
+          nextByte === 0x2F    // '/'
+        ) {
+          // Scan forward for closing '>'
+          let inQuote = 0;
+          for (let k = i + 1 + tagLen; k < len; k++) {
+            const kb = bytes[k];
+            if (inQuote) {
+              if (kb === inQuote) inQuote = 0;
+            } else {
+              if (kb === 0x22 || kb === 0x27) {
+                inQuote = kb;
+              } else if (kb === 0x3E) { // '>'
+                return k + 1; // Position right after '>'
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return -1;
+}
+
+function concatByteArrays(a: Uint8Array, b: Uint8Array, c?: Uint8Array): Uint8Array {
+  const totalLen = a.length + b.length + (c ? c.length : 0);
+  const out = new Uint8Array(totalLen);
+  out.set(a, 0);
+  out.set(b, a.length);
+  if (c) {
+    out.set(c, a.length + b.length);
+  }
+  return out;
+}
+
+// Injects <script src="/patch.js"></script> and virtualization context into HTML stream using byte-level scanning
 function injectScriptIntoHtmlStream(
   inputStream: ReadableStream<Uint8Array>,
   session: PortalSession | null
@@ -480,17 +553,18 @@ function injectScriptIntoHtmlStream(
   const activeNodeId = session?.nodeId || '';
   const currentBackendOrigin = session?.backendOrigin || '';
   const currentBackendRootDomain = session?.backendRootDomain || '';
+  const allowedDomains = session?.allowedDomains || [];
 
   const contextTag = `<script>` +
     `window.__P2P_NODE_ID__ = ${JSON.stringify(activeNodeId)};` +
     `window.__P2P_PORTAL_ORIGIN__ = ${JSON.stringify(sw.location.origin)};` +
+    `window.__P2P_ALLOWED_DOMAINS__ = ${JSON.stringify(allowedDomains)};` +
     `</script>`;
   const originTag = currentBackendOrigin
     ? `<script>window.__P2P_TARGET_ORIGIN__ = ${JSON.stringify(currentBackendOrigin)};window.__P2P_TARGET_ROOT_DOMAIN__ = ${JSON.stringify(currentBackendRootDomain)};</script>`
     : '';
   const patchScript = `${metaReferrer}${contextTag}${originTag}<script src="/patch.js"></script>`;
   let injected = false;
-  const decoder = new TextDecoder('utf-8');
   const encoder = new TextEncoder();
 
   return new ReadableStream<Uint8Array>({
@@ -503,24 +577,29 @@ function injectScriptIntoHtmlStream(
 
       if (!injected && value) {
         injected = true;
-        let text = decoder.decode(value, { stream: true });
-        const flushed = decoder.decode();
-        if (flushed) text += flushed;
+        const patchBytes = encoder.encode(patchScript);
 
-        // Strip any existing restrictive meta referrer tags to ensure no-referrer takes precedence
-        text = text.replace(/<meta\s+name=["']referrer["'][^>]*>/gi, '');
-        let modified = text;
-
-        if (/<head[^>]*>/i.test(text)) {
-          modified = text.replace(/<head[^>]*>/i, (match) => `${match}${patchScript}`);
-        } else if (/<html[^>]*>/i.test(text)) {
-          modified = text.replace(/<html[^>]*>/i, (match) => `${match}<head>${patchScript}</head>`);
-        } else {
-          modified = patchScript + text;
+        const headPos = findAsciiTagEnd(value, 'head');
+        if (headPos !== -1) {
+          const before = value.subarray(0, headPos);
+          const after = value.subarray(headPos);
+          controller.enqueue(concatByteArrays(before, patchBytes, after));
+          return;
         }
 
-        controller.enqueue(encoder.encode(modified));
+        const htmlPos = findAsciiTagEnd(value, 'html');
+        if (htmlPos !== -1) {
+          const headWrapper = encoder.encode(`<head>${patchScript}</head>`);
+          const before = value.subarray(0, htmlPos);
+          const after = value.subarray(htmlPos);
+          controller.enqueue(concatByteArrays(before, headWrapper, after));
+          return;
+        }
+
+        // Neither <head> nor <html> tag matched in the first chunk, prepend patch bytes
+        controller.enqueue(concatByteArrays(patchBytes, value));
       } else if (value) {
+        // Subsequent chunks pass through directly without string conversion or UTF-8 slicing corruption
         controller.enqueue(value);
       }
     },

@@ -273,27 +273,6 @@ func (p *HTTPProxy) rewriteLocation(loc string, targetHost string) string {
 	return loc
 }
 
-func sanitizeCSP(csp string) string {
-	parts := strings.Split(csp, ";")
-	var kept []string
-	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
-		if trimmed == "" {
-			continue
-		}
-		fields := strings.Fields(trimmed)
-		if len(fields) > 0 {
-			dirName := strings.ToLower(fields[0])
-			if dirName == "frame-ancestors" {
-				// Strip frame-ancestors to permit iframe embedding
-				continue
-			}
-		}
-		kept = append(kept, trimmed)
-	}
-	return strings.Join(kept, "; ")
-}
-
 // HandleStream proxies an incoming P2PMux stream to the local target web application.
 func (p *HTTPProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream) {
 	defer stream.Close()
@@ -472,7 +451,10 @@ func (p *HTTPProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream)
 			continue // Set-Cookie handled separately in Cookies list
 		}
 
-		// Anti-iframe bypass: strip headers that forbid framing or break sandbox virtualization
+		// Anti-iframe bypass & virtualization sandbox:
+		// Strip CSP headers completely because the visitor browser runs inside a virtualization sandbox (/--p2p-proxy/ and Service Worker).
+		// Retaining backend CSP causes policy violations against /patch.js, inline virtualization scripts (window.__P2P_*), and WebSocket tunnels.
+		// The outer portal maintains its own defensive posture.
 		if lk == "x-frame-options" || lk == "cross-origin-embedder-policy" || lk == "cross-origin-opener-policy" ||
 			lk == "cross-origin-resource-policy" ||
 			lk == "content-security-policy" || lk == "content-security-policy-report-only" {
@@ -488,9 +470,10 @@ func (p *HTTPProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream)
 		respHeaders[lk] = strings.Join(v, ", ")
 	}
 
-	// Expose target origin and root domain to Service Worker so it knows which cross-origin requests belong to this app
+	// Expose target origin, root domain, and allowed proxy domains to Service Worker
 	respHeaders["x-p2p-target-origin"] = p.targetURL.Scheme + "://" + p.targetURL.Host
 	respHeaders["x-p2p-target-root-domain"] = p.rootDomain
+	respHeaders["x-p2p-allowed-domains"] = strings.Join(p.allowedDomains, ",")
 	respHeaders["referrer-policy"] = "no-referrer"
 
 	// Extract non-HttpOnly cookies for document.cookie synchronization

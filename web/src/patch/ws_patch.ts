@@ -30,6 +30,21 @@
     }
   };
 
+  const isDomainInList = (host: string, list?: string[]): boolean => {
+    if (!list || list.length === 0) return false;
+    const h = host.toLowerCase().split(':')[0];
+    for (const pattern of list) {
+      const p = pattern.toLowerCase().trim();
+      if (p.startsWith('*.')) {
+        const suffix = p.slice(1);
+        if (h.endsWith(suffix) || h === p.slice(2)) return true;
+      } else if (h === p) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   // Store the real portal window reference for inter-frame tunneling BEFORE anti-frame-busting
   const realPortalWindow: Window | null =
     typeof window !== 'undefined' && window.parent && window.parent !== window
@@ -221,10 +236,11 @@
             const parsed = new URL('https:' + rawUrl);
             if (parsed.host.toLowerCase() === targetHost) {
               targetPath = parsed.pathname + parsed.search + parsed.hash;
-            } else if (targetRootDomain) {
+            } else {
               const resHost = parsed.hostname.toLowerCase();
-              const isSibling = resHost === targetRootDomain.toLowerCase() || resHost.endsWith('.' + targetRootDomain.toLowerCase());
-              if (isSibling) {
+              const isSibling = targetRootDomain && (resHost === targetRootDomain.toLowerCase() || resHost.endsWith('.' + targetRootDomain.toLowerCase()));
+              const isAllowed = isDomainInList(resHost, globalScope.__P2P_ALLOWED_DOMAINS__ as string[]);
+              if (isSibling || isAllowed) {
                 targetPath = `/--p2p-proxy/${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
               }
             }
@@ -245,10 +261,11 @@
 
             if (resolved.origin.toLowerCase() === targetOrigin.toLowerCase() || resolved.host.toLowerCase() === targetHost) {
               targetPath = resolved.pathname + resolved.search + resolved.hash;
-            } else if (targetRootDomain) {
+            } else {
               const resHost = resolved.hostname.toLowerCase();
-              const isSibling = resHost === targetRootDomain.toLowerCase() || resHost.endsWith('.' + targetRootDomain.toLowerCase());
-              if (isSibling) {
+              const isSibling = targetRootDomain && (resHost === targetRootDomain.toLowerCase() || resHost.endsWith('.' + targetRootDomain.toLowerCase()));
+              const isAllowed = isDomainInList(resHost, globalScope.__P2P_ALLOWED_DOMAINS__ as string[]);
+              if (isSibling || isAllowed) {
                 targetPath = `/--p2p-proxy/${resolved.host}${resolved.pathname}${resolved.search}${resolved.hash}`;
               }
             }
@@ -469,24 +486,14 @@
         return resolved.pathname + resolved.search + resolved.hash;
       }
 
-      // Check sibling subdomain under root domain, related brand CDN, or media stream
+      // Check sibling subdomain under root domain, or whitelisted proxy domain
       const targetRootDomain = (globalScope.__P2P_TARGET_ROOT_DOMAIN__ as string) || extractRootDomain(targetUrl.hostname);
-      if (targetRootDomain) {
-        const resHost = resolved.hostname.toLowerCase();
-        const rootDomainLower = targetRootDomain.toLowerCase();
-        const isSibling = resHost === rootDomainLower || resHost.endsWith('.' + rootDomainLower);
+      const resHost = resolved.hostname.toLowerCase();
+      const isSibling = targetRootDomain && (resHost === targetRootDomain.toLowerCase() || resHost.endsWith('.' + targetRootDomain.toLowerCase()));
+      const isAllowed = isDomainInList(resHost, globalScope.__P2P_ALLOWED_DOMAINS__ as string[]);
 
-        const brand = targetRootDomain.split('.')[0];
-        const brandShort = brand.length > 4 ? brand.slice(0, 4).toLowerCase() : brand.toLowerCase();
-        const isRelatedBrand = brandShort ? resHost.includes(brandShort) : false;
-
-        const lowerPath = resolved.pathname.toLowerCase();
-        const isMedia = lowerPath.includes('.m4s') || lowerPath.includes('.mp4') || lowerPath.includes('.ts') ||
-                        lowerPath.includes('.m3u8') || lowerPath.includes('.webm') || lowerPath.includes('/upgcxcode/');
-
-        if (isSibling || isRelatedBrand || isMedia) {
-          return `/--p2p-proxy/${resolved.host}${resolved.pathname}${resolved.search}${resolved.hash}`;
-        }
+      if (isSibling || isAllowed) {
+        return `/--p2p-proxy/${resolved.host}${resolved.pathname}${resolved.search}${resolved.hash}`;
       }
     } catch {}
 

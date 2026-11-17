@@ -33,9 +33,11 @@ type Transport interface {
 
 // Mux manages multiplexed logical streams over a single Transport.
 type Mux struct {
-	transport    Transport
-	isClient     bool
-	nextStreamID uint32
+	transport       Transport
+	isClient        bool
+	nextStreamID    uint32
+	maxPeerStreamID uint32
+	closedStreams   map[uint32]struct{}
 
 	mu       sync.RWMutex
 	streams  map[uint32]*Stream
@@ -56,12 +58,13 @@ type Mux struct {
 // isClient: true if visitor browser (allocates odd stream IDs), false if agent (allocates even stream IDs).
 func NewMux(transport Transport, isClient bool) *Mux {
 	m := &Mux{
-		transport: transport,
-		isClient:  isClient,
-		streams:   make(map[uint32]*Stream),
-		acceptCh:  make(chan *Stream, 64),
-		closedCh:  make(chan struct{}),
-		pongCh:    make(chan struct{}, 1),
+		transport:     transport,
+		isClient:      isClient,
+		streams:       make(map[uint32]*Stream),
+		closedStreams: make(map[uint32]struct{}),
+		acceptCh:      make(chan *Stream, 64),
+		closedCh:      make(chan struct{}),
+		pongCh:        make(chan struct{}, 1),
 	}
 
 	if isClient {
@@ -149,11 +152,33 @@ func (m *Mux) HandleIncomingMessage(data []byte) error {
 	if !exists {
 		// New incoming stream initiated by peer
 		if frame.Type == protocol.TypeHeaders || frame.Type == protocol.TypeData || frame.Type == protocol.TypeWSConnect {
+			// Validate parity: Client allocates odd IDs, Agent allocates even IDs
+			isExpectedPeerID := (m.isClient && frame.StreamID%2 == 0) || (!m.isClient && frame.StreamID%2 == 1)
+			if !isExpectedPeerID {
+				return nil
+			}
+
 			m.mu.Lock()
 			if m.closed {
 				m.mu.Unlock()
 				return ErrMuxClosed
 			}
+
+			// Ghost stream protection: drop frame if stream was already closed or is older than the high-water mark window.
+			const streamWindow uint32 = 1024
+			if _, isClosed := m.closedStreams[frame.StreamID]; isClosed {
+				m.mu.Unlock()
+				return nil
+			}
+			if m.maxPeerStreamID > streamWindow && frame.StreamID < m.maxPeerStreamID-streamWindow {
+				m.mu.Unlock()
+				return nil
+			}
+
+			if frame.StreamID > m.maxPeerStreamID {
+				m.maxPeerStreamID = frame.StreamID
+			}
+
 			s = newStream(frame.StreamID, m)
 			s.initialType = frame.Type
 			m.streams[frame.StreamID] = s
@@ -306,6 +331,20 @@ func (m *Mux) writeFrame(f *protocol.Frame) error {
 func (m *Mux) removeStream(id uint32) {
 	m.mu.Lock()
 	delete(m.streams, id)
+	if m.closedStreams == nil {
+		m.closedStreams = make(map[uint32]struct{})
+	}
+	m.closedStreams[id] = struct{}{}
+	// Prune old closed streams older than high-water mark window to prevent unbounded memory growth
+	const streamWindow uint32 = 1024
+	if m.maxPeerStreamID > streamWindow {
+		threshold := m.maxPeerStreamID - streamWindow
+		for cid := range m.closedStreams {
+			if cid < threshold {
+				delete(m.closedStreams, cid)
+			}
+		}
+	}
 	m.mu.Unlock()
 }
 

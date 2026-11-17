@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v1.9.3] - 2026-11-17
+
+### Security & Hardening
+- **Signaling Security & Attribution Hardening**:
+  - Cloudflare Worker edge node now verifies `SIGNAL_SECRET` authentication for client registrations.
+  - Implemented `ipCleaned` boolean idempotency lock in Worker to prevent duplicate IP decrement under abnormal connection terminations.
+  - Enforced strict node attribution checks (`session.Role == "agent" && client.NodeID == session.NodeID`) in both Go signaling server and Cloudflare Worker to block cross-node spoofing attacks.
+- **P2PMux Ghost Stream Elimination**:
+  - Implemented strict stream ID parity checks and monotonic high-water mark with closed stream tombstones, dropping orphan frames and preventing ghost stream resurrection.
+  - Added asynchronous `TypeRstStream` frame dispatch before terminating local stream on 32MB buffer overflow.
+- **Service Worker Pure Byte Streaming Injection**:
+  - Replaced string-based `TextDecoder` HTML stream injection with direct `Uint8Array` ASCII tag scanning (`findAsciiTagEnd`), eliminating multi-byte UTF-8 chunk-slicing corruption across streaming boundaries.
+  - Subsequent data chunks pass through without memory conversions.
+- **Proxy Domain Whitelist Contract Alignment**:
+  - Added `x-p2p-allowed-domains` response header in backend HTTP proxy, exposing agent whitelist dynamically to the visitor browser.
+  - Removed brittle heuristics (`brandShort`, `isRelatedBrand`, `isMedia`) from Service Worker and client patch, aligning domain interception with `session.allowedDomains` / `window.__P2P_ALLOWED_DOMAINS__`.
+  - Non-whitelisted 3rd-party domains safely route through native visitor network without triggering 400 Bad Request errors.
+- **Sandbox Virtualization & Dead Code Cleanup**:
+  - Removed dead `sanitizeCSP` helper from `pkg/proxy/http_proxy.go`.
+  - Documented explicit rationale for full CSP stripping at the proxy boundary to protect Service Worker virtualization and WebSocket tunnels.
+
+---
+
 ## [v1.9.2] - 2026-11-17
 
 ### Added
