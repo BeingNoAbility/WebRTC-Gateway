@@ -612,7 +612,17 @@ function injectScriptIntoHtmlStream(
           return;
         }
 
-        // Neither <head> nor <html> tag matched in the first chunk, prepend patch bytes
+        // F-10: If <head> and <html> are absent, check for <!DOCTYPE ...> to avoid Quirks Mode
+        const doctypePos = findAsciiTagEnd(value, '!doctype');
+        if (doctypePos !== -1) {
+          const headWrapper = encoder.encode(`<head>${patchScript}</head>`);
+          const before = value.subarray(0, doctypePos);
+          const after = value.subarray(doctypePos);
+          controller.enqueue(concatByteArrays(before, headWrapper, after));
+          return;
+        }
+
+        // Neither <head>, <html>, nor <!DOCTYPE> tag matched in the first chunk, prepend patch bytes
         controller.enqueue(concatByteArrays(patchBytes, value));
       } else if (value) {
         // Subsequent chunks pass through directly without string conversion or UTF-8 slicing corruption

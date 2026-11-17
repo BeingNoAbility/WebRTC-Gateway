@@ -957,7 +957,13 @@ func main() {
 				_, _ = w.Write([]byte("OK\n"))
 			})
 			log.Printf("[Server] Dedicated Prometheus metrics listening on http://%s/metrics", *metricsAddr)
-			if err := http.ListenAndServe(*metricsAddr, mMux); err != nil && err != http.ErrServerClosed {
+			mServer := &http.Server{
+				Addr:              *metricsAddr,
+				Handler:           mMux,
+				ReadHeaderTimeout: 10 * time.Second,
+				IdleTimeout:       90 * time.Second,
+			}
+			if err := mServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("[Server] Dedicated metrics server error: %v", err)
 			}
 		}()
@@ -977,6 +983,8 @@ func main() {
 			log.Printf("[WS] Upgrade failed: %v", err)
 			return
 		}
+		// Security hardening: limit inbound signaling message size to 256KB (F-08)
+		conn.SetReadLimit(256 * 1024)
 
 		sessionID := uuid.New().String()
 		session := &Session{
@@ -1178,8 +1186,10 @@ func main() {
 	}
 
 	server := &http.Server{
-		Addr:    *addr,
-		Handler: mux,
+		Addr:              *addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       90 * time.Second,
 	}
 
 	var isTLS bool

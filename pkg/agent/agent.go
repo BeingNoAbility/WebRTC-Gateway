@@ -577,6 +577,9 @@ func (a *Agent) Start(ctx context.Context) error {
 func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 	defer conn.Close()
 
+	// Security hardening: limit inbound signaling message size to 256KB (F-08)
+	conn.SetReadLimit(256 * 1024)
+
 	readCtx, readCancel := context.WithCancel(ctx)
 	defer readCancel()
 

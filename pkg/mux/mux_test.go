@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -509,5 +510,55 @@ func TestMux_ControlBypassesBackpressure(t *testing.T) {
 	case <-dataDone:
 	case <-time.After(1 * time.Second):
 		t.Fatalf("Timeout waiting for data writer to complete after drain")
+	}
+}
+
+func TestStreamIDWraparoundAndGhostProtection(t *testing.T) {
+	t1, t2 := newMockPair()
+	defer t1.Close()
+	defer t2.Close()
+
+	clientMux := NewMux(t1, true)
+	agentMux := NewMux(t2, false)
+
+	t1.SetMessageHandler(func(data []byte) {
+		_ = clientMux.HandleIncomingMessage(data)
+	})
+	t2.SetMessageHandler(func(data []byte) {
+		_ = agentMux.HandleIncomingMessage(data)
+	})
+
+	// Fast-forward clientMux.nextStreamID close to wraparound limit
+	atomic.StoreUint32(&clientMux.nextStreamID, 0xFFFFFFFE)
+
+	// Open stream triggers wraparound handling
+	s1, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed at wraparound boundary: %v", err)
+	}
+	if s1.ID() < 1 || s1.ID() > 10 {
+		t.Fatalf("Expected wrapped stream ID to restart near base 1, got %d", s1.ID())
+	}
+
+	// Verify agentMux correctly handles wraparound from high ID to low ID without ghost dropping
+	agentMux.mu.Lock()
+	agentMux.maxPeerStreamID = 0xFFFFFFFD // Simulated near-limit peer stream ID
+	agentMux.mu.Unlock()
+
+	// Write headers from wrapped client stream
+	err = s1.WriteHeaders([]byte(`{"test":"wraparound"}`))
+	if err != nil {
+		t.Fatalf("WriteHeaders failed on wrapped stream: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	accepted, err := agentMux.AcceptStream(ctx)
+	if err != nil {
+		t.Fatalf("agentMux failed to accept wrapped stream (likely dropped by ghost protection): %v", err)
+	}
+	if accepted.ID() != s1.ID() {
+		t.Fatalf("Stream ID mismatch: expected %d, got %d", s1.ID(), accepted.ID())
 	}
 }

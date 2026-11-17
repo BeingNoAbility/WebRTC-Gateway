@@ -98,19 +98,23 @@ func (m *Mux) OpenStream() (*Stream, error) {
 
 	id := atomic.AddUint32(&m.nextStreamID, 2) - 2
 	if id >= 0xFFFF0000 {
-		// Guard against 32-bit stream ID overflow / wrap-around
+		// Guard against 32-bit stream ID overflow / wrap-around (F-10)
 		base := uint32(2)
 		if m.isClient {
 			base = 1
 		}
-		atomic.StoreUint32(&m.nextStreamID, base+2)
 		id = base
 		for {
 			if _, exists := m.streams[id]; !exists {
 				break
 			}
 			id += 2
+			if id >= 0xFFFF0000 {
+				return nil, errors.New("mux: stream ID space exhausted")
+			}
 		}
+		atomic.StoreUint32(&m.nextStreamID, id+2)
+		delete(m.closedStreams, id)
 	}
 
 	s := newStream(id, m)
@@ -162,6 +166,13 @@ func (m *Mux) HandleIncomingMessage(data []byte) error {
 			if m.closed {
 				m.mu.Unlock()
 				return ErrMuxClosed
+			}
+
+			// Peer wraparound detection: if peer was near the top of the ID space and now sends low IDs (F-10)
+			if m.maxPeerStreamID >= 0xFFFF0000 && frame.StreamID < 0x100000 {
+				m.maxPeerStreamID = frame.StreamID
+				// Reset tombstoned closed streams from previous epoch
+				m.closedStreams = make(map[uint32]struct{})
 			}
 
 			// Ghost stream protection: drop frame if stream was already closed or is older than the high-water mark window.

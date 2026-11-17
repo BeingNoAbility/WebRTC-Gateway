@@ -43,6 +43,7 @@ assert(swCode.includes('matchAll') && swCode.includes('window'), 'sw.js includes
 assert(swCode.includes('clients.get') || swCode.includes('.clients.get'), 'sw.js includes Lazy GC client liveness verification');
 assert(swCode.includes('DecompressionStream') && swCode.includes('x-p2p-client-decompress'), 'sw.js supports hardware streaming decompression and x-p2p-client-decompress (v2.0.0 Task 1)');
 assert(swCode.includes('_p2p_worker') && swCode.includes('import "/patch.js";'), 'sw.js supports dynamic ES module worker import (v2.0.0 Task 2)');
+assert(swCode.includes('!doctype'), 'sw.js supports DOCTYPE-safe HTML script injection (F-10)');
 assert(patchCode.includes('_p2p_worker'), 'patch.js wraps Worker for dynamic module worker adaptation (v2.0.0 Task 2)');
 assert(!portalCode.includes('value="${this.peerId}"'), 'portal.js MUST NOT interpolate peerId into input value attribute (P0-2)');
 assert(!portalCode.includes('value="${this.secret}"'), 'portal.js MUST NOT interpolate secret into input value attribute (P0-2)');

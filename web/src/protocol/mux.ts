@@ -178,8 +178,20 @@ export class P2PMux {
   }
 
   public openStream(): P2PStream {
-    const id = this.nextStreamId;
+    let id = this.nextStreamId;
     this.nextStreamId += 2;
+    if (id >= 0xFFFF0000) {
+      // Guard against 32-bit stream ID overflow / wrap-around (F-10)
+      const base = this.isClient ? 1 : 2;
+      id = base;
+      while (this.streams.has(id)) {
+        id += 2;
+        if (id >= 0xFFFF0000) {
+          throw new Error('P2PMux: stream ID space exhausted');
+        }
+      }
+      this.nextStreamId = id + 2;
+    }
     const stream = new P2PStream(id, this);
     this.streams.set(id, stream);
     return stream;

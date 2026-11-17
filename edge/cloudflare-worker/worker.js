@@ -1,5 +1,18 @@
 import { DurableObject } from 'cloudflare:workers';
 
+async function timingSafeEqualStr(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const enc = new TextEncoder();
+  const aBuf = enc.encode(a);
+  const bBuf = enc.encode(b);
+  if (aBuf.byteLength !== bBuf.byteLength) {
+    const dummy = new Uint8Array(bBuf.byteLength);
+    crypto.subtle.timingSafeEqual(dummy, bBuf);
+    return false;
+  }
+  return crypto.subtle.timingSafeEqual(aBuf, bBuf);
+}
+
 /**
  * Cloudflare Worker: Multi-Node P2P Signaling Server with WebSocket Hibernation
  * 
@@ -119,34 +132,60 @@ export class SignalingRoom extends DurableObject {
           const secret = msg.secret || '';
           if (!nodeId) return;
 
-          // Global cluster secret verification
-          if (this.env && this.env.SIGNAL_SECRET && this.env.SIGNAL_SECRET !== secret) {
+          // Rate limit: prevent brute-force attacks against node/signal secrets (F-08)
+          if (clientIP !== 'unknown' && (this.failedAttempts.get(clientIP) || 0) >= 10) {
             try {
               ws.send(JSON.stringify({
                 type: 'error',
-                code: 4003,
-                message: 'unauthorized: invalid cluster signal secret',
+                code: 429,
+                error: 'Too many failed authentication attempts, throttled',
               }));
-              ws.close(4003, 'Unauthorized');
+              ws.close(4029, 'Too Many Requests');
             } catch {}
             return;
           }
 
-          // Anti-hijack protection: verify node secret if already bound
+          // Global cluster secret verification with constant-time equality (F-08)
+          if (this.env && this.env.SIGNAL_SECRET) {
+            const matches = await timingSafeEqualStr(this.env.SIGNAL_SECRET, secret);
+            if (!matches) {
+              const fails = (this.failedAttempts.get(clientIP) || 0) + 1;
+              this.failedAttempts.set(clientIP, fails);
+              try {
+                ws.send(JSON.stringify({
+                  type: 'error',
+                  code: 4003,
+                  error: 'unauthorized: invalid cluster signal secret',
+                }));
+                ws.close(4003, 'Unauthorized');
+              } catch {}
+              return;
+            }
+          }
+
+          // Anti-hijack protection: verify node secret if already bound with constant-time equality (F-08)
           const boundSecret = this.nodeSecrets.get(nodeId);
-          if (boundSecret && boundSecret !== secret) {
-            const fails = (this.failedAttempts.get(clientIP) || 0) + 1;
-            this.failedAttempts.set(clientIP, fails);
-            try {
-              ws.send(JSON.stringify({
-                type: 'error',
-                error: fails >= 10 
-                  ? 'Too many failed authentication attempts, throttled'
-                  : `Unauthorized: node_id "${nodeId}" is protected by a different secret`,
-              }));
-              ws.close(4003, 'Unauthorized');
-            } catch {}
-            return;
+          if (boundSecret) {
+            const matches = await timingSafeEqualStr(boundSecret, secret);
+            if (!matches) {
+              const fails = (this.failedAttempts.get(clientIP) || 0) + 1;
+              this.failedAttempts.set(clientIP, fails);
+              try {
+                ws.send(JSON.stringify({
+                  type: 'error',
+                  error: fails >= 10 
+                    ? 'Too many failed authentication attempts, throttled'
+                    : `Unauthorized: node_id "${nodeId}" is protected by a different secret`,
+                }));
+                ws.close(4003, 'Unauthorized');
+              } catch {}
+              return;
+            }
+          }
+
+          // Clear failed attempts upon successful authentication
+          if (clientIP !== 'unknown') {
+            this.failedAttempts.delete(clientIP);
           }
 
           if (secret) {
