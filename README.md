@@ -745,13 +745,14 @@ webrtc-gateway/
 │   │   ├── protocol/               # TypeScript 版 P2PMux 二进制编解码实现
 │   │   └── index.html              # 现代化极简前端模板
 │   ├── dist/                       # 前端编译生成目录 (自动嵌入 Go 服务端)
-│   ├── worker.js                   # Cloudflare 一体化 Worker (Durable Object + 静态托管)
 │   ├── esbuild.config.mjs          # 极速打包脚本 (毫秒级输出)
 │   ├── package.json
-│   └── tsconfig.json
+│   ├── tsconfig.json
+│   └── wrangler.toml               # Cloudflare 一体化 Worker 部署配置
 ├── edge/                           # 边缘信令配置
-│   ├── cloudflare-worker/          # 独立信令 Worker 脚本
-│   └── wrangler.toml               # Wrangler 部署配置
+│   ├── cloudflare-worker/          # 统一信令 Worker 脚本 (Durable Object + 静态托管)
+│   │   └── worker.js
+│   └── wrangler.toml               # 边缘独立部署配置
 ├── test/                           # 自动化测试套件
 │   ├── advanced_e2e_scenarios_test.go # HTTP 206 Partial Content / Range / Gzip / 标头反射透传
 │   ├── secret_auth_test.go         # SECRET 鉴权校验、防冒领与未授权拦截 (401 实时断开)

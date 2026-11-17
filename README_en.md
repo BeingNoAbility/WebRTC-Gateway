@@ -469,13 +469,14 @@ webrtc-gateway/
 │   │   ├── protocol/               # TypeScript P2PMux implementation
 │   │   └── index.html              # HTML5 template
 │   ├── dist/                       # Compiled frontend assets
-│   ├── worker.js                   # Cloudflare edge worker script
 │   ├── esbuild.config.mjs          # Fast build script
 │   ├── package.json
-│   └── tsconfig.json
-├── edge/                           # Cloudflare standalone signaling
-│   ├── cloudflare-worker/worker.js
-│   └── wrangler.toml
+│   ├── tsconfig.json
+│   └── wrangler.toml               # Integrated Cloudflare Worker deployment
+├── edge/                           # Edge signaling configuration
+│   ├── cloudflare-worker/          # Unified signaling worker (Durable Object + static assets)
+│   │   └── worker.js
+│   └── wrangler.toml               # Standalone edge deployment config
 ├── test/                           # Automated test suites
 │   ├── advanced_e2e_scenarios_test.go # HTTP 206 Partial Content / Range / Gzip / Headers
 │   ├── secret_auth_test.go         # SECRET authentication & 401 instant rejection

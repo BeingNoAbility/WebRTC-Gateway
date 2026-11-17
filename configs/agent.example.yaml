@@ -59,8 +59,8 @@ turn_url: ""
 turn_user: ""
 turn_pass: ""
 
-# Maximum concurrent data channel HTTP streams (default: 64)
-max_streams: 64
+# Maximum concurrent data channel HTTP streams (default: 512)
+max_streams: 512
 
 # Prometheus metrics scrape endpoint (e.g. ":9091", leave empty to disable)
 metrics_addr: ":9091"

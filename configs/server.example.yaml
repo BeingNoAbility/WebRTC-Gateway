@@ -5,8 +5,8 @@
 # Auto-detection files: server.yaml, server.yml, server.json in current or binary dir.
 # ==============================================================================
 
-# Listen address for HTTP/WebSocket signaling service
-addr: ":8080"
+# Listen address for HTTP/WebSocket signaling service (default: :8888)
+addr: ":8888"
 
 # Signaling cluster admission secret (Control Plane)
 # Must match the -signal-secret configured on connecting agents.
@@ -24,8 +24,8 @@ tls_key: ""
 # Automatically generate an in-memory self-signed ECDSA certificate for HTTPS (enables Service Worker Secure Context on LAN/test environments)
 tls_auto: false
 
-# Anti-DDoS / Rate Limiter: Maximum concurrent WebSocket connections allowed per client IP
-max_ip_conns: 50
+# Anti-DDoS / Rate Limiter: Maximum concurrent WebSocket connections allowed per client IP (default: 64)
+max_ip_conns: 64
 
 # Reverse Proxy Security: Comma-separated list of trusted proxy CIDRs/IPs
 # X-Forwarded-For & CF-Connecting-IP headers are ONLY trusted when RemoteAddr matches these CIDRs.

@@ -45,13 +45,22 @@ flowchart TD
     ```
   - **预期输出**：帮助文档排版整齐，语法清晰，运行模式、安全认证选项及实战示例准确无误。
 
-- [ ] **1.4 前端资产版本号更新与打包产物构建**
-  - **位置**：[web/package.json](file:///web/package.json) 中的 `"version"` 字段。
-  - **操作**：对齐版本号；若本次迭代修改了前端代码，必须重新构建打包静态文件：
+- [ ] **1.4 前端资产版本号更新与嵌入产物 Git Cleanliness 硬断言**
+  - **位置**：[web/package.json](file:///web/package.json) 中的 `"version"` 字段与 [web/dist/](file:///web/dist/)。
+  - **操作**：对齐版本号；若本次迭代修改了前端源码（`web/src/`），必须重新打包并验证产物已被暂存：
     ```bash
     npm --prefix web run build
+    # 自动化差分断言：若前端源码发生过改动，打包后必须通过 git diff 确认 dist 已更新且全量暂存：
+    git diff --exit-code web/dist
     ```
-  - **验证**：检查 `web/dist/portal.js`、`web/dist/patch.js`、`web/dist/sw.js` 已被更新，内嵌资产文件 [web/assets.go](file:///web/assets.go) 无编译错误。
+  - **判定标准**：确保在提交前 `git status --porcelain web/dist` 干净无遗漏，严禁出现“源码修改了但未重新 build 或未暂存 dist”导致 Go 二进制内嵌旧版前端资产。
+
+- [ ] **1.5 Cloudflare Worker 边缘配置与入口对齐**
+  - **位置**：[web/wrangler.toml](file:///web/wrangler.toml)、[edge/cloudflare-worker/worker.js](file:///edge/cloudflare-worker/worker.js)
+  - **核对项**：
+    - 确认 `web/wrangler.toml` 中的 `main` 路径必须严格指向 `../edge/cloudflare-worker/worker.js`；
+    - 确认 `web/` 根目录下绝对不存在历史残留的孤立 `worker.js` 冗余副本（防 P0-1 分叉复发）；
+    - 确认边缘脚本内部版本响应头或 User-Agent 常量与本次发版一致。
 
 ---
 
@@ -95,6 +104,7 @@ flowchart TD
     go test -race ./pkg/... ./cmd/...
     ```
   - **判定标准**：在多核心并发压力下，Broker 注册锁、Mux 多路复用会话映射、Agent 生命周期零并发竞争警报（`WARNING: DATA RACE`）。
+  - **平台依赖提示**：Go `-race` 探针强依赖 CGO 工具链。若本地在 Windows 宿主机且未配置 GCC/MinGW，本地执行会提示 `go: -race requires cgo`；在此情况下，该竞态门禁将由 Linux CI 环境（`.github/workflows/ci.yml`）或 WSL 严格执行守护。
 
 - [ ] **3.3 前端与虚拟化沙箱全量测试矩阵**
   - **验证命令**：
@@ -105,6 +115,23 @@ flowchart TD
     1. **子域名智能解析逻辑**：`test_subdomain_logic.cjs` 全通过；
     2. **节点保留、沙箱虚拟化与 SW 多标签页隔离**：`node_id_preservation_test.cjs` 全通过；
     3. **P2P 文件保险库下载 Hub 与流式切片**：`test_vault_download.cjs` 全通过。
+
+- [ ] **3.4 多平台交叉编译烟雾预检 (Cross-Compilation Smoke Test)**
+  - **目的**：确保未无意引入平台特定的非兼容依赖或常量，防止推送标签后 GitHub Actions `release.yml` 构建 6 大平台时半途失败。
+  - **快速验证命令**：
+    ```bash
+    # Linux / macOS (bash):
+    GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/agent ./cmd/signal
+    GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/agent ./cmd/signal
+    GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/agent ./cmd/signal
+
+    # Windows (PowerShell):
+    $env:GOOS="linux"; $env:GOARCH="amd64"; go build -o NUL ./cmd/agent ./cmd/signal
+    $env:GOOS="darwin"; $env:GOARCH="arm64"; go build -o NUL ./cmd/agent ./cmd/signal
+    $env:GOOS="windows"; $env:GOARCH="amd64"; go build -o NUL ./cmd/agent ./cmd/signal
+    Remove-Item Env:GOOS, Env:GOARCH
+    ```
+  - **判定标准**：各目标平台交叉编译在数秒内以退出码 `0` 成功退出，零编译错误。
 
 ---
 
@@ -156,6 +183,12 @@ flowchart TD
 - [ ] **5.4 Wiki 知识库对齐**
   - **位置**：`wiki/` 目录（例如 `Agent-Configuration.md`、`Deployment-Guide.md` 等）
   - **核对项**：检查所有引用参数、特性说明与操作步骤是否同步更新。
+
+- [ ] **5.5 配置文件示例模板与注释严谨性审计**
+  - **位置**：[configs/server.example.yaml](file:///configs/server.example.yaml)、[configs/agent.example.yaml](file:///configs/agent.example.yaml)
+  - **核对项**：
+    - 本版本新增或调整的配置项（如新安全参数、白名单规则、流控参数）已在示例文件中列出，且默认值与 Go 二进制常量严格一致（例如 agent 的 `max_streams: 512`，signal 的 `addr: ":8888"`, `max_ip_conns: 64`）；
+    - 严格审核配置文件中的文字注释，确保说明准确严谨，严禁出现与实际代码能力不符的夸大或误导性注释。
 
 ---
 
