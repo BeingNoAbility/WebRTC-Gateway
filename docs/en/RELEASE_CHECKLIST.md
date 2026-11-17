@@ -106,6 +106,14 @@ flowchart TD
     ```
   - **Criteria**: Clean builds for all 3 targets in seconds with zero compilation errors.
 
+- [ ] **3.5 Real-World Testing Tiered Sign-off**
+  - **Reference Guide**: See [docs/en/TESTING_CHECKLIST.md](file:///docs/en/TESTING_CHECKLIST.md) (covers 7 holographic real-world dimensions and staging testbeds).
+  - **Tiered Gate Policy**:
+    To prevent dogmatic overhead from paralyzing routine maintenance, verification is tiered by release category:
+    - **Patch Releases (`vX.Y.Z+1`)**: **Exempt from physical real-world testbed execution**. Passing CI unit tests, race detectors, and local Docker smoke tests is sufficient for release.
+    - **Minor Releases (`vX.Y+1.0`)**: **Targeted Sampling Sign-off**. Reviewers audit targeted test cases corresponding to the blast radius of new features (e.g. Dimension 2 for WAF changes, Dimension 5 for streaming/flow control) and attach execution logs/screenshots to the release PR.
+    - **Major Milestones (`vX+1.0.0`)**: **Full 7-Dimension Holographic Sign-off**. Mandatory execution across all 7 dimensions on physical Linux testbeds, cross-network cellular devices, and modern browser engines, accompanied by a verified sign-off audit report.
+
 ---
 
 ## Phase 4: Container & Least-Privilege Pre-flight

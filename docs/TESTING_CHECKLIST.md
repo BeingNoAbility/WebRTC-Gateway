@@ -98,6 +98,20 @@ flowchart LR
     2. **上行上传进度条平滑调度**：观察上行测速阶段，断言进度条平稳从 0% 前进至 100%，彻底规避 Chromium Bug 1214207 导致的上传进度卡死在 0% 缺陷；
     3. **Web Worker 测速线程支持**：验证 LibreSpeed 内部启动的多线程测速 Web Worker 能够正常穿透。
 
+- [ ] **1.5 上游 Target 纯 HTTPS 与自签证书链穿透测试 (Proxmox VE / DSM / 自签 HTTPS)**
+  - **部署目标**：在 Linux 测试宿主机部署默认启用 HTTPS 且使用自签或未授信证书的私有管理系统（例如 Proxmox VE 虚拟化控制台端口 8006、群晖 DSM 端口 5001，或由 OpenSSL 快速自签的 Nginx HTTPS 反代）。
+  - **启动 Agent (严苛安全对比)**：
+    1. **阶段 A（默认严苛校验模式）**：
+       - 执行 `./agent -node-id pve -target https://127.0.0.1:8006`；
+       - 访客在浏览器打开页面发起访问；
+       - **断言判定**：Agent 底层严格拒绝不安全证书握手，控制台/页面清晰报错 `x509: certificate signed by unknown authority`，绝不发生隐式静默信任或安全降级；
+    2. **阶段 B（显式信任模式 -insecure）**：
+       - 执行 `./agent -node-id pve -target https://127.0.0.1:8006 -insecure`；
+       - **断言判定**：
+         - 启动控制台输出醒目的高危警示 Banner：`⚠️ INSECURE: TLS certificate verification is disabled`；
+         - 访客浏览器平滑打开 Proxmox VE / DSM 登录控制台；
+         - 登录后 Web 终端（noVNC / xterm.js）与 WSS 双向长连接握手正常，TLS SNI 穿透与加密传输稳定无中断。
+
 ---
 
 ## 维度二：企业级 WAF、反代与真实客户端 IP 双向穿透验证
@@ -179,6 +193,16 @@ sequenceDiagram
     1. 访问白名单内的 B 站图床图片：网关 Service Worker 成功拦截并转发给 Agent 代理，附带 `x-p2p-allowed-domains` 契约头，图片正常展示；
     2. 访问非白名单公网第三方链接（如 `https://github.com`）：浏览器 Service Worker 精准放行走访客本地物理网络，绝不向内网 Agent 抛出 400 Bad Request。
 
+- [ ] **2.6 SSRF 安全拨号器与 DNS 重绑定 (TOCTOU) 防御实网拨测**
+  - **背景原理**：验证 `pkg/proxy/ssrf.go` 中的 `SafeDialContext` 拨号器对非法内网 IP 与欺诈域名的硬件级物理拦截；
+  - **测试用例与验证点**：
+    1. **云厂商元数据注入拦截 (Cloud Metadata Defense)**：
+       - 通过被代理应用或测试脚本诱导网关发起对公有云元数据地址的请求（如 `http://169.254.169.254/latest/meta-data/` 或 `http://[fd00:ec2::254]/`）；
+       - **断言判定**：`SafeDialContext` 在底层 TCP 连接建立前进行 IP 校验，直接阻断并抛出 `SSRF protection: access to link-local address is blocked`，禁止任何内部敏感凭证外溢；
+    2. **DNS 重绑定对抗 (Time-of-Check to Time-of-Use 防御)**：
+       - 使用重绑定测试域名（例如利用 `rbndr.us` 构造首次 DNS 解析为合法公网 IP、第二次及后续解析为 `127.0.0.1` 的动态域名）；
+       - **断言判定**：网关安全拨号器在每次底层 TCP 握手前均强制重解析与严格过滤校验，杜绝“检测时是合法公网 IP，建立连接时突变成环回接口”的 TOCTOU 绕过漏洞，物理阻断回环逃逸。
+
 ---
 
 ## 维度三：复杂拓扑 NAT 穿透、中继与漫游容灾自愈验证
@@ -223,6 +247,13 @@ sequenceDiagram
 - [ ] **3.4 手动 ICE Restart 诊断自愈测试**
   - **测试动作**：在任意活跃连接页面，点击右下角 HUD 诊断看板中的 **`🔄 立即触发 ICE Restart`** 按钮。
   - **断言判定**：控制台在 500ms 内完成原位重新握手，现有页面 DOM、表单输入值完整保留。
+
+- [ ] **3.5 纯 IPv6 双栈与移动蜂窝 NAT64 环境测试**
+  - **背景场景**：三大运营商 5G 移动蜂窝网络已广泛分配纯 IPv6 地址，结合家庭宽带/机房双栈环境，检验网关在跨协议栈拓扑下的适应力；
+  - **测试动作与验证点**：
+    1. **IPv6 STUN Candidate 收集验证**：在具备 IPv6 接入的移动端或测试机上，打开 HUD 诊断面板，确认 WebRTC 成功收集并上报 `typ host` 与 `typ srflx` 的 IPv6 候选地址（如 `240e:...` / `2408:...`）；
+    2. **IPv6 P2P Direct 直连打洞**：当两端均具备 IPv6 连通性时，验证 WebRTC 优先协商并建立基于 IPv6 UDP 的直接点对点通路，绕过复杂的 IPv4 NAT 转换，延迟进一步降低；
+    3. **NAT64 / DNS64 降级兼容**：在仅分配单栈 IPv6 且缺乏对端公网 IPv6 路由的极端网络下，验证网关能够平滑通过双栈公网 STUN/TURN 中继服务器进行隧道降级互通，业务访问零丢包、无黑洞死锁。
 
 ---
 
@@ -315,6 +346,19 @@ sequenceDiagram
        - 在控制台发起 `fetch('/bundle.js', { method: 'HEAD' })` 预检；
        - 或请求返回 `204 No Content` / `Content-Length: 0` 的接口；
        - 断言：解压管线精准旁路并回传 `null` body，**控制台零 `TypeError: Compressed input was truncated` 抛错**。
+
+- [ ] **5.4 P2P 文件保险库并发多任务与中途 Abort 资源回收**
+  - **启动 Agent 模式**：`./agent -file-server -file-dir /data/shares`。
+  - **测试动作 1（多流并发切片调度）**：
+    - 访客在 P2P 文件保险库界面中同时勾选 3 个 2GB 以上的大文件并发启动下载；
+    - **断言判定**：3 条逻辑流在同一个 WebRTC DataChannel 上由底层多路复用器（Muxer）公平调度切片，并发传输平稳推进，无流饥饿、无奇偶流 ID 串扰冲突；
+  - **测试动作 2（传输中途突然取消 / 标签页秒关）**：
+    - 在 3 个大文件均下载至约 50% 进度时，访客点击浏览器中的“取消全部”或直接强行关闭浏览器标签页；
+    - **断言判定**：
+      1. 浏览器 `AbortController` 触发并向隧道发送流重置/关闭信号；
+      2. Linux 宿主机 Agent 在 **< 500ms** 内感知对端中止，立即调用底层 `file.Close()` 释放打开的文件句柄；
+      3. 在宿主机使用 `lsof -p $(pidof agent) | grep /data/shares` 检查，**文件句柄计数瞬间归零，无孤儿文件句柄泄漏**；
+      4. 宿主机常驻内存 (RSS) 立即平稳回落至基线水平，无缓冲区悬挂泄漏。
 
 ---
 

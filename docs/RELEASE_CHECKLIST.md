@@ -140,6 +140,14 @@ flowchart TD
     ```
   - **判定标准**：各目标平台交叉编译在数秒内以退出码 `0` 成功退出，零编译错误。
 
+- [ ] **3.5 全息实战与真实环境分级签核 (Real-World Testing Tiered Sign-off)**
+  - **参考准则**：详见 [docs/TESTING_CHECKLIST.md](file:///docs/TESTING_CHECKLIST.md)（涵盖 7 大全息实战维度与软硬件真实测试靶场）。
+  - **分级门禁裁定机制 (Tiered Gate Policy)**：
+    为避免机械教条主义拖垮小版本迭代效率，依照发版类型实行差异化签核：
+    - **补丁修复 (Patch Release, `vX.Y.Z+1`)**：**免除全量实网靶场测试**。仅需通过 CI 自动化单测、Race 竞态检测及本地 Docker 烟雾验证，即可快速交付；
+    - **次版本发布 (Minor Release, `vX.Y+1.0`)**：**针对性抽样核验**。审查人根据本次功能变更的爆炸半径，针对性挑选相关维度的实战用例（如涉及 WAF 改动则签核维度二，涉及媒体/流控则签核维度五），将验证日志或截图附于发版 PR 中；
+    - **主版本发布 (Major Release, `vX+1.0.0`)**：**全量 7 大维度实战签核**。必须在真实 Linux 宿主机、公网跨网环境、移动设备及真实浏览器矩阵中完成 [TESTING_CHECKLIST.md](file:///docs/TESTING_CHECKLIST.md) 的全量逐项通过并形成签核报告。
+
 ---
 
 ## 阶段四：容器与加固预审 (Docker & Container Pre-flight)

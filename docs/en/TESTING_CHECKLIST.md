@@ -98,6 +98,20 @@ Verifies that heavy, modern web applications reverse-proxied through the gateway
     2. **Smooth Upload Progress Bar**: Observe the upload phase; assert the progress bar advances smoothly from 0% to 100%, completely avoiding Chromium Bug 1214207 where upload progress freezes at 0%;
     3. **Multi-Threaded Worker Support**: Confirm LibreSpeed Web Worker measurement threads execute correctly across the tunnel.
 
+- [ ] **1.5 Upstream Target HTTPS & Self-Signed Certificate Chain (Proxmox VE / DSM / Self-Signed HTTPS)**
+  - **Deployment**: Deploy a private management console on the Linux testbed that enforces HTTPS with self-signed or untrusted certificates (e.g. Proxmox VE console on port 8006, Synology DSM on port 5001, or OpenSSL self-signed Nginx HTTPS reverse proxy).
+  - **Start Agent (Strict Security Comparison)**:
+    1. **Phase A (Default Strict Verification)**:
+       - Run `./agent -node-id pve -target https://127.0.0.1:8006`;
+       - Initiate visitor access in browser;
+       - **Pass Criteria**: Agent strictly rejects untrusted TLS handshakes with `x509: certificate signed by unknown authority`; zero silent fallback or implicit security downgrades;
+    2. **Phase B (Explicit Trust Mode with -insecure)**:
+       - Run `./agent -node-id pve -target https://127.0.0.1:8006 -insecure`;
+       - **Pass Criteria**:
+         - Startup console prints a prominent high-risk security warning: `⚠️ INSECURE: TLS certificate verification is disabled`;
+         - Visitor browser loads the Proxmox VE / DSM login console smoothly;
+         - Post-login Web terminals (noVNC / xterm.js) and WSS bidirectional sockets connect without issues; TLS SNI and encrypted tunneling operate reliably.
+
 ---
 
 ## Dimension 2: Enterprise WAF, Reverse Proxies & Real Client IP Propagation
@@ -167,6 +181,16 @@ sequenceDiagram
     1. Access whitelisted CDN assets: Service Worker proxies through Agent with `x-p2p-allowed-domains` headers;
     2. Access non-whitelisted external links (e.g. `https://github.com`): Service Worker cleanly routes through native visitor network, never triggering 400 Bad Request errors against the intranet gateway.
 
+- [ ] **2.6 SSRF Safe Dialer & DNS Rebinding (TOCTOU) Defense Test**
+  - **Mechanism**: Verifies hardware-level physical blocking of unauthorized internal addresses and fraudulent domains via `pkg/proxy/ssrf.go` (`SafeDialContext`).
+  - **Verification Points**:
+    1. **Cloud Metadata Injection Defense**:
+       - Trigger requests towards cloud metadata IPs (e.g. `http://169.254.169.254/latest/meta-data/` or `http://[fd00:ec2::254]/`);
+       - **Pass Criteria**: `SafeDialContext` inspects IP before TCP socket creation, immediately blocking with `SSRF protection: access to link-local address is blocked`, preventing credential leakage;
+    2. **DNS Rebinding Defense (Time-of-Check to Time-of-Use)**:
+       - Use dynamic DNS rebinding test hostnames (e.g. using `rbndr.us` resolving to a public IP on initial check and `127.0.0.1` on subsequent connects);
+       - **Pass Criteria**: The dialer re-resolves and enforces strict filtering on every TCP handshake, preventing TOCTOU loopback escape.
+
 ---
 
 ## Dimension 3: Complex NAT Topologies, TURN Relays & Mobile Roaming
@@ -198,6 +222,13 @@ Verifies traversal robustness across strict enterprise firewalls and network tra
 - [ ] **3.4 Manual ICE Restart Diagnostic Probe**
   - **Action**: Click **`🔄 Trigger ICE Restart`** in the HUD diagnostics card during an active session.
   - **Pass Criteria**: Renegotiates in place within 500ms while preserving existing DOM inputs and form states.
+
+- [ ] **3.5 Pure IPv6 Dual-Stack & Mobile Cellular NAT64 Environment**
+  - **Scenario**: Mobile cellular 5G networks frequently allocate pure IPv6 addresses; tests gateway adaptability across mixed protocol topologies.
+  - **Verification Points**:
+    1. **IPv6 STUN Candidate Gathering**: In an IPv6-capable mobile or test environment, inspect the HUD diagnostics card; confirm WebRTC gathers `typ host` and `typ srflx` IPv6 candidates (e.g. `240e:...` / `2408:...`);
+    2. **IPv6 P2P Direct Tunneling**: When both peers have IPv6 connectivity, verify WebRTC prioritizes an IPv6 UDP direct tunnel, bypassing IPv4 NAT bottlenecks for lower latency;
+    3. **NAT64 / DNS64 Relay Fallback**: In pure IPv6 cellular environments lacking end-to-end IPv6 routes, verify smooth fallback through dual-stack public STUN/TURN relays with zero packet loss or connection blackholes.
 
 ---
 
@@ -250,6 +281,19 @@ Verifies traversal robustness across strict enterprise firewalls and network tra
     - Static JS/CSS assets transmit with `x-p2p-content-encoding: gzip` (60%~80% reduction);
     - Browser stream decompresses via native `DecompressionStream('gzip')` without corruption;
     - `fetch('/bundle.js', { method: 'HEAD' })` cleanly bypasses decompression; **zero `TypeError: Compressed input was truncated` errors**.
+
+- [ ] **5.4 P2P File Vault Concurrent Multi-Download & Mid-Transfer Abort Reclamation**
+  - **Start Agent Mode**: `./agent -file-server -file-dir /data/shares`.
+  - **Action 1 (Concurrent Multiplexed Downloads)**:
+    - In the File Vault UI, simultaneously check and download 3 files (> 2GB each);
+    - **Pass Criteria**: 3 logical streams are fairly scheduled across a single DataChannel by the Muxer without starvation or odd/even stream ID collision;
+  - **Action 2 (Mid-Transfer Abort / Immediate Tab Close)**:
+    - At ~50% progress across all 3 files, click "Cancel All" or force-close the browser tab;
+    - **Pass Criteria**:
+      1. Browser `AbortController` fires and signals stream termination across the tunnel;
+      2. Linux Agent detects disconnection within **< 500ms**, immediately invoking `file.Close()` on open file descriptors;
+      3. Verify with `lsof -p $(pidof agent) | grep /data/shares`; **file descriptor count drops to zero immediately with zero orphan descriptor leaks**;
+      4. Host RSS memory returns smoothly to baseline without buffer retention leaks.
 
 ---
 
