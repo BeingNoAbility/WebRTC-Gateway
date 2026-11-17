@@ -78,7 +78,7 @@ jobs:
         run: |
           TAG="${{ steps.vars.outputs.tag }}"
           ARCHIVE_NAME="webrtc-gateway_${TAG}_${{ matrix.goos }}_${{ matrix.goarch }}"
-          cp README.md LICENSE build_output/
+          cp README.md README_en.md LICENSE build_output/
           
           if [ "${{ matrix.archive_ext }}" = "zip" ]; then
             cd build_output
@@ -133,7 +133,7 @@ jobs:
         with:
           tag_name: ${{ steps.vars.outputs.tag }}
           name: ${{ steps.vars.outputs.tag }} - Zero-Client WebRTC P2P Gateway
-          body_path: RELEASE_NOTES.md
+          body_path: docs/RELEASE_NOTES.md
           files: release_assets/*
           generate_release_notes: true
           draft: false

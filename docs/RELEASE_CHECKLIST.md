@@ -161,10 +161,10 @@ flowchart TD
 
 ## 阶段五：文档与发布说明审计 (Release Notes & Docs Audit)
 
-- [ ] **5.1 🌟 RELEASE_NOTES.md 严格单版本守则（关键红线）**
-  - **位置**：[RELEASE_NOTES.md](file:///RELEASE_NOTES.md)
+- [ ] **5.1 🌟 docs/RELEASE_NOTES.md 严格单版本守则（关键红线）**
+  - **位置**：[docs/RELEASE_NOTES.md](file:///docs/RELEASE_NOTES.md)
   - **⚠️ 核心红线原则**：  
-    **`RELEASE_NOTES.md` 必须且只能包含本次发布的最新一个版本的更新公告！**  
+    **`docs/RELEASE_NOTES.md` 必须且只能包含本次发布的最新一个版本的更新公告！**  
     严禁累加或堆叠历史过往版本的说明（历史全量记录由 `CHANGELOG.md` 负责维护）。
   - **内容规范**：
     - 版本号与日期（如 `## [vX.Y.Z] - YYYY-MM-DD`）；
@@ -177,7 +177,7 @@ flowchart TD
   - **核对项**：在文档顶部追加新版本条目，遵循 [Keep a Changelog](https://keepachangelog.com/) 规范（`Added` / `Changed` / `Deprecated` / `Removed` / `Fixed` / `Security`）。
 
 - [ ] **5.3 主文档多语言对齐**
-  - **位置**：[README.md](file:///README.md)、`README_zh.md`、`README_en.md`
+  - **位置**：[README.md](file:///README.md)、[README_en.md](file:///README_en.md)
   - **核对项**：最新版本号提及、CLI 参数说明表、Docker 部署命令是否与新功能同步。
 
 - [ ] **5.4 Wiki 知识库对齐**

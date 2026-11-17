@@ -753,6 +753,13 @@ webrtc-gateway/
 │   ├── cloudflare-worker/          # 统一信令 Worker 脚本 (Durable Object + 静态托管)
 │   │   └── worker.js
 │   └── wrangler.toml               # 边缘独立部署配置
+├── configs/                        # 配置文件模板
+│   ├── agent.example.yaml          # Agent 配置文件参考
+│   └── server.example.yaml         # Server 配置文件参考
+├── docs/                           # 项目工程与发版技术文档
+│   ├── BROWSER_COMPATIBILITY.md    # 浏览器兼容性与限制矩阵
+│   ├── RELEASE_CHECKLIST.md        # 正式发版全流程质量审计门禁清单
+│   └── RELEASE_NOTES.md            # 当前最新版本单版本发布说明 (供 GitHub Release 抓取)
 ├── test/                           # 自动化测试套件
 │   ├── advanced_e2e_scenarios_test.go # HTTP 206 Partial Content / Range / Gzip / 标头反射透传
 │   ├── secret_auth_test.go         # SECRET 鉴权校验、防冒领与未授权拦截 (401 实时断开)
@@ -762,12 +769,19 @@ webrtc-gateway/
 │   ├── phase3_tunnel_test.go       # HTTP/WS 全功能穿透回归测试
 │   ├── test_subdomain_logic.cjs    # 多级子域名解析算法单测
 │   └── node_id_preservation_test.cjs # 弹窗新窗口 Node ID 保持与 DOM 虚拟化集成测试
+├── .github/workflows/              # GitHub Actions CI/CD 工作流
+│   ├── ci.yml                      # CI 构建与自动化测试矩阵
+│   ├── release.yml                 # 多架构 GitHub Release 自动化打包发布
+│   └── docker.yml                  # 多架构 Docker 镜像构建与 GHCR 推送
 ├── docker-compose.yml              # 一键编排全套服务配置
 ├── Dockerfile.agent                # Agent 极简多阶段构建文件 (~20MB)
 ├── Dockerfile.server               # 一体化服务端多阶段构建文件 (~16MB)
 ├── go.mod
 ├── go.sum
-└── README.md
+├── CHANGELOG.md                    # 历史全量版本更新日志 (Keep a Changelog)
+├── LICENSE                         # 开源许可证 (MIT)
+├── README.md                       # 项目主文档 (简体中文)
+└── README_en.md                    # 项目主文档 (English)
 ```
 
 ---

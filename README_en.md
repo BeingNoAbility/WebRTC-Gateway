@@ -477,6 +477,13 @@ webrtc-gateway/
 │   ├── cloudflare-worker/          # Unified signaling worker (Durable Object + static assets)
 │   │   └── worker.js
 │   └── wrangler.toml               # Standalone edge deployment config
+├── configs/                        # Configuration templates
+│   ├── agent.example.yaml          # Agent configuration reference
+│   └── server.example.yaml         # Server configuration reference
+├── docs/                           # Technical documentation & specifications
+│   ├── BROWSER_COMPATIBILITY.md    # Browser compatibility & limitation matrix
+│   ├── RELEASE_CHECKLIST.md        # Release quality gate audit protocol
+│   └── RELEASE_NOTES.md            # Latest single-version release notes (GitHub Release)
 ├── test/                           # Automated test suites
 │   ├── advanced_e2e_scenarios_test.go # HTTP 206 Partial Content / Range / Gzip / Headers
 │   ├── secret_auth_test.go         # SECRET authentication & 401 instant rejection
@@ -495,7 +502,8 @@ webrtc-gateway/
 ├── Dockerfile.server               # Minimal multi-stage server image (~16MB)
 ├── go.mod
 ├── go.sum
-├── LICENSE
+├── CHANGELOG.md                    # Cumulative changelog (Keep a Changelog)
+├── LICENSE                         # License (MIT)
 ├── README.md                       # Documentation (Simplified Chinese)
 └── README_en.md                    # Documentation (English)
 ```
