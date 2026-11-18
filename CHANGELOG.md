@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v2.0.7] - 2026-11-18
+
+### Fixed & Resilience
+- **Service Worker Stream Controller Cancellation Defense (`ReadableStreamDefaultController.enqueue`)**:
+  - Added an atomic `isStreamClosed` state lock and enclosed `controller.enqueue(chunk)` within a defensive `try...catch` block in `web/src/sw/sw.ts`.
+  - Completely eliminates unhandled `TypeError: Failed to execute 'enqueue' on 'ReadableStreamDefaultController': Cannot enqueue a chunk into a closed readable stream` in high-concurrency environments or when client fetch requests / browser extensions (such as Dark Reader or aggressive tab switchers) cancel in-flight HTTP streams before pending chunks arrive across the `MessagePort` IPC channel.
+  - Safely logs dropped in-flight chunks and returns early to ensure stream teardown never destabilizes the Service Worker thread.
+
 ## [v2.0.6] - 2026-11-18
 
 ### Fixed & UX
