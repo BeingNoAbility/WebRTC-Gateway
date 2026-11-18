@@ -1,0 +1,7 @@
+{
+  "cf_signal_domain_custom": "webrtc-p2p-signal.example.com",
+  "cf_signal_domain_workers_dev": "webrtc-p2p-signal.example.workers.dev",
+  "cf_portal_domain_custom": "p2p.example.com",
+  "cf_portal_domain_workers_dev": "p2p.example.workers.dev",
+  "testbed_ssh_target": "root@192.0.2.10"
+}

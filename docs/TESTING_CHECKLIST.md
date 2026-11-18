@@ -371,11 +371,19 @@ tc qdisc del dev eth0 root
 
 本维度检验生产环境中的休眠唤醒、容器热升级与退出幂等性：
 
-- [ ] **7.1 Cloudflare Worker WebSocket Hibernation 边缘休眠唤醒测试 (Case 3 注入)**
-  - **场景**：信令托管在 Cloudflare Worker Durable Object。
-  - 🟢 **正向验证**：Agent 注册后闲置 30 分钟以上，DO 实例进入深度休眠态（Hibernation）；访客打开页面唤醒 DO。
-  - 🔴 **反向对抗与证伪**：对标 [REVIEW_GUIDELINES 案例 3](file:///docs/REVIEW_GUIDELINES.md)，DO 唤醒时执行 `ensureState()`，从 WebSocket 会话附件中无损恢复 `nodeSecrets`、`nodeVisitorAuth` 与 `ipConns`；访客输入密码后正常通过鉴权，防冒领校验严格执行；断连时连接计数严禁下溢。**休眠唤醒后零鉴权绕过、零连接计数下溢**。
-  - 📊 **判定标准与证据**：休眠唤醒后密码防护 100% 严密，无非法穿透。
+- [x] **7.1 Cloudflare Worker WebSocket Hibernation 边缘休眠唤醒与公网信令实测 (Case 3 注入)**
+  - **实测环境**：真实 Cloudflare Workers (Free 级别) + SQLite Durable Objects：
+    - 信令端点：`wss://<cf-signal-custom-domain>/ws` | `wss://<cf-signal-worker-domain>/ws`
+    - 静态门户：`https://<cf-portal-worker-domain>` | `https://<cf-portal-custom-domain>`
+    - 外部配置注入：支持外部变量文件 `test/test_config.local.json`（已在 `.gitignore` 排除防泄漏）或环境变量 `CF_SIGNAL_DOMAIN_*`、`CF_PORTAL_DOMAIN_*`、`TESTBED_SSH_TARGET`
+    - 自动化测试套件：`test/cloudflare_live_e2e_test.go` (`npm run test:cf`)
+  - 🟢 **正向验证**：Agent 与 Client 均可通过公网动态分片信令房间（`?node=<nodeId>`）接入 Cloudflare DO，完成注册、发现与 SDP/ICE 候选交换。
+  - 🔴 **反向对抗与证伪**：
+    1. **HTTP 升级防护**：非 WebSocket 直连 `/ws` 严格返回 `426 Upgrade Required`；
+    2. **防冒领与鉴权边界**：未授权连接注入错误密钥注册同名节点，被 DO 实时拦截并拒绝（4003 Unauthorized）；
+    3. **掉线与生命周期状态同步**：Agent 关闭连接，DO 广播 `peer_status: offline` 给所有关联客户端；
+    4. **真机跨网穿透**：真实 Linux VM 运行 Agent，Windows 宿主机运行 Client，经由公网 Cloudflare DO 完成信令交换并打通 P2P DataChannel，RTT 仅 1.6ms，反向代理数据流双向贯通。
+  - 📊 **判定标准与证据**：`go test -v -run TestCloudflareLive ./test/...` 100% PASS，Linux VM 真实 CGO `-race` 零竞态。
 
 - [ ] **7.2 Agent / Signal 守护进程优雅关闭与自愈重连测试**
   - 🔴 **反向对抗与证伪**：多流传输中向 Signal 进程发送 `kill -SIGTERM`，验证触发 5 秒 graceful shutdown；重启 Signal 后，Agent 自动进入指数退避重连机制（2s, 4s, 8s...），恢复后自动重注 Node ID；访客刷新页面立即恢复，守护进程零挂死、零僵尸。

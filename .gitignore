@@ -43,3 +43,9 @@ desktop.ini
 *.tmp
 *.zip
 *.tar.gz
+
+# Local test configurations and private environment variables
+test/*.local.json
+test/*.local.env
+.env*.local
+*.local.json

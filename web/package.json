@@ -9,7 +9,8 @@
     "deploy:cloudflare": "npm run build && wrangler deploy",
     "test": "node ../test/test_worker_syntax.cjs && node ../test/test_subdomain_logic.cjs && node ../test/node_id_preservation_test.cjs && node ../test/test_vault_download.cjs && node ../test/test_smart_pill.cjs",
     "test:browser": "node ../test/real_browser_matrix_runner.cjs --local-only",
-    "test:browser:full": "node ../test/real_browser_matrix_runner.cjs"
+    "test:browser:full": "node ../test/real_browser_matrix_runner.cjs",
+    "test:cf": "go test -v -run TestCloudflareLive ../test/..."
   },
   "keywords": [
     "webrtc",
