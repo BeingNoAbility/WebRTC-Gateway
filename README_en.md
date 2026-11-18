@@ -92,7 +92,7 @@ sequenceDiagram
     Signal->>Agent: Forward SDP Offer
     Agent->>Signal: Return SDP Answer & ICE Candidates
     Signal->>Visitor: Forward SDP Answer
-    Note over Visitor,Agent: Phase 1: Signaling handshake complete; broker exits data path
+    Note over Visitor,Agent: Phase 1: Signaling handshake complete - broker exits data path
 
     Visitor<<->>Agent: WebRTC STUN/ICE NAT traversal
     Visitor<<->>Agent: Establish end-to-end encrypted DataChannel (SCTP: "p2pmux")

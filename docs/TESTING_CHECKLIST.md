@@ -50,7 +50,7 @@ flowchart LR
 
     External_Visitors <-->|"1. WebSocket 信令交换 (SDP/ICE)"| Public_Signaling
     Private_Homelab <-->|"1. 长连监听注册"| Public_Signaling
-    External_Visitors <====="2. WebRTC P2P 直连 (UDP DTLS-SRTP 加密数据通道)"=====> Private_Homelab
+    External_Visitors <-->|"2. WebRTC P2P 直连 (UDP DTLS-SRTP 加密数据通道)"| Private_Homelab
 ```
 
 > [!NOTE] **测试环境参数配置约定（请严格匿名化，切勿泄露真实生产 IP）**：

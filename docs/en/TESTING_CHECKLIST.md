@@ -50,7 +50,7 @@ flowchart LR
 
     External_Visitors <-->|"1. WebSocket Signaling (SDP/ICE)"| Public_Signaling
     Private_Homelab <-->|"1. Long-Lived Signaling Listener"| Public_Signaling
-    External_Visitors <====="2. WebRTC P2P Direct Tunnel (UDP DTLS-SRTP DataChannel)"=====> Private_Homelab
+    External_Visitors <-->|"2. WebRTC P2P Direct Tunnel (UDP DTLS-SRTP DataChannel)"| Private_Homelab
 ```
 
 > [!NOTE] **Test Environment Anonymization Parameters (Do not commit real production IPs)**:

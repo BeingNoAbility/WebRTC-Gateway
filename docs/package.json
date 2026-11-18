@@ -7,7 +7,7 @@
     "docs:dev": "vitepress dev",
     "docs:build": "vitepress build",
     "docs:preview": "vitepress preview",
-    "docs:lint": "node ./scripts/lint-docs.cjs"
+    "docs:lint": "node ./scripts/lint-docs.cjs && node ./scripts/lint-mermaid.mjs"
   },
   "devDependencies": {
     "vitepress": "^1.6.3",
