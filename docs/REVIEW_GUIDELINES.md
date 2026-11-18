@@ -213,6 +213,14 @@ flowchart TD
 - **深水区陷阱**：流式传输切片是任意字节边界。若一个汉字或 Emoji 的 3~4 字节正好被网络分包拆在两个 chunk 中，`TextDecoder` 在第一个 chunk 末尾解码失败会产生替换字符（`\uFFFD` 乱码），导致网页永久乱码崩坏！
 - **辩证解法**：采用纯字节扫描（`Uint8Array` 查找 ASCII 序列 `<head>` 的字节特征），命中后直接在字节数组上执行切片拼接，后续所有 chunk 直接零拷贝纯透传。
 
+### 案例 6：握手协议解复用与并发广播陷阱之辩 ——【保持协议不变 vs 破坏 Wire 帧 / 遍历广播锁死】
+
+- **背景**：为了降低代理层流握手开销，曾提议将 WebSocket 首帧直接在线路上替换为 `TypeWSConnect` 专有帧，并在信令端收到 Agent 注册后同步向所有等待客户端广播。
+- **深水区陷阱 (协议不变量与队头阻塞)**：
+  1. `pkg/mux/mux.go` 中 `TypeWSConnect` 会直接流入 `inboundData`，而 HTTP/WS 代理均在同步等待 `ReadHeaders`（等待 `headersCh`），改发 `TypeWSConnect` 会直接导致代理层握手 10 秒超时死锁！
+  2. 信令端在持有 `RLock` 的情况下同步调用 `client.Send`，若单个客户端网络缓慢或 TCP 缓冲区填满，将直接导致整机信令总线写锁死锁、后续 Agent 注册全部卡死。
+- **辩证解法**：严格保持线上 Wire 帧为 `TypeHeaders` 不破防，在 Go 端引入 `HandleStreamWithMeta` 实现单次反序列化零冗余分流；信令端快照目标客户端后立即释放 `RUnlock()`，通过异步 goroutine 分发通知并为每个客户端独立构造保留其专属 `SessionID: client.ID`。
+
 ---
 
 ## 四、 审查结果定性与签核规范 (Sign-off Matrix)

@@ -210,6 +210,14 @@ flowchart TD
 - **Deep-Water Trap (Spec Asymmetry)**: Stream chunks split across arbitrary byte boundaries. Multi-byte UTF-8 sequences (e.g. Chinese characters or emojis) split between chunks cause `TextDecoder` to emit replacement characters (`\uFFFD`), permanently corrupting web content.
 - **Dialectical Solution**: Scan raw bytes (`Uint8Array`) for ASCII `<head>` signature; slice and splice directly at the byte level, passing subsequent chunks untouched without memory reallocation.
 
+### Case 6: Stream Handshake Demux & Signaling Broadcast Traps — [Wire Invariants vs Deadlocks]
+
+- **Context**: To eliminate proxy handshake overhead, proposals suggested emitting dedicated `TypeWSConnect` frames on the wire and synchronously broadcasting peer online status across waiting clients.
+- **Deep-Water Traps (Protocol Invariants & HoL Blocking)**:
+  1. In `pkg/mux/mux.go`, `TypeWSConnect` frames are directed into `inboundData`, while proxies wait on `ReadHeaders` (`headersCh`). Changing wire frames induces a 10-second handshake timeout deadlock.
+  2. Holding `RLock` during synchronous `client.Send` causes slow or buffer-stalled WebSocket clients to block all subsequent agent registrations on the entire broker.
+- **Dialectical Solution**: Retain `TypeHeaders` wire frames; demultiplex headers once inside `agent.go` and pass pre-parsed metadata via `HandleStreamWithMeta`. Snapshot target clients and release `RUnlock()` immediately, broadcasting asynchronously via goroutine with unique `SessionID: client.ID` preserved per client.
+
 ---
 
 ## 4. Sign-off Matrix

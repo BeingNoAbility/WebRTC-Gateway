@@ -18,7 +18,7 @@ import (
 )
 
 // Version represents the current release version of WebRTC Gateway Agent.
-var Version = "v2.0.3"
+var Version = "v2.0.4"
 
 func printAgentUsage(out io.Writer) {
 	fmt.Fprintf(out, "WebRTC Gateway Agent (%s)\n", Version)
