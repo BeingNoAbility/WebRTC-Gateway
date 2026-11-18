@@ -122,10 +122,10 @@ chmod +x ./bin/agent_linux_amd64
 | **家庭媒体中心 (Jellyfin / Emby / Plex)** | `http://192.168.1.100:8096` | `./agent -node-id media -target http://192.168.1.100:8096` | 支持音视频在线解码播放，进度条随意拖动快进，走 P2P 原生流式分片。 |
 | **密码管理器 (Vaultwarden / Bitwarden)** | `http://127.0.0.1:8080` | `./agent -node-id bitwarden -target http://127.0.0.1:8080` | 完整支持 WebCrypto API 与 Passkey，Session Cookie 隔离，安全加密访问。 |
 | **私人网盘 (Alist / OpenList / FileBrowser)** | `http://127.0.0.1:5244` | `./agent -node-id pan -target http://127.0.0.1:5244` | 支持多文件并发上传下载、预览文档，W3C 上传进度条平滑展示。 |
-| **云相册 (Immich / Photoprism)** | `http://127.0.0.1:2283` | `./agent -node-id photo -target http://127.0.0.1:2283` | 相册极速缩略图瀑布流渲染，SvelteKit 前端无缝兼容。 |
+| **云相册 (Immich / Photoprism)** | `http://127.0.0.1:2283` | `./agent -node-id photo -target http://127.0.0.1:2283` | 相册缩略图瀑布流渲染，SvelteKit 前端无缝兼容。 |
 | **容器控制台 (Portainer)** | `https://127.0.0.1:9443` | `./agent -node-id docker -target https://127.0.0.1:9443` | 自动破除 Anti-Frame-Busting 限制，WebSocket 容器终端与日志实时交互。 |
 | **本地开发与 Web 调试** | `http://localhost:3000` | `./agent -node-id dev -target http://localhost:3000` | 免配置临时暴露 Vite / Next.js / Spring Boot 开发服务给客户或同事预览。 |
-| **P2P 单文件秒传 (私有 Wormhole / AirDrop)** | 本地单个大文件 (ISO/ZIP/MP4) | `./agent -file ./Ubuntu.iso -access-secret pass123 -sign-link 24h` | 访客浏览器打开签名链接即刻触发满速 P2P 直连下载，不限大小，零中心流量，时效自毁。 |
+| **P2P 单文件轻量分发 (私有文件分发)** | 本地单个大文件 (ISO/ZIP/MP4) | `./agent -file ./Ubuntu.iso -access-secret pass123 -sign-link 24h` | 访客浏览器打开签名链接即可触发 P2P 直连下载，不限大小，零中心流量，时效过期失效。 |
 | **静态网站与本地目录在线托管** | 本地静态目录路径 | `./agent -dir /path/to/dist` | 零额外 Web 服务器，自动索引 `index.html` 或渲染现代化极简只读文件浏览列表。 |
 
 ---
@@ -175,7 +175,7 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-signal` | `SIGNAL_URL` | `ws://127.0.0.1:8888/ws` | 信令服务器的 WebSocket 地址（支持 ws:// 或 wss://） |
 | `-target` | `TARGET_URL` | `http://127.0.0.1:8080` (缺省) | 本地或局域网反代的目标 Web 服务地址（模式 A，与 `-dir`、`-file` 互斥） |
 | `-dir` | `DIR_PATH` | `""` | 托管为静态网站或目录浏览的本地文件夹路径（模式 B，与 `-target`、`-file` 互斥） |
-| `-file` | `FILE_PATH` | `""` | 直接作为单文件分发服务的本地文件路径（模式 C，与 `-target`、`-dir` 互斥，P2P 极速闪传） |
+| `-file` | `FILE_PATH` | `""` | 直接作为单文件分发服务的本地文件路径（模式 C，与 `-target`、`-dir` 互斥，P2P 文件分发模式） |
 | `-config` | `CONFIG_FILE` / `CONFIG` | `""` | 可选的 YAML / JSON 配置文件路径（默认自动探测 `./agent.yaml`、`./agent.yml`、`./agent.json`） |
 | `-signal-secret` | `SIGNAL_SECRET` | `""` | 信令集群准入密钥（控制面，必须与信令端配置一致，防节点冒领，绝不透露给访客） |
 | `-access-secret` | `ACCESS_SECRET` | `""` | 访客访问口令（数据面，留空表示公开免密直连；配置后访客需输入口令或持有 HMAC 签名链接） |
@@ -195,8 +195,8 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | `-h`, `-help` | - | `false` | 显示完整命令行帮助文档与运行模式示例并退出 |
 
 > [!NOTE]
-> **关于 `-secret` / `SECRET` 的彻底弃用说明 (v1.5.0+)**：
-> 旧版模糊命名的 `-secret` 与 `SECRET` 现已彻底解耦并完全弃用（零兼容别名）。无论是 Agent 还是 Signal 服务端，传入 `-secret` 均会直接阻断退出（Fail-Fast），提示改用明确语义的 `-signal-secret`（集群注册）或 `-access-secret`（访客口令）。
+> **关于 `-secret` / `SECRET` 的弃用说明 (v1.5.0+)**：
+> 旧版模糊命名的 `-secret` 与 `SECRET` 现已解耦并弃用（零兼容别名）。无论是 Agent 还是 Signal 服务端，传入 `-secret` 均会直接阻断退出（Fail-Fast），提示改用明确语义的 `-signal-secret`（集群注册）或 `-access-secret`（访客口令）。
 
 ### 6. 一体化服务端 (Signal Server) 命令行参数全量说明
 
@@ -204,7 +204,7 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 | :--- | :--- | :--- | :--- |
 | `-addr` | `ADDR` / `PORT` | `:8888` | 服务端 HTTP/HTTPS 与 WebSocket 监听端口及地址 |
 | `-config` | `CONFIG_FILE` / `CONFIG` | `""` | 可选的 YAML / JSON 配置文件路径（默认自动探测 `./server.yaml`、`./server.yml`、`./server.json`） |
-| `-signal-secret` | `SIGNAL_SECRET` | `""` | 可选的服务端全局集群准入密钥，仅允许匹配口令的 Agent 注册（-secret 已彻底废弃移除） |
+| `-signal-secret` | `SIGNAL_SECRET` | `""` | 可选的服务端全局集群准入密钥，仅允许匹配口令的 Agent 注册（-secret 已废弃并阻断） |
 | `-tls-cert` | `TLS_CERT` | `""` | 加载的 TLS 证书 PEM 文件路径（如 fullchain.pem，开启原生 HTTPS） |
 | `-tls-key` | `TLS_KEY` | `""` | 加载的 TLS 私钥 PEM 文件路径（如 privkey.pem，开启原生 HTTPS） |
 | `-tls-auto` | `TLS_AUTO` | `false` | 一键内存自动签发包含当前局域网所有真实 IP 的 ECDSA SAN 证书 |
@@ -229,26 +229,26 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
      - **绝不暴露给访客浏览器**，访客亦无需知晓此密钥。
   2. **访客访问口令门禁 (Data Plane: `-access-secret` / `ACCESS_SECRET`)**：
      - **公开免密模式（默认）**：若留空，该节点即为公开站点，访客浏览器直接打洞进入，不弹出密码框，即使信令端启用了集群密钥也不影响访客；
-     - **独立口令模式**：若配置，访客在浏览器打开时 Web 门户将自动感知并弹出**高保真暗黑密码输入弹窗**（或通过 URL 参数 `#nodeId?secret=xxx` 传递）；Agent 收到 WebRTC 握手 Offer 时进行毫秒级口令比对，不匹配直接阻断握手，绝不泄露内网服务。
+     - **独立口令模式**：若配置，访客在浏览器打开时 Web 门户将自动感知并弹出**访客口令输入弹窗**（或通过 URL 参数 `#nodeId?secret=xxx` 传递）；Agent 收到 WebRTC 握手 Offer 时进行毫秒级口令比对，不匹配直接阻断握手，绝不泄露内网服务。
 - **无状态时效分享链接 (Stateless HMAC-SHA256 Sharing)**：
   - 无需数据库、无需 Redis、无需服务器记录撤销表；
   - 纯数学签名验证：`sign = HMAC-SHA256(nodeId + ":" + exp, access_secret)`；
   - 访客在浏览器打开 `#nodeId?exp=xxx&sign=yyy` 时，Agent 本地以毫秒级验证时效与签名，到期后数学上天然失效；
-  - Web 控制台支持一键选择 1 小时、6 小时、24 小时、7 天、30 天生成专属分享链接并一键复制；CLI 亦支持 `./agent -access-secret xxx -sign-link 24h` 极速生成。
+  - Web 控制台支持一键选择 1 小时、6 小时、24 小时、7 天、30 天生成专属分享链接并一键复制；CLI 亦支持 `./agent -access-secret xxx -sign-link 24h` 生成。
 - **纯内存零监听 P2P 文件与目录服务器 (v1.6.0+)**：
   - **纯出站零端口哲学**：直接在内存中将 WebRTC DataChannel 流适配为标准 HTTP 响应，不在宿主机开启任何本地 TCP 监听端口，避免端口暴露与冲突；
-  - **单文件秒传 (私有版 Wormhole / 跨公网 AirDrop)**：`./agent -file /path/to/archive.zip -access-secret pass -sign-link 24h`，访客在浏览器打开即可直接触发原生浏览器高速 P2P 下载，不限文件大小、不走中心服务器中转流量；
+  - **单文件轻量分发 (私有文件分发)**：`./agent -file /path/to/archive.zip -access-secret pass -sign-link 24h`，访客在浏览器打开即可直接触发原生浏览器高速 P2P 下载，不限文件大小、不走中心服务器中转流量；
   - **静态网站与目录托管**：`./agent -dir /path/to/dist`，自动索引 `index.html` 或呈现只读文件树列表；
   - **原生 HTTP 206 断点续传与媒体拖拽**：原生支持 `Range` 请求头，音视频/图片/PDF 自动采用 `inline` 供浏览器即时播放与拖拽，压缩包/镜像自动采用 `attachment` 触发下载；
   - **严格沙箱安全防护**：基于 `filepath.Rel` 与 `filepath.EvalSymlinks` 严密防御 `../` 路径穿越与符号链接逃逸攻击。
 - **连接韧性与移动漫游自愈 (WebRTC ICE Restart)**：
   - 当手机或笔记本在 Wi-Fi 和蜂窝移动网络之间漫游切换时，系统启动两阶段自愈流水线；
   - 自动快速重建断开的信令套接字，并在原 PeerConnection 上发起带有 `iceRestart: true` 的重协商；
-  - Agent 提供 5 秒断网宽限期（Grace Window），免除销毁连接，应用层 DataChannel、长连接与内网页面会话 100% 保持。
+  - Agent 提供 5 秒断网宽限期（Grace Window），免除销毁连接，应用层 DataChannel、长连接与内网页面会话保持。
 - **独立会话隔离**：每个浏览器会话拥有独立的虚拟连接通道与服务端 CookieJar，防止不同访客之间的登录态串号。
 - **设计哲学与安全边界声明 (Design Philosophy & Security Boundaries)**：
   1. **无状态网络门禁定位 (Stateless Transport Gatekeeper)**：`ACCESS_SECRET` 与 HMAC 签名属于网络传输层打洞门禁，天生追求纯数学验证、零中心化数据库与零 Redis 依赖；更细粒度的用户账户体系、RBAC 角色权限与单点注销由内网 Web 业务自身（如 Nextcloud、Jellyfin、Vaultwarden 等）负责，网关绝不做多余的业务层身份管理；
-  2. **原生拓扑免疫 SSRF (Native SSRF Immunity by Design)**：Agent 守护进程采用严格的静态单向绑定（`-target` / `-dir` / `-file`），绝不向访客提供任意目标代发或出站代理能力，从拓扑与数学上彻底杜绝 SSRF 攻击面，无需引入冗余复杂的 IP/CIDR 黑白名单过滤器。
+  2. **原生拓扑免疫 SSRF (Native SSRF Immunity by Design)**：Agent 守护进程采用严格的静态单向绑定（`-target` / `-dir` / `-file`），绝不向访客提供任意目标代发或出站代理能力，从网络拓扑上杜绝 SSRF 攻击面，无需引入冗余复杂的 IP/CIDR 黑白名单过滤器。
 
 ---
 
@@ -396,7 +396,7 @@ services:
 ```
 
 ##### 场景二：局域网纯 IP 原生自签 HTTPS 部署 (解决 Service Worker 白屏)
-在私网局域网中直接通过 IP（如 `192.168.1.100`）访问时，现代浏览器会强制拦截纯 HTTP 下的 Service Worker。启用 `TLS_AUTO=true` 即可一键生成覆盖所有局域网真实 IP 的 ECDSA SAN 证书，彻底根除白屏：
+在私网局域网中直接通过 IP（如 `192.168.1.100`）访问时，现代浏览器会强制拦截纯 HTTP 下的 Service Worker。启用 `TLS_AUTO=true` 即可一键生成覆盖所有局域网真实 IP 的 ECDSA SAN 证书，解决白屏问题：
 
 ```yaml
 services:
@@ -431,7 +431,7 @@ services:
     depends_on:
       - server
 ```
-*启动后，使用浏览器直接访问 `https://<局域网IP>:8888/#nas` 即可瞬间秒开！*
+*启动后，使用浏览器直接访问 `https://<局域网IP>:8888/#nas` 即可直连访问。*
 
 ##### 场景三：挂载正式域名 SSL 证书运行
 ```yaml
@@ -488,7 +488,7 @@ services:
 无需在宿主机安装 Go 环境，通过 Docker Compose 或独立 Agent 容器即可生成高强度时效安全分享链接：
 
 ```bash
-# 方式 A：通过 Docker Compose 极速生成 (例如 24 小时有效)
+# 方式 A：通过 Docker Compose 生成 (例如 24 小时有效)
 docker compose run --rm agent -sign-link 24h -portal-url https://p2p.yourdomain.com
 
 # 方式 B：通过独立 docker run 容器生成
@@ -581,7 +581,7 @@ docker run -d --name webrtc-agent --restart unless-stopped \
   - 官方镜像默认已剔除 root 特权，以独立非特权用户 `appuser` (UID: 10001, GID: 10001) 运行；
   - 严格遵循 CIS Docker Benchmark 与 Kubernetes Restricted Pod Security Standard，杜绝潜在的容器逃逸与提权风险。
 - **全格式支持 `--user` 任意指定身份 (NAS / 宿主机权限对齐)**：
-  - 在群晖 Synology、威联通 QNAP、Unraid 或 Linux 服务器上挂载本地目录/文件时，可直接传入 `--user $(id -u):$(id -g)`、`--user 1000:1000` 或 `--user nobody`，彻底杜绝权限不足或文件属主冲突：
+  - 在群晖 Synology、威联通 QNAP、Unraid 或 Linux 服务器上挂载本地目录/文件时，可直接传入 `--user $(id -u):$(id -g)`、`--user 1000:1000` 或 `--user nobody`，杜绝权限不足或文件属主冲突：
   ```bash
   # 以 NAS 宿主机 1000:1000 身份启动 Agent 并只读挂载媒体库
   docker run -d --name webrtc-agent --restart unless-stopped \
@@ -676,7 +676,7 @@ docker run -d --name webrtc-agent --restart unless-stopped \
   - `0x00 (FlagNone)`：常规数据帧。
   - `0x01 (FlagFin)`：标记该流的数据发送完毕（半关闭/完全关闭信号）。
   - `0x02 (FlagAck)`：控制帧确认应答。
-- **Payload Length (uint32, 4 字节)**：载荷字节长度（大端序）。单帧最大载荷上限为 **64KB (MaxPayloadSize = 65536 字节)**，推荐分块流式传输尺寸为 **32KB (RecommendedChunkSize = 32758 字节)**，配合 10 字节帧头完美契合 32KB 内存分块与 WebRTC 底层 SCTP MTU，杜绝内存跨阶扩张与超大分包丢包。
+- **Payload Length (uint32, 4 字节)**：载荷字节长度（大端序）。单帧最大载荷上限为 **64KB (MaxPayloadSize = 65536 字节)**，推荐分块流式传输尺寸为 **32KB (RecommendedChunkSize = 32758 字节)**，配合 10 字节帧头对齐 32KB 内存分块与 WebRTC 底层 SCTP MTU，避免内存跨阶扩张与超大分包丢包。
 
 ---
 
@@ -691,7 +691,7 @@ docker run -d --name webrtc-agent --restart unless-stopped \
 
 #### ② W3C Fetch 规范严格对齐 (204/304 Null-Body)
 - Chromium 与 WebKit 内核在根据规范处理响应时，严禁 HTTP 204 No Content、205 Reset Content、304 Not Modified 携带 Body，否则会触发 `TypeError: Response with null-body status cannot have body`。
-- 网关在 Service Worker 中进行了规范级状态校验，遇到上述状态码强制使用 `new Response(null, { status })`，保证了各类 SPA 应用（如 SvelteKit、Next.js）缓存协商的 100% 稳定性。
+- 网关在 Service Worker 中进行了规范级状态校验，遇到上述状态码强制使用 `new Response(null, { status })`，保证了各类 SPA 应用（如 SvelteKit、Next.js）缓存协商的稳定性。
 
 #### ③ W3C XMLHttpRequest Upload 上传进度虚拟化
 - 浏览器原生 Service Worker 存在已知底层缺陷（Chromium Bug 1214207）：由 Service Worker 代理的 XHR 上传请求无法自动触发 `xhr.upload.onprogress` 事件，导致网盘、测速等应用的上行进度条卡死在 0%。
@@ -705,7 +705,7 @@ docker run -d --name webrtc-agent --restart unless-stopped \
 - Agent 内部为每个远程 Session 实例化独立的 `http.CookieJar`。目标应用返回的敏感 `Set-Cookie`（包括 `HttpOnly`）由 Agent 自主维护并在后续请求中自动带上。
 - Agent 将非 HttpOnly 的 Cookie 列表通过响应元数据下发给前端，由 `patch.js` 自动同步至浏览器本地的 `document.cookie`，兼顾了安全性与前端 JavaScript 读取 Cookie 的兼容性。
 
-#### ⑥ 激进防框架劫持 (Anti-Frame-Busting)
+#### ⑥ 防框架劫持机制 (Anti-Frame-Busting)
 - 许多企业级管理系统（如 Portainer、Grafana、各类路由器后台）内置了类似于 `if (window.top !== window.self) window.top.location = window.self.location;` 的框架劫持检测脚本。
 - 网关在渲染 iframe 时移除了 `allow-top-navigation` 权限，并在页面注入虚拟化代理，拦截对 `window.top`、`window.parent`、`window.frameElement` 的检测，使其安全无感地在 Portal 内嵌沙箱中运行。
 
@@ -713,7 +713,7 @@ docker run -d --name webrtc-agent --restart unless-stopped \
 - **防盗链破壁**：在响应头和 HTML 中动态注入 `<meta name="referrer" content="no-referrer">`，并在 Agent 请求上游 CDN 时伪装 Origin 与 Referer，化解各类视频、图片图床返回 403 Forbidden 的问题。
 - **新标签页/弹窗隧道保持**：
   - 针对 Bilibili、Google、Naver 等点击新标签页打开子域链接（`<a target="_blank">` 或 `window.open`）的场景，Service Worker 维护全局 `activeNodeId` 并向 HTML 响应实时注入 `window.__P2P_NODE_ID__`；
-  - `patch.js` 自动将新页面重写为虚拟化路径 `?peer=${nodeId}#${nodeId}`，彻底解决新窗口脱离上下文误将子域名作为 Node ID 导致 `Target agent offline` 的问题。
+  - `patch.js` 自动将新页面重写为虚拟化路径 `?peer=${nodeId}#${nodeId}`，解决新窗口脱离上下文误将子域名作为 Node ID 导致 `Target agent offline` 的问题。
 
 ---
 
@@ -745,7 +745,7 @@ webrtc-gateway/
 │   │   ├── protocol/               # TypeScript 版 P2PMux 二进制编解码实现
 │   │   └── index.html              # 现代化极简前端模板
 │   ├── dist/                       # 前端编译生成目录 (自动嵌入 Go 服务端)
-│   ├── esbuild.config.mjs          # 极速打包脚本 (毫秒级输出)
+│   ├── esbuild.config.mjs          # 打包脚本
 │   ├── package.json
 │   ├── tsconfig.json
 │   └── wrangler.toml               # Cloudflare 一体化 Worker 部署配置
@@ -773,10 +773,6 @@ webrtc-gateway/
 │   ├── test_subdomain_logic.cjs    # 多级子域名解析算法单测
 │   └── node_id_preservation_test.cjs # 弹窗新窗口 Node ID 保持与 DOM 虚拟化集成测试
 ├── .github/workflows/              # GitHub Actions CI/CD 工作流
-│   ├── ci.yml                      # CI 构建与自动化测试矩阵
-│   ├── release.yml                 # 多架构 GitHub Release 自动化打包发布
-│   ├── docker.yml                  # 多架构 Docker 镜像构建与 GHCR 推送
-│   └── deploy-pages.yml            # 官方文档站 GitHub Pages 自动化部署
 ├── docker-compose.yml              # 一键编排全套服务配置
 ├── Dockerfile.agent                # Agent 极简多阶段构建文件 (~20MB)
 ├── Dockerfile.server               # 一体化服务端多阶段构建文件 (~16MB)
@@ -793,7 +789,7 @@ webrtc-gateway/
 ### 5. 本地源码构建与自动化测试套件
 
 #### ① 编译前端资源
-前端采用纯原生 TypeScript 编写，打包工具选用极速的 `esbuild`，构建仅需几毫秒：
+前端采用纯原生 TypeScript 编写，打包工具选用高效的 `esbuild`：
 ```bash
 cd web
 npm install
@@ -821,7 +817,7 @@ GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/signal_linux_amd64 ./cm
 ```
 
 #### ③ 运行全量单元与集成测试套件
-项目自带严密的纯自动化测试集，无需外部浏览器依赖即可在任意操作系统上极速运行：
+项目自带自动化测试集，无需外部浏览器依赖即可在各操作系统上运行：
 ```bash
 # 1. 运行底层协议、多路复用与端到端穿透全量 Go 测试
 go test -v ./...
@@ -840,7 +836,7 @@ node test/verify_features.cjs
 ```
 
 **测试套件涵盖的核心验证点：**
-- `RealBrowserMatrixTests`：基于真实无头 Chromium (CDP 协议) 自动化运行 22/22 项全量矩阵（12 项复杂 Web 应用场景、页面刷新与会话韧性保持、Top 10 真实高流量网站秒级渲染）；
+- `RealBrowserMatrixTests`：基于真实无头 Chromium (CDP 协议) 自动化运行 22/22 项全量矩阵（12 项复杂 Web 应用场景、页面刷新与会话韧性保持、Top 10 真实高流量网站渲染测试）；
 - `HTTP & WebSocket Feature Verification`：覆盖 GET/POST/PUT/PATCH/DELETE、Query String、Request Body、Cookie 隔离与双向穿透、Authorization 标头、301/302/307 重定向、HTTP 206 Range 断点续传、5MB 流式传输、204/304 Null-Body 规范、WebSocket 20 突发与 128KB 巨型帧分片重组；
 - `TestFrameEncodeDecode`：二进制 10 字节帧头与大端序序列化边界验证；
 - `TestMuxPingPongAndConcurrentStreams`：并发流隔离读写与流控背压；
@@ -852,7 +848,7 @@ node test/verify_features.cjs
   - WebSocket 101 Switching Protocols 双向全双工通道中继；
 - `TestPhase4Large100MBStreamingAndBackpressure`：大文件流式传输与 SHA-256 逐字节完整性校验；
 - `TestAdvancedE2EScenarios`：HTTP 206 Partial Content / Range 分块点播、Gzip 解压缩与自定义标头双向镜像反射；
-- `TestSecretAuthScenarios`：SECRET 预共享密钥鉴权校验、非法访问毫秒级 401 实时断开阻断与信令防冒领保护；
+- `TestSecretAuthScenarios`：SECRET 预共享密钥鉴权校验、非法访问即时 401 断开阻断与信令防冒领保护；
 - `TestTLSServerAuto`：纯内存动态 ECDSA 证书自动签发与局域网物理网卡 SAN 适配；
 - `NodeIdPreservationTests`：DOM 模拟环境下 30/30 项节点识别优先级、弹窗新标签页上下文继承与沙箱虚拟化验证。
 

@@ -82,18 +82,18 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 
 ### ③ 智能受信代理过滤 (`-trusted-proxies`)
 - 默认自动信任标准私网 CIDR（`127.0.0.1/32`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` 等回环与 Docker 网桥）；
-- 当服务端直接裸跑在公网且请求来自非受信 IP 时，强制忽略伪造的 `X-Forwarded-For` 请求头，直接取底层套接字的真实 `RemoteAddr`，彻底封死 IP 伪造漏洞。
+- 当服务端直接裸跑在公网且请求来自非受信 IP 时，强制忽略伪造的 `X-Forwarded-For` 请求头，直接取底层套接字的真实 `RemoteAddr`，防范 IP 伪造风险。
 
 ---
 
 ## 5. 权威真实客户端 IP 穿透与 WAF 协同 (Authoritative Client IP & WAF Integration)
 
-自 **v1.8.0** 起，网关全面支持生产级真实客户端 IP 透传与防伪体系，彻底告别穿透场景下目标后端将所有流量误识别为 `127.0.0.1` 的痛点：
+自 **v1.8.0** 起，网关全面支持生产级真实客户端 IP 透传与防伪体系，支持权威客户端 IP 透传 (X-Forwarded-For)，解决穿透场景下目标后端将所有流量误识别为 `127.0.0.1` 的问题：
 
 ### ① 权威源头注入与防伪 (Anti-Spoofing Anchor)
 - **信令端物理覆盖**：客户端在发起 WebRTC 握手时，信令服务器权威提取物理套接字 IP（或 Cloudflare / 受信反代源 IP），在转发 Offer 时**强行覆盖 `msg.ClientIP = session.RemoteIP`**，恶意客户端在 JSON 信令中自报的任何伪造 IP 被直接抹除；
 - **边缘信令对齐**：Cloudflare Workers 边缘信令通过 Durable Object 同步提取 `cf-connecting-ip` 注入 `msg.client_ip`，双信令形态无缝平替；
-- **Agent 代理层强制覆写**：Agent 在反向代理 HTTP 与 WebSocket 请求时，在解析完客户端请求头之后，执行 `req.Header.Set("X-Forwarded-For", clientIP)` 与 `req.Header.Set("X-Real-IP", clientIP)`，彻底覆盖客户端在 DataChannel 中夹带的伪造头。
+- **Agent 代理层强制覆写**：Agent 在反向代理 HTTP 与 WebSocket 请求时，在解析完客户端请求头之后，执行 `req.Header.Set("X-Forwarded-For", clientIP)` 与 `req.Header.Set("X-Real-IP", clientIP)`，覆盖客户端在 DataChannel 中夹带的伪造头。
 
 ### ② WAF 与安全组件协同
 - **精准单 IP 封禁与黑白名单**：雷池 SafeLine、Nginx WAF、ModSecurity 可直接拦截恶意公网 IP，不会导致 `127.0.0.1` 封禁全员误杀；
@@ -107,11 +107,11 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 
 ## 6. 通用防御加固与收敛治理 (v1.8.1 Universal Security Hardening)
 
-网关自 **v1.8.1** 起，摒弃针对特例修补的坏味道，建立通用防御闭环：
+网关自 **v1.8.1** 起，建立通用防御闭环：
 
-### ① 门户控制台 DOM XSS 彻底根除
+### ① 门户控制台 DOM XSS 防御
 - **正向字符集门禁**：对所有节点 ID（URL Hash、Query、子域名、Storage）实行强制白名单（`/^[a-zA-Z0-9._-]{1,64}$/`），非规范字符直接拒绝并降级兜底；
-- **原生安全 DOM 赋值**：设置弹窗彻底废除模板字符串裸拼，改由标准 DOM API 属性设值（`input.value = ...`）与 HTML 实体转义。
+- **原生安全 DOM 赋值**：设置弹窗废除模板字符串拼接，改由标准 DOM API 属性设值（`input.value = ...`）与 HTML 实体转义。
 
 ### ② 全链路最小特权口令切断 (PoLP)
 - 物理拔除 Service Worker 对代理 HTML 页面的 `window.__P2P_SECRET__` 注入，目标站点内部任何脚本均无法嗅探口令；

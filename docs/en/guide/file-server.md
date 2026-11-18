@@ -2,7 +2,7 @@
 
 Starting with **v1.6.0**, WebRTC Gateway introduces a native **Zero-Listener Port** P2P file distribution and static directory hosting capability.
 
-The core value of this feature is: **maximizing WebRTC's "zero-client" advantage to build a private, zero-relay cross-internet AirDrop / Wormhole**. Senders do not need to install complex cloud-drive software or open public router ports; receivers simply open any modern web browser to achieve full-bandwidth P2P direct downloads.
+The core value of this feature is: **leveraging WebRTC's zero-client architecture for lightweight in-browser direct file distribution**. Senders do not need to install complex cloud-drive software or open public router ports; receivers simply open any modern web browser to achieve direct P2P downloads.
 
 ---
 
@@ -37,7 +37,7 @@ WebRTC Gateway designs an innovative **`streamResponseWriter` in-memory stream a
 
 ## 2. Operating Modes & Usage
 
-### Mode 1: Single-File Instant Sharing (Private AirDrop / Wormhole)
+### Mode 1: Single-File Direct Sharing
 Expose any local file (ranging from MBs to dozens of GBs of ISO images or 4K videos) directly over P2P:
 
 ```bash

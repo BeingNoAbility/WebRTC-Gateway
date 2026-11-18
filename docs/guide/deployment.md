@@ -121,7 +121,7 @@ docker compose down
 
 > [!TIP]
 > **容器健康检查机制 (v1.6.2+)**：
-> 服务端镜像内置了毫秒级原生健康探测器（`CMD /app/server -health`），自动适配 HTTP/HTTPS 及自定义端口，支持自签名证书并即刻反馈健康状态（状态流转为 `healthy`），彻底避免 Alpine Busybox wget 参数兼容陷阱。
+> 服务端镜像内置了原生健康探测器（`CMD /app/server -health`），自动适配 HTTP/HTTPS 及自定义端口，支持自签名证书并即刻反馈健康状态（状态流转为 `healthy`），避免 Alpine Busybox wget 参数兼容问题。
 
 ### 3. 经典 NAS / 私有服务器纯 Agent 模式编排
 在家庭 NAS、树莓派或内网服务器上，通常**只需运行 Agent 容器**连接公网信令：
@@ -149,7 +149,7 @@ services:
   - 镜像默认已剔除 root 特权，以独立非特权用户 `appuser` (UID: 10001, GID: 10001) 运行；
   - 严格遵循 CIS Docker Benchmark 与 Kubernetes Restricted Pod Security Standard，杜绝潜在的容器逃逸与提权风险。
 - **全格式支持 `--user` 任意指定身份 (NAS / 宿主机权限对齐)**：
-  - 在群晖 Synology、威联通 QNAP、Unraid 或 Linux 服务器上挂载本地目录/文件时，可直接传入 `--user $(id -u):$(id -g)`、`--user 1000:1000` 或 `--user nobody`，彻底杜绝权限不足或文件属主冲突：
+  - 在群晖 Synology、威联通 QNAP、Unraid 或 Linux 服务器上挂载本地目录/文件时，可直接传入 `--user $(id -u):$(id -g)`、`--user 1000:1000` 或 `--user nobody`，杜绝权限不足或文件属主冲突：
   ```bash
   # 以 NAS 宿主机 1000:1000 身份启动 Agent 并只读挂载媒体库
   docker run -d --name webrtc-agent --restart unless-stopped \

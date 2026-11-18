@@ -438,5 +438,5 @@ tc qdisc del dev eth0 root
 | **维度三** | 复杂 NAT 与 4G/Wi-Fi 漫游 | 对称 NAT 降级 TURN，手机切网触发 ICE Restart 视频不卡死 | | ⬜ PENDING |
 | **维度四** | 跨浏览器交互与 DOM 虚拟化 | Chrome/Safari/Firefox 均无报错，ES Module Worker 正常 | | ⬜ PENDING |
 | **维度五** | 10GB 流式传输与背压限流 | 大文件边下边写盘，弱网背压内存 < 50MB，HEAD 旁路解压 | | ⬜ PENDING |
-| **维度六** | 混沌网络损耗与抗压排毒 | 30% 丢包传输无损，高频扫描后 Janitor 彻底清空孤儿键 | | ⬜ PENDING |
-| **维度七** | 边缘休眠唤醒与平滑生命周期 | Cloudflare DO 休眠唤醒鉴权不丢失，Signal 重启秒级重连 | | ⬜ PENDING |
+| **维度六** | 混沌网络损耗与抗压排毒 | 30% 丢包传输无损，高频扫描后 Janitor 定期清空孤儿键 | | ⬜ PENDING |
+| **维度七** | 边缘休眠唤醒与平滑生命周期 | Cloudflare DO 休眠唤醒鉴权不丢失，Signal 重启后自动重连 | | ⬜ PENDING |

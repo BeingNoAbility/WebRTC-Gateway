@@ -59,7 +59,7 @@ Agent 支持三种核心运行模式，三者在业务上严格三选一（互�
 | :--- | :--- | :--- | :--- |
 | `-addr` | `ADDR` / `PORT` | `:8888` | 服务端 HTTP/HTTPS 与 WebSocket 监听端口及地址 |
 | `-config` | `CONFIG_FILE` / `CONFIG` | `""` | 可选的 YAML / JSON 配置文件路径（默认自动探测 `./server.yaml`、`./server.yml`、`./server.json`） |
-| `-signal-secret` | `SIGNAL_SECRET` | `""` | 可选的服务端全局集群准入密钥，仅允许匹配口令的 Agent 注册（-secret 已彻底废弃移除） |
+| `-signal-secret` | `SIGNAL_SECRET` | `""` | 可选的服务端全局集群准入密钥，仅允许匹配口令的 Agent 注册（-secret 已废弃并阻断） |
 | `-tls-cert` | `TLS_CERT` | `""` | 加载的 TLS 证书 PEM 文件路径（如 fullchain.pem，开启原生 HTTPS） |
 | `-tls-key` | `TLS_KEY` | `""` | 加载的 TLS 私钥 PEM 文件路径（如 privkey.pem，开启原生 HTTPS） |
 | `-tls-auto` | `TLS_AUTO` | `false` | 一键内存自动签发包含当前局域网所有真实 IP 的 ECDSA SAN 证书 |
