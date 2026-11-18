@@ -35,20 +35,32 @@ func startMockSignalingServer(t *testing.T) (*httptest.Server, *signalingBroker)
 	return server, broker
 }
 
+type testPeerSession struct {
+	conn    *websocket.Conn
+	writeMu sync.Mutex
+}
+
+func (s *testPeerSession) send(msg *signaling.Message) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.conn.WriteJSON(msg)
+}
+
 type signalingBroker struct {
 	mu      sync.RWMutex
-	agents  map[string]*websocket.Conn
-	clients map[string]*websocket.Conn
+	agents  map[string]*testPeerSession
+	clients map[string]*testPeerSession
 }
 
 func newBroker() *signalingBroker {
 	return &signalingBroker{
-		agents:  make(map[string]*websocket.Conn),
-		clients: make(map[string]*websocket.Conn),
+		agents:  make(map[string]*testPeerSession),
+		clients: make(map[string]*testPeerSession),
 	}
 }
 
 func (b *signalingBroker) handleConn(conn *websocket.Conn) {
+	session := &testPeerSession{conn: conn}
 	var role, nodeID, sessionID string
 	defer func() {
 		conn.Close()
@@ -72,16 +84,16 @@ func (b *signalingBroker) handleConn(conn *websocket.Conn) {
 			role = "agent"
 			nodeID = msg.NodeID
 			b.mu.Lock()
-			b.agents[nodeID] = conn
+			b.agents[nodeID] = session
 			b.mu.Unlock()
-			_ = conn.WriteJSON(&signaling.Message{Type: signaling.TypeRegistered, NodeID: nodeID})
+			_ = session.send(&signaling.Message{Type: signaling.TypeRegistered, NodeID: nodeID})
 
 		case signaling.TypeJoin:
 			role = "client"
 			nodeID = msg.NodeID
 			sessionID = "client-session-1"
 			b.mu.Lock()
-			b.clients[sessionID] = conn
+			b.clients[sessionID] = session
 			_, hasAgent := b.agents[nodeID]
 			b.mu.Unlock()
 
@@ -89,7 +101,7 @@ func (b *signalingBroker) handleConn(conn *websocket.Conn) {
 			if hasAgent {
 				status = "online"
 			}
-			_ = conn.WriteJSON(&signaling.Message{
+			_ = session.send(&signaling.Message{
 				Type:      signaling.TypePeerStatus,
 				NodeID:    nodeID,
 				SessionID: sessionID,
@@ -99,30 +111,30 @@ func (b *signalingBroker) handleConn(conn *websocket.Conn) {
 		case signaling.TypeOffer:
 			msg.SessionID = sessionID
 			b.mu.RLock()
-			agentConn := b.agents[msg.NodeID]
+			agentSess := b.agents[msg.NodeID]
 			b.mu.RUnlock()
-			if agentConn != nil {
-				_ = agentConn.WriteJSON(&msg)
+			if agentSess != nil {
+				_ = agentSess.send(&msg)
 			}
 
 		case signaling.TypeAnswer:
 			b.mu.RLock()
-			clientConn := b.clients[msg.SessionID]
+			clientSess := b.clients[msg.SessionID]
 			b.mu.RUnlock()
-			if clientConn != nil {
-				_ = clientConn.WriteJSON(&msg)
+			if clientSess != nil {
+				_ = clientSess.send(&msg)
 			}
 
 		case signaling.TypeCandidate:
 			b.mu.RLock()
 			if role == "agent" {
-				if clientConn := b.clients[msg.SessionID]; clientConn != nil {
-					_ = clientConn.WriteJSON(&msg)
+				if clientSess := b.clients[msg.SessionID]; clientSess != nil {
+					_ = clientSess.send(&msg)
 				}
 			} else {
 				msg.SessionID = sessionID
-				if agentConn := b.agents[msg.NodeID]; agentConn != nil {
-					_ = agentConn.WriteJSON(&msg)
+				if agentSess := b.agents[msg.NodeID]; agentSess != nil {
+					_ = agentSess.send(&msg)
 				}
 			}
 			b.mu.RUnlock()

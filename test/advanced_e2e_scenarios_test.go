@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -595,13 +596,13 @@ func TestE2E_StreamCancellation_Midway(t *testing.T) {
 
 // 7. E2E DataChannel & Session Reconnection Resilience
 func TestE2E_DataChannel_ReconnectionResilience(t *testing.T) {
-	requestCount := 0
+	var requestCount atomic.Int32
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		requestCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status": "ok",
-			"count":  requestCount,
+			"count":  requestCount.Load(),
 		})
 	})
 
@@ -745,7 +746,7 @@ func TestE2E_DataChannel_ReconnectionResilience(t *testing.T) {
 	}
 	t.Log("Session 2 reconnected and completed request successfully!")
 
-	if requestCount != 2 {
-		t.Errorf("Expected 2 completed requests across 2 sessions, got %d", requestCount)
+	if requestCount.Load() != 2 {
+		t.Errorf("Expected 2 completed requests across 2 sessions, got %d", requestCount.Load())
 	}
 }

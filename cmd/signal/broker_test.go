@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -403,8 +404,8 @@ trusted_proxies: "10.0.0.0/8"
 
 func TestSignalBroker_WebSocketKeepalivePingPong(t *testing.T) {
 	// 1. Temporarily configure short keepalive intervals for fast testing
-	origPing := defaultPingPeriod
-	origRead := defaultReadTimeout
+	origPing := getPingPeriod()
+	origRead := getReadTimeout()
 	defer func() {
 		SetKeepaliveIntervalsForTest(origPing, origRead)
 	}()
@@ -433,7 +434,7 @@ func TestSignalBroker_WebSocketKeepalivePingPong(t *testing.T) {
 		}()
 
 		conn.SetPongHandler(func(string) error {
-			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+			_ = conn.SetReadDeadline(time.Now().Add(getReadTimeout()))
 			return nil
 		})
 
@@ -445,12 +446,12 @@ func TestSignalBroker_WebSocketKeepalivePingPong(t *testing.T) {
 			}
 			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
-			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+			_ = conn.SetReadDeadline(time.Now().Add(getReadTimeout()))
 			return err
 		})
 
 		go func() {
-			ticker := time.NewTicker(defaultPingPeriod)
+			ticker := time.NewTicker(getPingPeriod())
 			defer ticker.Stop()
 			for {
 				select {
@@ -465,7 +466,7 @@ func TestSignalBroker_WebSocketKeepalivePingPong(t *testing.T) {
 		}()
 
 		for {
-			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+			_ = conn.SetReadDeadline(time.Now().Add(getReadTimeout()))
 			var msg signaling.Message
 			if err := conn.ReadJSON(&msg); err != nil {
 				break
@@ -484,24 +485,25 @@ func TestSignalBroker_WebSocketKeepalivePingPong(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial error: %v", err)
 	}
-	defer ws.Close()
 
 	// Register
 	regMsg := signaling.Message{Type: signaling.TypeRegister, NodeID: "keepalive-node"}
 	if err := ws.WriteJSON(regMsg); err != nil {
+		ws.Close()
 		t.Fatalf("WriteJSON error: %v", err)
 	}
 
 	// Verify agent registered
 	time.Sleep(20 * time.Millisecond)
 	if broker.GetAgent("keepalive-node") == nil {
+		ws.Close()
 		t.Fatalf("Agent should be registered")
 	}
 
 	// Client receives Pings and sends Pongs back
-	pingsReceived := 0
+	var pingsReceived atomic.Int32
 	ws.SetPingHandler(func(appData string) error {
-		pingsReceived++
+		pingsReceived.Add(1)
 		return ws.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
 	})
 
@@ -523,9 +525,12 @@ func TestSignalBroker_WebSocketKeepalivePingPong(t *testing.T) {
 	if broker.GetAgent("keepalive-node") == nil {
 		t.Errorf("Agent was prematurely disconnected; keepalive ping/pong failed to maintain read deadline!")
 	}
-	if pingsReceived < 3 {
-		t.Errorf("Expected at least 3 pings received in 350ms with 40ms interval, got %d", pingsReceived)
+	if pingsReceived.Load() < 3 {
+		t.Errorf("Expected at least 3 pings received in 350ms with 40ms interval, got %d", pingsReceived.Load())
 	}
+
+	_ = ws.Close()
+	<-readDone
 }
 
 func TestSignalServer_HealthCheckEndpoints(t *testing.T) {

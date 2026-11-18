@@ -20,18 +20,19 @@ import (
 
 type ipAwareBroker struct {
 	mu      sync.RWMutex
-	agents  map[string]*websocket.Conn
-	clients map[string]*websocket.Conn
+	agents  map[string]*testPeerSession
+	clients map[string]*testPeerSession
 }
 
 func newIPAwareBroker() *ipAwareBroker {
 	return &ipAwareBroker{
-		agents:  make(map[string]*websocket.Conn),
-		clients: make(map[string]*websocket.Conn),
+		agents:  make(map[string]*testPeerSession),
+		clients: make(map[string]*testPeerSession),
 	}
 }
 
 func (b *ipAwareBroker) handleConn(conn *websocket.Conn, remoteIP string) {
+	session := &testPeerSession{conn: conn}
 	var role, nodeID, sessionID string
 	defer func() {
 		_ = conn.Close()
@@ -55,9 +56,9 @@ func (b *ipAwareBroker) handleConn(conn *websocket.Conn, remoteIP string) {
 			role = "agent"
 			nodeID = msg.NodeID
 			b.mu.Lock()
-			b.agents[nodeID] = conn
+			b.agents[nodeID] = session
 			b.mu.Unlock()
-			_ = conn.WriteJSON(&signaling.Message{
+			_ = session.send(&signaling.Message{
 				Type:   signaling.TypeRegistered,
 				NodeID: nodeID,
 			})
@@ -66,9 +67,9 @@ func (b *ipAwareBroker) handleConn(conn *websocket.Conn, remoteIP string) {
 			role = "client"
 			sessionID = "client-sess-" + remoteIP
 			b.mu.Lock()
-			b.clients[sessionID] = conn
+			b.clients[sessionID] = session
 			b.mu.Unlock()
-			_ = conn.WriteJSON(&signaling.Message{
+			_ = session.send(&signaling.Message{
 				Type:      signaling.TypePeerStatus,
 				NodeID:    msg.NodeID,
 				SessionID: sessionID,
@@ -81,30 +82,30 @@ func (b *ipAwareBroker) handleConn(conn *websocket.Conn, remoteIP string) {
 			msg.ClientIP = remoteIP
 
 			b.mu.RLock()
-			agentConn := b.agents[msg.NodeID]
+			agentSess := b.agents[msg.NodeID]
 			b.mu.RUnlock()
-			if agentConn != nil {
-				_ = agentConn.WriteJSON(&msg)
+			if agentSess != nil {
+				_ = agentSess.send(&msg)
 			}
 
 		case signaling.TypeAnswer:
 			b.mu.RLock()
-			clientConn := b.clients[msg.SessionID]
+			clientSess := b.clients[msg.SessionID]
 			b.mu.RUnlock()
-			if clientConn != nil {
-				_ = clientConn.WriteJSON(&msg)
+			if clientSess != nil {
+				_ = clientSess.send(&msg)
 			}
 
 		case signaling.TypeCandidate:
 			b.mu.RLock()
 			if role == "agent" {
-				if clientConn := b.clients[msg.SessionID]; clientConn != nil {
-					_ = clientConn.WriteJSON(&msg)
+				if clientSess := b.clients[msg.SessionID]; clientSess != nil {
+					_ = clientSess.send(&msg)
 				}
 			} else {
 				msg.SessionID = sessionID
-				if agentConn := b.agents[msg.NodeID]; agentConn != nil {
-					_ = agentConn.WriteJSON(&msg)
+				if agentSess := b.agents[msg.NodeID]; agentSess != nil {
+					_ = agentSess.send(&msg)
 				}
 			}
 			b.mu.RUnlock()
@@ -199,10 +200,17 @@ func TestClientIP_EndToEnd_PropagationAndAntiSpoofing(t *testing.T) {
 		t.Fatalf("CreateDataChannel failed: %v", err)
 	}
 
+	var clientWSMu sync.Mutex
+	safeWriteClientWS := func(m *signaling.Message) error {
+		clientWSMu.Lock()
+		defer clientWSMu.Unlock()
+		return clientWS.WriteJSON(m)
+	}
+
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
 			init := c.ToJSON()
-			_ = clientWS.WriteJSON(&signaling.Message{
+			_ = safeWriteClientWS(&signaling.Message{
 				Type:      signaling.TypeCandidate,
 				NodeID:    nodeID,
 				SessionID: sessionID,
@@ -218,7 +226,7 @@ func TestClientIP_EndToEnd_PropagationAndAntiSpoofing(t *testing.T) {
 	_ = clientPC.SetLocalDescription(offer)
 
 	// Client sends Offer attempting to spoof ClientIP to 10.0.0.1!
-	if err := clientWS.WriteJSON(&signaling.Message{
+	if err := safeWriteClientWS(&signaling.Message{
 		Type:      signaling.TypeOffer,
 		NodeID:    nodeID,
 		SessionID: sessionID,

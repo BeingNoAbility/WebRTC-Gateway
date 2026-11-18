@@ -42,14 +42,22 @@ var upgrader = websocket.Upgrader{
 }
 
 var (
-	defaultPingPeriod  = 25 * time.Second
-	defaultReadTimeout = 60 * time.Second
+	defaultPingPeriodNs  int64 = int64(25 * time.Second)
+	defaultReadTimeoutNs int64 = int64(60 * time.Second)
 )
+
+func getPingPeriod() time.Duration {
+	return time.Duration(atomic.LoadInt64(&defaultPingPeriodNs))
+}
+
+func getReadTimeout() time.Duration {
+	return time.Duration(atomic.LoadInt64(&defaultReadTimeoutNs))
+}
 
 // SetKeepaliveIntervalsForTest adjusts the ping period and read timeout for tests.
 func SetKeepaliveIntervalsForTest(ping, read time.Duration) {
-	defaultPingPeriod = ping
-	defaultReadTimeout = read
+	atomic.StoreInt64(&defaultPingPeriodNs, int64(ping))
+	atomic.StoreInt64(&defaultReadTimeoutNs, int64(read))
 }
 
 type Session struct {
@@ -1022,7 +1030,7 @@ func main() {
 
 		// Keepalive: synchronized Pong handler to extend ReadDeadline
 		conn.SetPongHandler(func(string) error {
-			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+			_ = conn.SetReadDeadline(time.Now().Add(getReadTimeout()))
 			return nil
 		})
 
@@ -1035,13 +1043,13 @@ func main() {
 			}
 			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
-			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+			_ = conn.SetReadDeadline(time.Now().Add(getReadTimeout()))
 			return err
 		})
 
 		// Server-side Ping Pump: send Ping periodically to keep connection alive and refresh read deadlines
 		go func() {
-			ticker := time.NewTicker(defaultPingPeriod)
+			ticker := time.NewTicker(getPingPeriod())
 			defer ticker.Stop()
 			for {
 				select {
@@ -1056,7 +1064,7 @@ func main() {
 		}()
 
 		for {
-			_ = conn.SetReadDeadline(time.Now().Add(defaultReadTimeout))
+			_ = conn.SetReadDeadline(time.Now().Add(getReadTimeout()))
 			var msg signaling.Message
 			if err := conn.ReadJSON(&msg); err != nil {
 				break
