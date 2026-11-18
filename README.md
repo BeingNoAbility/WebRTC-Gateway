@@ -676,7 +676,7 @@ docker run -d --name webrtc-agent --restart unless-stopped \
   - `0x00 (FlagNone)`：常规数据帧。
   - `0x01 (FlagFin)`：标记该流的数据发送完毕（半关闭/完全关闭信号）。
   - `0x02 (FlagAck)`：控制帧确认应答。
-- **Payload Length (uint32, 4 字节)**：载荷字节长度（大端序）。单帧最大载荷上限为 **64KB (MaxPayloadSize = 65536 字节)**，推荐分块流式传输尺寸为 **32KB (RecommendedChunkSize = 32768 字节)**，以完美适配 WebRTC 底层 SCTP MTU，杜绝超大分包导致底层缓冲区溢出与丢包。
+- **Payload Length (uint32, 4 字节)**：载荷字节长度（大端序）。单帧最大载荷上限为 **64KB (MaxPayloadSize = 65536 字节)**，推荐分块流式传输尺寸为 **32KB (RecommendedChunkSize = 32758 字节)**，配合 10 字节帧头完美契合 32KB 内存分块与 WebRTC 底层 SCTP MTU，杜绝内存跨阶扩张与超大分包丢包。
 
 ---
 

@@ -93,8 +93,9 @@ func NewHTTPProxy(targetURLString string, cm *SessionCookieManager) (*HTTPProxy,
 	createTransport := func(insecure bool) *http.Transport {
 		return &http.Transport{
 			Proxy:               nil, // Cut ambient environment proxy leakage
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 20,
+			ForceAttemptHTTP2:   true,
+			MaxIdleConns:        512,
+			MaxIdleConnsPerHost: 128,
 			IdleConnTimeout:     90 * time.Second,
 			DisableCompression:  true, // Decompression handled explicitly
 			TLSClientConfig:     &tls.Config{InsecureSkipVerify: insecure},
@@ -313,15 +314,13 @@ func (p *HTTPProxy) rewriteLocation(loc string, targetHost string) string {
 
 // HandleStream proxies an incoming P2PMux stream to the local target web application.
 func (p *HTTPProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream) {
-	defer stream.Close()
-
-	// 1. Read request headers
 	ctx, cancel := context.WithTimeout(stream.Context(), 10*time.Second)
 	headersPayload, err := stream.ReadHeaders(ctx)
 	cancel()
 
 	if err != nil {
 		log.Printf("[Proxy] Stream %d failed to read headers: %v", stream.ID(), err)
+		_ = stream.Close()
 		return
 	}
 
@@ -329,6 +328,19 @@ func (p *HTTPProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream)
 	if err := json.Unmarshal(headersPayload, &reqMeta); err != nil {
 		log.Printf("[Proxy] Stream %d failed to parse request headers: %v", stream.ID(), err)
 		p.sendErrorResponse(stream, http.StatusBadRequest, "Invalid request metadata")
+		_ = stream.Close()
+		return
+	}
+
+	p.HandleStreamWithMeta(sessionID, clientIP, stream, &reqMeta)
+}
+
+// HandleStreamWithMeta proxies an incoming P2PMux stream directly using pre-parsed request metadata.
+func (p *HTTPProxy) HandleStreamWithMeta(sessionID, clientIP string, stream *mux.Stream, reqMeta *RequestMetadata) {
+	defer stream.Close()
+
+	if reqMeta == nil {
+		p.sendErrorResponse(stream, http.StatusBadRequest, "Missing request metadata")
 		return
 	}
 

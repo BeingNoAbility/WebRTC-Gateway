@@ -425,7 +425,7 @@ To multiplex hundreds of concurrent HTTP requests, WebSocket tunnels, and large 
   - `0x00 (FlagNone)`: Standard data frame.
   - `0x01 (FlagFin)`: Indicates end of data stream (half-close / full-close signal).
   - `0x02 (FlagAck)`: Control frame acknowledgement.
-- **Payload Length (uint32, 4 bytes)**: Big-endian payload byte length. Maximum payload is capped at **64KB (MaxPayloadSize = 65536 bytes)**, with a recommended chunk size of **32KB (RecommendedChunkSize = 32768 bytes)** for optimal SCTP transmission safety and low buffer bloat.
+- **Payload Length (uint32, 4 bytes)**: Big-endian payload byte length. Maximum payload is capped at **64KB (MaxPayloadSize = 65536 bytes)**, with a recommended chunk size of **32KB (RecommendedChunkSize = 32758 bytes)**, perfectly aligning with 10-byte header to fit within 32KB memory allocator classes and SCTP transmission safety.
 
 ---
 

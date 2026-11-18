@@ -101,7 +101,11 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 
 		if len(s.inbound) > 0 {
 			s.readBuf = s.inbound[0]
+			s.inbound[0] = nil // Zero out consumed pointer to allow immediate GC
 			s.inbound = s.inbound[1:]
+			if len(s.inbound) == 0 {
+				s.inbound = s.inbound[:0]
+			}
 			n = copy(p, s.readBuf)
 			s.readBuf = s.readBuf[n:]
 			s.inboundBytes -= n

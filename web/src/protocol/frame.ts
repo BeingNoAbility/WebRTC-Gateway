@@ -1,5 +1,5 @@
 export const HeaderSize = 10;
-export const RecommendedChunkSize = 32 * 1024;
+export const RecommendedChunkSize = 32 * 1024 - HeaderSize;
 export const MaxPayloadSize = 64 * 1024;
 
 export const FrameType = {

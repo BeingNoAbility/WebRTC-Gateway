@@ -305,12 +305,19 @@ func (m *Mux) getStream(id uint32) *Stream {
 	return m.streams[id]
 }
 
+const maxPooledFrameSize = protocol.HeaderSize + protocol.RecommendedChunkSize
+
+var frameEncodePool = sync.Pool{
+	New: func() any {
+		b := make([]byte, maxPooledFrameSize)
+		return &b
+	},
+}
+
 // writeFrame writes an encoded frame to the underlying transport with backpressure flow control.
 // High-priority control frames (PING, PONG, RST, HEADERS, stream 0) bypass data buffer backpressure,
 // preventing Head-of-Line (HoL) blocking when large data streams saturate the buffer.
 func (m *Mux) writeFrame(f *protocol.Frame) error {
-	encoded := f.Encode()
-
 	isHighPriority := f.StreamID == 0 ||
 		f.Type == protocol.TypePing ||
 		f.Type == protocol.TypePong ||
@@ -367,6 +374,22 @@ func (m *Mux) writeFrame(f *protocol.Frame) error {
 	m.mu.RUnlock()
 	if closed {
 		return ErrMuxClosed
+	}
+
+	totalLen := protocol.HeaderSize + len(f.Payload)
+	var encoded []byte
+	var pooledBuf *[]byte
+	if totalLen <= maxPooledFrameSize {
+		pooledBuf = frameEncodePool.Get().(*[]byte)
+		defer frameEncodePool.Put(pooledBuf)
+		buf := *pooledBuf
+		_ = f.EncodeHeader(buf[:protocol.HeaderSize])
+		if len(f.Payload) > 0 {
+			copy(buf[protocol.HeaderSize:totalLen], f.Payload)
+		}
+		encoded = buf[:totalLen]
+	} else {
+		encoded = f.Encode()
 	}
 
 	return m.transport.Send(encoded)

@@ -16,7 +16,8 @@ const (
 	MaxPayloadSize = 64 * 1024
 
 	// RecommendedChunkSize is the default chunk size used for streaming data.
-	RecommendedChunkSize = 32 * 1024
+	// 32758 payload + 10 HeaderSize = 32768 (32KB), aligning perfectly with Go's 32KB allocation class.
+	RecommendedChunkSize = 32*1024 - HeaderSize
 )
 
 // Frame types

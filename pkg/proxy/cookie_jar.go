@@ -172,6 +172,10 @@ func (m *SessionCookieManager) InjectCookies(sessionID string, req *http.Request
 
 // SaveCookies parses Set-Cookie headers from the response and stores them in the session jar.
 func (m *SessionCookieManager) SaveCookies(sessionID string, targetURL *url.URL, respHeaders http.Header) {
+	if len(respHeaders["Set-Cookie"]) == 0 {
+		return
+	}
+
 	jar := m.GetJar(sessionID)
 	if jar == nil || targetURL == nil {
 		return
