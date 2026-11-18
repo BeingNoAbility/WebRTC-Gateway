@@ -32,6 +32,9 @@
   - [ ] **2.4 拓扑漂移与瞬态恢复**：已验证网络切换（ICE Restart）自愈，Serverless 唤醒具备完整上下文幂等恢复
   - [ ] **2.5 跨引擎沙箱与协议透明**：兼容 iOS WebKit/Safari 配额，对 SSE、206 Range、WebSocket 保持透明
 
+- [ ] **文档与配置同步对齐 (Documentation & Configuration Parity)**
+  - 若本次改动涉及 CLI 参数、环境变量、配置文件、请求头或网络协议调整，已在本次 PR 中同步更新对应文档（`docs/guide/`、双语 `README`）及示例配置文件（`configs/*.example.yaml`）
+
 ---
 
 ## 自动化机器防线预检 (Machine Gate Self-Check)
@@ -42,3 +45,4 @@
 - [ ] `npm --prefix web test` (65 项沙箱与子域名测试) 全部通过
 - [ ] `go test -v ./...` 全量单元与端到端穿透测试全部通过
 - [ ] `npm --prefix docs run docs:build` 双语文档静态 SSR 编译通过（零死链警告）
+- [ ] 文档工程格式自检完成（Markdown 标题零 Emoji、严格遵守中西文空格排版规范）

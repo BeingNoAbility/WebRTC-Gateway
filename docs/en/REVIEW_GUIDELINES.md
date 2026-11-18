@@ -94,6 +94,11 @@ This checklist is applied during **Architecture RFC Reviews** and **Pull Request
   - *Dialectical Reflection*: Does an ambiguous flag (e.g. legacy `-secret`) create a false sense of security for ops teams while leaving the service open?
   - *Pass Criteria*: Deprecated flags must immediately fail-fast at startup with clear remediation instructions.
 
+- [ ] **1.4 Documentation & Configuration Parity Invariant**
+  - *Core Question*: If this change introduces or adjusts CLI flags, environment variables, default thresholds, headers, or error codes:
+  - *Dialectical Reflection*: Has the code been updated while documentation and example configuration files remain stale, causing operational errors in production?
+  - *Pass Criteria*: The PR must synchronously update technical guides (`docs/guide/`), bilingual `README` files, CLI help messages, and template configurations (`configs/*.example.yaml`).
+
 ---
 
 ### Dimension 2: Five Systemic Deep-Water Invariants

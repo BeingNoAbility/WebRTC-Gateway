@@ -9,32 +9,32 @@ WebRTC Gateway 采用分层解耦的云原生边缘架构，由三个核心组�
 
 ## 1. 端到端系统交互时序
 
-```text
-[访客浏览器]                       [公网信令服务]                   [内网 Agent]           [本地 Web 服务]
-     |                                  |                              |                  |
-     | 1. 连接信令 (WebSocket)          |                              |                  |
-     |--------------------------------->|                              |                  |
-     |                                  | <--- 2. 节点注册 (Register) -|                  |
-     |                                  |                              |                  |
-     | 3. 发送 SDP Offer (指定 Node ID) |                              |                  |
-     |--------------------------------->|--- 4. 路由转发 Offer ------->|                  |
-     |                                  |<-- 5. 回复 SDP Answer -------|                  |
-     |<-- 6. 路由转发 Answer -----------|                              |                  |
-     |                                  |                              |                  |
-     |<============== 7. WebRTC ICE NAT 打洞 (STUN 直连) =============>|                  |
-     |                                                                 |                  |
-     |===== 8. 建立点对点端到端加密 DataChannel (SCTP: "p2pmux") =====>|                  |
-     |                                                                 |                  |
-     | [Service Worker 拦截 fetch]                                     |                  |
-     | 9. 封装为 P2PMux Stream Frame (HTTP 请求头与 Body)              |                  |
-     |---------------------------------------------------------------->|                  |
-     |                                                                 | 10. 反向代理请求 |
-     |                                                                 |----------------->|
-     |                                                                 |<-----------------|
-     |                                                                 | 11. 获取响应     |
-     | 12. P2PMux Stream Frame (HTTP 状态码、头、分块数据流)           |                  |
-     |<----------------------------------------------------------------|                  |
-     | 13. ReadableStream 流式注入浏览器页面渲染                       |                  |
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Visitor as 访客浏览器 (Browser)
+    participant Signal as 公网信令服务 (Signal Server)
+    participant Agent as 内网守护进程 (Agent Daemon)
+    participant Target as 本地目标服务 (Local Service)
+
+    Agent->>Signal: 建立常驻长连并注册 (Register Node ID)
+    Visitor->>Signal: 访问控制台并请求连接目标节点
+    Visitor->>Signal: 发送 WebRTC SDP Offer (携带目标 Node ID)
+    Signal->>Agent: 路由转发 SDP Offer
+    Agent->>Signal: 回复 SDP Answer 及 ICE Candidates
+    Signal->>Visitor: 路由转发 SDP Answer
+    Note over Visitor,Agent: 阶段一完成：信令服务器退出后续数据传输链路
+
+    Visitor<<->>Agent: WebRTC STUN/ICE NAT 打洞协商
+    Visitor<<->>Agent: 建立端到端加密 DataChannel (SCTP: "p2pmux")
+    Note over Visitor,Agent: 阶段二完成：P2P 直连通道建立 (DTLS 1.2 / SRTP)
+
+    Note over Visitor: Service Worker 拦截页面 HTTP/WS 请求
+    Visitor->>Agent: 封装为 P2PMux 二进制流帧 (TypeHeaders + TypeData)
+    Agent->>Target: 本地反向代理 HTTP/WS 请求 (注入权威客户端真实 IP)
+    Target-->>Agent: 本地服务响应 (HTTP 状态码、响应头、流式 Body)
+    Agent-->>Visitor: 封装为 P2PMux 响应帧 (分块传输，支持 206 Range)
+    Note over Visitor: Service Worker 以 ReadableStream 注入渲染
 ```
 
 ---

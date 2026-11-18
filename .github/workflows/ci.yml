@@ -35,6 +35,12 @@ jobs:
       - name: Run Web & Routing Tests
         run: npm --prefix web test
 
+      - name: Verify Documentation Engineering Hygiene & Build
+        run: |
+          npm --prefix docs ci
+          npm --prefix docs run docs:lint
+          npm --prefix docs run docs:build
+
       - name: Run Go Unit & Integration Tests
         run: go test -v ./...
 

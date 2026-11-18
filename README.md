@@ -758,8 +758,10 @@ webrtc-gateway/
 │   └── server.example.yaml         # Server 配置文件参考
 ├── docs/                           # VitePress 官方文档站与技术规范
 │   ├── .vitepress/                 # VitePress 配置中心 (导航、侧边栏、搜索、Mermaid)
-│   ├── guide/                      # 核心指南 (架构、部署、参数手册、安全沙箱、FAQ)
-│   ├── BROWSER_COMPATIBILITY.md    # 浏览器兼容性与限制矩阵
+│   ├── guide/                      # 核心指南 (架构、部署、参数手册、安全沙箱、兼容性、FAQ)
+│   ├── STYLE_GUIDE.md              # 文档与文案工程规范 (中英文双语)
+│   ├── REVIEW_GUIDELINES.md        # 辩证审查原则与核对清单 (系统级深水区不变量)
+│   ├── TESTING_CHECKLIST.md        # 全息实战与真实环境集成测试清单 (7 大维度)
 │   ├── RELEASE_CHECKLIST.md        # 正式发版全流程质量审计门禁清单
 │   ├── RELEASE_NOTES.md            # 当前最新单版本发布说明 (供 GitHub Release 抓取)
 │   └── package.json                # 文档独立依赖与构建脚本

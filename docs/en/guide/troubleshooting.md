@@ -60,18 +60,18 @@
 
 ## 2. Frequently Asked Questions (FAQ)
 
-### Q: Can this gateway saturate gigabit internet connections?
-**A:** Yes! Once direct punching succeeds (HUD displays `⚡ P2P Direct`), UDP traffic flows directly between peers via WebRTC. Transfer speeds are limited only by the sender's upstream and receiver's downstream physical bandwidth, with zero relay bottleneck.
+### Q: What is the network throughput in direct P2P mode?
+**A:** Once WebRTC punching establishes a direct P2P connection, data flows peer-to-peer over user-space UDP (DTLS/SRTP), bypassing all public cloud relay bandwidth bottlenecks. Actual throughput is bounded by physical link bandwidth, round-trip time (RTT), SCTP congestion control mechanics, and single-core DTLS crypto compute limits. In gigabit LAN and high-speed broadband environments, it fully utilizes available physical uplink.
 
 ### Q: Does my intranet application need code modifications?
-**A:** None at all! The browser intercept layer uses a Service Worker to capture HTTP/WebSocket requests transparently. The Agent unpacks binary streams and reverse-proxies them locally as standard requests. Your backend service observes standard HTTP requests as if they originated locally from `127.0.0.1`.
+**A:** None at all! The browser intercept layer uses a Service Worker to capture HTTP/WebSocket requests transparently. The Agent unpacks binary multiplexed streams and reverse-proxies them locally as standard requests. Additionally, the Agent authoritatively injects the visitor's public client IP into standard `X-Forwarded-For` and `X-Real-IP` headers, allowing backend services and enterprise WAFs to perform accurate per-IP rate limiting and auditing out of the box.
 
-### Q: Can I share large files (e.g. 20GB disk images) without cloud drives?
-**A:** Absolutely. A single command suffices:
+### Q: Can I share large files directly without hosting a cloud drive?
+**A:** Yes. Using the Agent's built-in single file mode (`-file`), any large file (e.g. 20GB ISO or archive) can be served directly without third-party web servers:
 ```bash
 ./agent -file ./large-game.zip -access-secret pass123 -sign-link 24h
 ```
-Share the generated URL with your recipient; their browser downloads the file directly over P2P at full wire speed.
+The generated time-limited signed link allows recipient browsers to download directly over P2P streaming with HTTP 206 Range resumption, consuming zero relay bandwidth and expiring automatically.
 
 ### Q: Why do some intranet dashboards fail to load inside iframe tabs?
 **A:** Many administration consoles include `Anti-Frame-Busting` scripts. The gateway's `patch.js` virtualizes `window.top` and `window.parent` references. For stubborn applications, open the dashboard in a new browser tab; the Service Worker preserves node routing via `?peer=${nodeId}#${nodeId}`.

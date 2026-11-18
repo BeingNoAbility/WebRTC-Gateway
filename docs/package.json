@@ -1,12 +1,13 @@
 {
   "name": "webrtc-gateway-docs",
-  "version": "2.0.7",
+  "version": "2.0.8",
   "private": true,
   "description": "Official documentation site for Zero-Client WebRTC P2P Gateway",
   "scripts": {
     "docs:dev": "vitepress dev",
     "docs:build": "vitepress build",
-    "docs:preview": "vitepress preview"
+    "docs:preview": "vitepress preview",
+    "docs:lint": "node ./scripts/lint-docs.cjs"
   },
   "devDependencies": {
     "vitepress": "^1.6.3",

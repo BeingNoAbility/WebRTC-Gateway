@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v2.0.8] - 2026-11-18
+
+### Fixed & Protocol Robustness
+- **Service Worker Subresource HTML Detection Guard & Safe JSON Streaming**:
+  - Restricted `isHtml` classification in `web/src/sw/sw.ts` strictly to navigation document requests (`request.mode === 'navigate' || request.destination === 'document' || request.destination === 'iframe'`).
+  - Removed blind byte-0 prepending of `patchBytes` in `injectScriptIntoHtmlStream` when HTML structural tags (`<head>`, `<html>`, `<!doctype>`) are absent, returning raw response payloads completely untouched.
+  - Resolves Synology Tailscale and legacy CGI/API failures where subresource JSON payloads with `Content-Type: text/html` were corrupted with injected `<meta>` tags causing `SyntaxError: Unexpected token '<', "<meta name"... is not valid JSON`.
+  - Added 14 automated verification assertions in `test/node_id_preservation_test.cjs`.
+
+### Docs & Engineering Standards
+- **Official Documentation Style Guide & Automated Hygiene Linter**:
+  - Published official bilingual *Documentation & Copywriting Engineering Style Guide* (`docs/STYLE_GUIDE.md` & `docs/en/STYLE_GUIDE.md`) establishing core tenets: Neutral Restraint, Conciseness & BLUF (Bottom Line Up Front), Technical Demystification, Header Emoji Hygiene, Typographic Precision ("Pangu Spacing"), and the Single-Version Release Notes Invariant.
+  - Implemented automated documentation hygiene linter (`docs/scripts/lint-docs.cjs` via `npm --prefix docs run docs:lint`) integrated into the GitHub Actions CI pipeline.
+  - Systematically audited and refactored full-repo technical documentation, TOC permalink anchors, and de-hyped technical vocabulary across 30+ Markdown files.
+
 ## [v2.0.7] - 2026-11-18
 
 ### Fixed & Resilience
@@ -344,7 +359,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Validated P2PMux 32KB chunk scheduling under concurrent 10MB file streaming (46.21 MB/s) and 50 burst REST API calls (Min 0.58ms, P50 4.14ms, P95 7.11ms).
 - **ICE Restart Mobile Roaming Resilience Test (`test/ice_restart_resilience_test.go`)**:
   - Automated in-place `iceRestart: true` simulation with full session preservation and CookieJar retention.
-- **Browser Compatibility Matrix (`docs/BROWSER_COMPATIBILITY.md`)**:
+- **Browser Compatibility Matrix (`docs/guide/browser-compatibility.md`)**:
   - Documented Tier 1 and Tier 2 browser support and WebKit/iOS Safari hibernation re-attachment.
 
 ### Fixed

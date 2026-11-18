@@ -482,8 +482,10 @@ webrtc-gateway/
 │   └── server.example.yaml         # Server configuration reference
 ├── docs/                           # VitePress documentation site & specifications
 │   ├── .vitepress/                 # VitePress config (nav, sidebar, search, Mermaid)
-│   ├── guide/                      # Guides (architecture, deployment, configs, security, FAQ)
-│   ├── BROWSER_COMPATIBILITY.md    # Browser compatibility & limitation matrix
+│   ├── guide/                      # Guides (architecture, deployment, configs, security, compatibility, FAQ)
+│   ├── STYLE_GUIDE.md              # Documentation & copywriting engineering style guide
+│   ├── REVIEW_GUIDELINES.md        # Dialectical review guidelines (systemic invariants & case studies)
+│   ├── TESTING_CHECKLIST.md        # Real-world & browser integration testing checklist (7 dimensions)
 │   ├── RELEASE_CHECKLIST.md        # Release quality gate audit protocol
 │   ├── RELEASE_NOTES.md            # Latest single-version release notes (GitHub Release)
 │   └── package.json                # Isolated docs dependencies & build scripts
