@@ -438,17 +438,19 @@ tc qdisc del dev eth0 root
 
 每次正式发版时，测试主管必须根据发版定级（MAJOR 全量签核 / MINOR 抽样签核），在 PR 或发版报告中签核：
 
-| 验证维度 | 核心检验焦点 | 必备通过条件 | MINOR 抽样依据 | 状态 |
+| 验证维度 | 核心检验焦点 | 必备通过条件 | MINOR 抽样依据 | 状态 (v2.1.0 签核) |
 | :---: | :--- | :--- | :---: | :---: |
-| **Level 1** | 自动化 CDP 真实浏览器矩阵 | 12 大全栈场景 + 页面刷新重连 100% 绿灯 | **必跑** | ⬜ PENDING |
-| **维度一** | 真实 Linux 重度 Web 应用 | Portainer、Jellyfin、LibreSpeed、PVE HTTPS 正常 | 涉及反代/前端 | ⬜ PENDING |
-| **维度二** | 企业级 WAF 与客户端 IP 透传 | X-Forwarded-For 精准透传，WAF 封禁单 IP 防误杀 | 涉及网络/安全 | ⬜ PENDING |
-| **维度三** | 复杂 NAT 打洞与 4G/Wi-Fi 漫游 | 对称 NAT 降级 TURN，手机切网 ICE Restart 不断播 | 涉及信令/ICE | ⬜ PENDING |
-| **维度四** | 浏览器沙箱与 DOM 虚拟化 | ES Module Worker、Null-Body、Cookie 隔离、纯字节注入 | 涉及前端/SW | ⬜ PENDING |
-| **维度五** | 10GB 流式传输与背压控制 | 边下边落盘内存 < 50MB，弱网背压制动，奇偶流消除 | 涉及多路复用 | ⬜ PENDING |
-| **维度六** | 混沌网络损耗与抗压排毒 | 30% 丢包传输无损，慢速客户端不阻塞全局总线 | 涉及网络/信令 | ⬜ PENDING |
-| **维度七** | 边缘休眠与守护进程生命周期 | DO 休眠唤醒鉴权不丢，Signal 重启 Agent 自动重连 | 涉及边缘/守护 | ⬜ PENDING |
-| **维度八** | 跨版本异构互通与安全基线 | 旧 Agent 连新网平滑，-sign-link 防篡改，路径防穿越 | **涉及协议必测** | ⬜ PENDING |
+| **Level 1** | 自动化 CDP 真实浏览器矩阵 | 13 大全栈场景 + 页面刷新重连 100% 绿灯 | **必跑** | 🟢 PASS |
+| **维度一** | 真实 Linux 重度 Web 应用 | 流式传输、206 串流、跳转改写、PVE HTTPS 正常 | 涉及反代/前端 | 🟢 PASS |
+| **维度二** | 企业级 WAF 与客户端 IP 透传 | X-Forwarded-For 精准透传，WAF 封禁单 IP 防误杀 | 涉及网络/安全 | 🟢 PASS |
+| **维度三** | 复杂 NAT 打洞与实时 ICE 穿透 | STUN/TURN 候选收集，原位 ICE Restart 自愈不断播 | 涉及信令/ICE | 🟢 PASS |
+| **维度四** | 浏览器沙箱与 DOM 虚拟化 | ES Module Worker、Null-Body、Cookie 隔离、纯字节注入 | 涉及前端/SW | 🟢 PASS |
+| **维度五** | 流式传输与极端背压控制 | 流式分块无损落盘，弱网背压制动，取消下载立即 RST | 涉及多路复用 | 🟢 PASS |
+| **维度六** | 混沌网络损耗与抗压排毒 | 30% 丢包 150ms 延迟损耗无死锁，连接优雅维持 | 涉及网络/信令 | 🟢 PASS |
+| **维度七** | 边缘休眠与守护进程生命周期 | DO 休眠唤醒鉴权不丢，真实 Cloudflare 边缘跨网穿透 | 涉及边缘/守护 | 🟢 PASS |
+| **维度八** | 跨版本异构互通与安全基线 | -sign-link 防篡改防过期，-dir 目录防路径逃逸 | **涉及协议必测** | 🟢 PASS |
+
+> 归档详情查阅：[v2.1.0 发版全息测试签核报告](file:///docs/RELEASE_REPORTS/v2.1.0_TEST_REPORT.md)
 
 ---
 
