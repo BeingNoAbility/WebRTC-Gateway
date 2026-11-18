@@ -453,30 +453,42 @@ async function handleTunneledRequest(request: Request, initialSession: PortalSes
         respHeaders.set('access-control-allow-credentials', 'true');
 
         // Create ReadableStream for response body
+        let isStreamClosed = false;
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
             port.onmessage = (event: MessageEvent) => {
               const dataMsg = event.data;
               switch (dataMsg.type) {
                 case 'RESP_CHUNK':
-                  if (dataMsg.chunk) {
-                    controller.enqueue(new Uint8Array(dataMsg.chunk));
+                  if (dataMsg.chunk && !isStreamClosed) {
+                    try {
+                      controller.enqueue(new Uint8Array(dataMsg.chunk));
+                    } catch {
+                      isStreamClosed = true;
+                    }
                   }
                   break;
                 case 'RESP_END':
-                  try {
-                    controller.close();
-                  } catch {}
+                  if (!isStreamClosed) {
+                    isStreamClosed = true;
+                    try {
+                      controller.close();
+                    } catch {}
+                  }
                   break;
                 case 'RESP_ERROR':
-                  try {
-                    controller.error(new Error(dataMsg.error || 'Response stream error'));
-                  } catch {}
+                  if (!isStreamClosed) {
+                    isStreamClosed = true;
+                    try {
+                      controller.error(new Error(dataMsg.error || 'Response stream error'));
+                    } catch {}
+                  }
                   break;
               }
             };
           },
           cancel() {
+            isStreamClosed = true;
             port.postMessage({ type: 'RESP_CANCEL' });
           },
         });
