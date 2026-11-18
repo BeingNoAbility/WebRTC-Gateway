@@ -19,6 +19,41 @@ flowchart TD
 
 ---
 
+## Versioning Policy & Release Cadence
+
+The project strictly adheres to [Semantic Versioning 2.0.0 (SemVer)](https://semver.org/), formatting all version tags as `vMAJOR.MINOR.PATCH` (e.g. `v2.0.8`).
+
+### 1. Version Increment Matrix
+
+| Release Type | Version Segment | Trigger Conditions & Scope | Backward Compatibility | Verification & Gate Policy |
+| :--- | :---: | :--- | :--- | :--- |
+| **Major Release** | `vX+1.0.0` | Breaking changes to low-level P2PMux binary framing, cryptographic authentication overhauls, fundamental invariant redesign, or non-backward-compatible refactoring. | May break legacy protocol compatibility; migration guidance must be documented in `docs/RELEASE_NOTES.md`. | **Mandatory Full Testbed Sign-off**: Must achieve 100% pass rate across all 7 real-world testing dimensions in `TESTING_CHECKLIST.md`. |
+| **Minor Release** | `vX.Y+1.0` | New operating modes (e.g. `-dir`/`-file` static servers), new CLI flags/environment variables, protocol extensions, or backward-compatible feature enhancements. | **Strictly backward-compatible** with existing wire protocols, configuration schemas, and signaling handshakes. Legacy agents must interoperate with new servers/portals. | **Targeted Sample Testbed Sign-off**: Verify relevant testbed dimensions based on blast radius; attach execution logs or screenshots to the release PR. |
+| **Patch Release** | `vX.Y.Z+1` | Concurrency race condition/deadlock fixes, buffer bounds and zero-payload edge defenses, Service Worker stream cancellation guards, UI/UX polish, documentation alignment. | **100% backward-compatible**; zero API or protocol modifications. | **Exempt from physical real-world testbed execution**: Automated CI unit/race tests and local Docker smoke verification are sufficient for rapid delivery. |
+
+### 2. Deprecation Lifecycle Policy
+
+To prevent technical debt accumulation from perpetual backward compatibility while protecting automated production deployments, the project enforces a standard two-stage deprecation lifecycle:
+
+1. **Stage 1: Deprecation Warning**:
+   - When a parameter or configuration key is deprecated in a `MINOR` release, the startup banner prints a prominent high-priority warning specifying the deprecated version, replacement flag, and targeted removal release.
+   - The release preserves backward compatibility for the legacy parameter to ensure smooth operational migration.
+2. **Stage 2: Fail-Fast Enforcement**:
+   - In the subsequent `MINOR` or `MAJOR` milestone, the legacy handling logic is completely purged.
+   - If an operator invokes the deprecated parameter, the executable **fails fast immediately at startup (Exit Code > 0)** with actionable remediation instructions.
+   - **Silent ignores or ambiguous aliases are strictly forbidden** (e.g. the legacy `-secret` flag is fully blocked, preventing false assumptions of security).
+
+### 3. Dual-Branch Collaboration & Release Flow
+
+```mermaid
+flowchart LR
+    Dev["dev Branch<br/>(Daily Iteration / PR Integration / CI)"] -->|PR Review & Gate Passes| Main["main Branch<br/>(Production Baseline / Zero Unverified Code)"]
+    Main -->|Create Annotated Tag| Tag["vX.Y.Z Semantic Tag<br/>(git tag -a vX.Y.Z)"]
+    Tag -->|Automated Trigger GitHub Actions| Release["Automated Artifacts<br/>(6-Platform Binaries / SHA256 / Multi-Arch GHCR Images)"]
+```
+
+---
+
 ## Phase 1: Version & Code Multi-Point Alignment
 
 - [ ] **1.1 Go Agent Version Variable Update**
