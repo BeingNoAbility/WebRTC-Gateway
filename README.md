@@ -306,9 +306,9 @@ Go 二进制通过 `go:embed` 技术将编译好的 Web 门户（HTML、JS、Ser
 **方式 2：局域网 / 开发环境一键开启原生 HTTPS（无需证书文件，自动签发）**
 ```bash
 # 启动时加上 -tls-auto 参数，服务端将在内存中自动生成覆盖 localhost 及局域网所有真实 IP 的 ECDSA SAN 证书：
-./bin/signal_linux_amd64 -addr :8443 -tls-auto
+./bin/signal_linux_amd64 -addr :8888 -tls-auto
 ```
-*启动后直接在浏览器打开 `https://<局域网IP>:8443/#nodeId`，浏览器即可进入安全上下文（Secure Context），Service Worker 完整激活！*
+*启动后直接在浏览器打开 `https://<局域网IP>:8888/#nodeId`，浏览器即可进入安全上下文（Secure Context），Service Worker 完整激活！*
 
 **方式 3：纯 HTTP 运行（本地开发）**
 ```bash
@@ -323,7 +323,7 @@ Go 二进制通过 `go:embed` 技术将编译好的 Web 门户（HTML、JS、Ser
 - 若服务端使用 `-tls-auto` 自签名证书：
   ```bash
   # 加上 -insecure 参数跳过证书链校验：
-  ./bin/agent_linux_amd64 -node-id mynode -signal wss://<服务器IP>:8443/ws -insecure -target http://127.0.0.1:8080
+  ./bin/agent_linux_amd64 -node-id mynode -signal wss://<服务器IP>:8888/ws -insecure -target http://127.0.0.1:8080
   ```
 
 ---
@@ -408,9 +408,9 @@ services:
     container_name: webrtc-p2p-server
     restart: unless-stopped
     ports:
-      - "8443:8443"
+      - "8888:8888"
     environment:
-      - ADDR=:8443
+      - ADDR=:8888
       - TLS_AUTO=true # 开启纯内存动态 SAN 证书生成
     volumes:
       - /etc/localtime:/etc/localtime:ro
@@ -425,13 +425,13 @@ services:
     network_mode: "host"
     environment:
       - NODE_ID=nas
-      - SIGNAL_URL=wss://127.0.0.1:8443/ws
+      - SIGNAL_URL=wss://127.0.0.1:8888/ws
       - INSECURE=true # 信任服务端的自签 TLS 证书
       - TARGET_URL=http://127.0.0.1:5244
     depends_on:
       - server
 ```
-*启动后，使用浏览器直接访问 `https://<局域网IP>:8443/#nas` 即可瞬间秒开！*
+*启动后，使用浏览器直接访问 `https://<局域网IP>:8888/#nas` 即可瞬间秒开！*
 
 ##### 场景三：挂载正式域名 SSL 证书运行
 ```yaml
@@ -558,8 +558,8 @@ docker run -d --name webrtc-server --restart unless-stopped \
 
 # 2. 原生自签 HTTPS 运行 (自动生成覆盖所有内网 IP 的 SAN 证书)
 docker run -d --name webrtc-server-tls --restart unless-stopped \
-  -p 8443:8443 \
-  -e ADDR=:8443 \
+  -p 8888:8888 \
+  -e ADDR=:8888 \
   -e TLS_AUTO=true \
   ghcr.io/beingnoability/webrtc-p2p-server:latest
 ```

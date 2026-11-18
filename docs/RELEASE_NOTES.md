@@ -1,5 +1,33 @@
 # WebRTC Gateway Release Notes
 
+## [v2.0.5] - 2026-11-18
+
+### 🛡️ RFC 3986 路径归一化、浏览器语言透传、Smart Pill 2.1 交互轻量化与隐私深度脱敏 (Synology DSM Socket.IO Fix, SW Accept-Language Passthrough, Smart Pill 2.1 & Privacy Scrubbing)
+
+本版本为 **v2.0.5 协议健壮性、全屏交互轻量化与隐私合规发布版本 (Protocol Robustness & UX Refinement Release)**。针对复杂现代内网 Web 系统（如群晖 Synology DSM、Proxmox VE、TrueNAS、Nextcloud 等）在反代穿透中暴露出的深水区协议边界、全屏 Web 应用的按键穿透诉求，进行了底层根治与纵深加固：
+
+- **RFC 3986 双斜杠路径消除与 Authority 陷阱根除 (群晖 DSM Socket.IO 404 彻底修复)**：
+  - 群晖 DSM 前端发起的 `//synoscgi.sock/socket.io/?...` 会因前导双斜杠触发 RFC 3986 的 Authority 分支，导致 Go 标准库 `url.Parse` 误将 `synoscgi.sock` 解析为主机名并剥离，向后端 NAS 发送残损的 `/socket.io/...` 导致 404 死锁与资源监控波形图永久假死；
+  - 在 `pkg/proxy/http_proxy.go`、`pkg/proxy/ws_proxy.go`、`web/src/sw/sw.ts` 与 `web/src/portal/app.ts` 中全面实现前导连续斜杠消除归一化（等效于 Nginx `merge_slashes on;`），彻底打通 Socket.IO 长轮询与 Unix Domain Socket 反代信道；
+  - 补齐了高覆盖率的反向证伪单元测试 `TestResolveTargetURL_LeadingDoubleSlashesAndSynologySocketIO`。
+- **Chromium Service Worker 语言偏好透传 (`Accept-Language`)**：
+  - 针对 Chromium Issue 40728185（Service Worker 出于防指纹隐私策略在 `FetchEvent.request.headers` 中主动剔除 `Accept-Language`）导致的内网管理界面强制回退英文（`en-US`）问题；
+  - 在 `web/src/sw/sw.ts` 中根据 `navigator.languages` 自动回填真实浏览器语言偏好（如 `zh-CN,zh;q=0.9,en;q=0.8`），完美恢复群晖 DSM、Proxmox VE 等系统的原生中文界面。
+- **Smart Pill 2.1 极简双模架构与零按键劫持 (KISS 原则与深度穿透)**：
+  - 彻底移除全局 `keydown` 监听器与激进的 `Double Esc` 快捷键，消除与 Vim、Neovim、Emacs、Web SSH 终端（ttyd、Portainer）、VSCode Web 及视频全屏播放器的按键冲突，实现键盘事件 100% 原生穿透；
+  - 悬浮指示器收敛为纯粹的双模极简交互：**【完整指示药丸 (含延迟/流速/设置/折叠箭头)】 ⇋ 【28px 磁吸呼吸小圆点】**；
+  - 采用 `setPointerCapture` 与拖拽期间动态为 `appFrame` 注入 `pointer-events: none`，彻底解决跨域 Iframe 吞噬鼠标指针导致的拖拽粘滞；新增 `test/test_smart_pill.cjs` 自动化门禁守护。
+- **文档与测试套件隐私信息全量清洗脱敏**：
+  - 全量排查全库文档与测试配置，彻底消除了私有测试 IP（`192.168.1.100`、`192.168.1.100`）与私有映射端口（`8443`），全部标准化收敛为项目官方缺省标准端口 **`:8888`** 与标准测试占位 IP `192.168.1.100`。
+
+---
+
+### 📦 资产下载与快速验证
+- 预编译二进制跨平台支持：Linux (amd64 / arm64)、Windows (amd64 / arm64)、macOS Darwin (amd64 / Apple Silicon arm64)。
+- 多架构 Docker 镜像已同步发布至 GitHub Container Registry (`ghcr.io`)：
+  - 服务端：`ghcr.io/beingnoability/webrtc-p2p-server:v2.0.5` (`latest`)
+  - 穿透端：`ghcr.io/beingnoability/webrtc-p2p-agent:v2.0.5` (`latest`)
+
 ## [v2.0.4] - 2026-11-18
 
 ### ⚡ 高并发性能优化、零拷贝流式穿透与信令非阻塞分发 (High-Concurrency Performance Optimization & Protocol Robustness)

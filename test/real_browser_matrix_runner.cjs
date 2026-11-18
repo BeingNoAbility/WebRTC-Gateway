@@ -19,7 +19,7 @@ const agentBin = path.join(rootDir, 'bin', 'agent.exe');
 const mockBin = path.join(rootDir, 'bin', 'mock_service.exe');
 const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 
-const SIGNAL_PORT = 8443;
+const SIGNAL_PORT = 28888;
 const MOCK_PORT = 18090;
 const CDP_PORT = 9222;
 
@@ -228,7 +228,7 @@ async function main() {
   // SECTION 1: DEDICATED TEST WEB APPLICATION (12 E2E Scenarios)
   // ============================================================================
   console.log('\n----------------------------------------------------------------------------------------');
-  console.log('📌 PART 1: Testing Dedicated Complex Web App in Real Browser (http://localhost:8443/?node=testapp&path=/?auto=true#testapp)');
+  console.log(`📌 PART 1: Testing Dedicated Complex Web App in Real Browser (http://localhost:${SIGNAL_PORT}/?node=testapp&path=/?auto=true#testapp)`);
   console.log('----------------------------------------------------------------------------------------');
 
   const testAppUrl = `http://localhost:${SIGNAL_PORT}/?node=testapp&path=/?auto=true#testapp`;

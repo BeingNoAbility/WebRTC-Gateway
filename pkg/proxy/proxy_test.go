@@ -986,3 +986,58 @@ func TestRequestMetadata_FieldAliasesAndDefaults(t *testing.T) {
 		t.Fatalf("Default method mismatch: %+v", req3)
 	}
 }
+
+func TestResolveTargetURL_LeadingDoubleSlashesAndSynologySocketIO(t *testing.T) {
+	cm := NewSessionCookieManager()
+	hp, err := NewHTTPProxy("http://192.168.1.100:5000", cm)
+	if err != nil {
+		t.Fatalf("NewHTTPProxy failed: %v", err)
+	}
+
+	// Test 1: Synology DSM socket.io double slash path (//synoscgi.sock/socket.io/?Version=8600)
+	// Must NOT swallow synoscgi.sock as host (RFC 3986 Authority trap)
+	u, host, err := hp.resolveTargetURL("//synoscgi.sock/socket.io/?Version=8600&transport=polling", nil)
+	if err != nil {
+		t.Fatalf("resolveTargetURL failed for double-slash path: %v", err)
+	}
+	if host != "192.168.1.100:5000" {
+		t.Errorf("Host mismatch: expected 192.168.1.100:5000, got %q", host)
+	}
+	if u.Path != "/synoscgi.sock/socket.io/" {
+		t.Errorf("Path mismatch: expected /synoscgi.sock/socket.io/, got %q", u.Path)
+	}
+	if u.RawQuery != "Version=8600&transport=polling" {
+		t.Errorf("Query mismatch: expected Version=8600&transport=polling, got %q", u.RawQuery)
+	}
+	if u.String() != "http://192.168.1.100:5000/synoscgi.sock/socket.io/?Version=8600&transport=polling" {
+		t.Errorf("Full URL mismatch: got %q", u.String())
+	}
+
+	// Test 2: Triple slash path (///api/v1/metrics)
+	u, host, err = hp.resolveTargetURL("///api/v1/metrics", nil)
+	if err != nil {
+		t.Fatalf("resolveTargetURL failed for triple-slash path: %v", err)
+	}
+	if u.Path != "/api/v1/metrics" {
+		t.Errorf("Path mismatch for triple slash: expected /api/v1/metrics, got %q", u.Path)
+	}
+
+	// Test 3: WebSocket proxy resolution for double slash path
+	wp, err := NewWSProxy("http://192.168.1.100:5000", cm)
+	if err != nil {
+		t.Fatalf("NewWSProxy failed: %v", err)
+	}
+	wu, whost, err := wp.resolveTargetWSURL("//synoscgi.sock/socket.io/?EIO=4&transport=websocket", nil)
+	if err != nil {
+		t.Fatalf("resolveTargetWSURL failed for double-slash path: %v", err)
+	}
+	if whost != "192.168.1.100:5000" {
+		t.Errorf("WS Host mismatch: expected 192.168.1.100:5000, got %q", whost)
+	}
+	if wu.Path != "/synoscgi.sock/socket.io/" {
+		t.Errorf("WS Path mismatch: expected /synoscgi.sock/socket.io/, got %q", wu.Path)
+	}
+	if wu.Scheme != "ws" {
+		t.Errorf("WS Scheme mismatch: expected ws, got %q", wu.Scheme)
+	}
+}

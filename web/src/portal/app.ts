@@ -1267,6 +1267,27 @@ class PortalApp {
     const isRelay = this.hudInfo.transportType === 'relay';
 
     // Update Floating Pill
+    const pill = document.getElementById('p2pPill');
+    if (pill) {
+      // Update collapsed dot icon/color
+      const pillDot = document.getElementById('pillDot');
+      if (pillDot) {
+        if (isRelay) {
+          pillDot.textContent = '🛡️';
+          pill.style.borderColor = '#d29922';
+        } else {
+          pillDot.textContent = '⚡';
+          pill.style.borderColor = '#30363d';
+        }
+      }
+
+      // If collapsed, skip updating expanded text nodes to save CPU/DOM ops (PERF-13)
+      if (pill.classList.contains('collapsed')) {
+        // Only continue if HUD modal is open
+        if (!this.isHUDModalOpen()) return;
+      }
+    }
+
     const pillBadge = document.getElementById('pillModeBadge');
     if (pillBadge) {
       if (isRelay) {
@@ -1341,6 +1362,166 @@ class PortalApp {
     if (hudPacketsLost) hudPacketsLost.textContent = `${this.hudInfo.packetsLost} pkts`;
   }
 
+  private updatePillDOMVisibility(collapsed: boolean) {
+    const pill = document.getElementById('p2pPill');
+    if (!pill) return;
+    const exp = document.getElementById('pillExpandedContent');
+    const col = document.getElementById('pillCollapsedContent');
+
+    if (collapsed) {
+      if (exp) exp.style.display = 'none';
+      if (col) col.style.display = 'flex';
+      pill.style.borderRadius = '50%';
+      pill.style.padding = '0';
+      pill.style.width = '28px';
+      pill.style.height = '28px';
+      pill.style.justifyContent = 'center';
+      pill.title = 'WebRTC 状态指示 (点击展开 / 拖拽移动)';
+    } else {
+      if (exp) exp.style.display = 'flex';
+      if (col) col.style.display = 'none';
+      pill.style.borderRadius = '20px';
+      pill.style.padding = '5px 10px 5px 10px';
+      pill.style.width = 'auto';
+      pill.style.height = '32px';
+      pill.style.justifyContent = 'flex-start';
+      pill.removeAttribute('title');
+    }
+  }
+
+  private setPillCollapsed(collapsed: boolean) {
+    const pill = document.getElementById('p2pPill');
+    if (!pill) return;
+
+    if (collapsed) {
+      pill.classList.remove('expanded');
+      pill.classList.add('collapsed');
+      this.updatePillDOMVisibility(true);
+    } else {
+      pill.classList.remove('collapsed');
+      pill.classList.add('expanded');
+      this.updatePillDOMVisibility(false);
+      this.updateHUDUI();
+    }
+
+    try {
+      localStorage.setItem('p2p_pill_collapsed', collapsed ? 'true' : 'false');
+    } catch {}
+
+    requestAnimationFrame(() => {
+      this.snapPillToEdge(true);
+    });
+  }
+
+  private updateCollapseBtnOrientation(side: 'left' | 'right') {
+    const btn = document.getElementById('pillCollapseBtn');
+    if (!btn) return;
+    if (side === 'left') {
+      btn.textContent = '◀';
+      btn.style.order = '-1';
+      btn.style.marginRight = '2px';
+      btn.style.marginLeft = '0px';
+    } else {
+      btn.textContent = '▶';
+      btn.style.order = '10';
+      btn.style.marginLeft = '2px';
+      btn.style.marginRight = '0px';
+    }
+  }
+
+  private snapPillToEdge(animate: boolean = true) {
+    const pill = document.getElementById('p2pPill');
+    if (!pill) return;
+
+    const rect = pill.getBoundingClientRect();
+    const pillWidth = rect.width || pill.offsetWidth || 32;
+    const pillHeight = rect.height || pill.offsetHeight || 32;
+
+    const centerX = rect.left + pillWidth / 2;
+    const isLeft = centerX < window.innerWidth / 2;
+    const side: 'left' | 'right' = isLeft ? 'left' : 'right';
+
+    const marginX = 12;
+    const marginY = 12;
+
+    const maxY = Math.max(marginY, window.innerHeight - pillHeight - marginY);
+    const clampedY = Math.max(marginY, Math.min(rect.top, maxY));
+    const topRatio = clampedY / Math.max(1, window.innerHeight);
+
+    if (animate) {
+      pill.style.transition =
+        'left 0.22s cubic-bezier(0.2, 0.9, 0.3, 1), right 0.22s cubic-bezier(0.2, 0.9, 0.3, 1), top 0.22s cubic-bezier(0.2, 0.9, 0.3, 1), width 0.2s ease, height 0.2s ease, border-radius 0.2s ease';
+    } else {
+      pill.style.transition = 'none';
+    }
+
+    if (side === 'left') {
+      pill.style.left = `${marginX}px`;
+      pill.style.right = 'auto';
+    } else {
+      pill.style.right = `${marginX}px`;
+      pill.style.left = 'auto';
+    }
+    pill.style.top = `${clampedY}px`;
+    pill.style.bottom = 'auto';
+
+    this.updateCollapseBtnOrientation(side);
+
+    try {
+      const pos = {
+        side,
+        topRatio: parseFloat(topRatio.toFixed(4)),
+      };
+      localStorage.setItem('p2p_pill_pos', JSON.stringify(pos));
+    } catch {}
+  }
+
+  private loadPillPosition() {
+    const pill = document.getElementById('p2pPill');
+    if (!pill) return;
+
+    let side: 'left' | 'right' = 'right';
+    let topRatio = 0.92;
+
+    try {
+      const raw = localStorage.getItem('p2p_pill_pos');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && (parsed.side === 'left' || parsed.side === 'right')) {
+          side = parsed.side;
+        }
+        if (
+          parsed &&
+          typeof parsed.topRatio === 'number' &&
+          Number.isFinite(parsed.topRatio) &&
+          parsed.topRatio >= 0 &&
+          parsed.topRatio <= 1
+        ) {
+          topRatio = parsed.topRatio;
+        }
+      }
+    } catch {}
+
+    const marginX = 12;
+    const marginY = 12;
+    const pillHeight = pill.offsetHeight || 32;
+    const targetY = topRatio * window.innerHeight;
+    const maxY = Math.max(marginY, window.innerHeight - pillHeight - marginY);
+    const clampedY = Math.max(marginY, Math.min(targetY, maxY));
+
+    pill.style.top = `${clampedY}px`;
+    pill.style.bottom = 'auto';
+    if (side === 'left') {
+      pill.style.left = `${marginX}px`;
+      pill.style.right = 'auto';
+    } else {
+      pill.style.right = `${marginX}px`;
+      pill.style.left = 'auto';
+    }
+
+    this.updateCollapseBtnOrientation(side);
+  }
+
   private createFloatingPill() {
     this.startHUDStatsMonitor();
     this.createHUDModal();
@@ -1354,45 +1535,220 @@ class PortalApp {
 
     const pill = document.createElement('div');
     pill.id = 'p2pPill';
+    pill.className = 'expanded';
     pill.style.cssText = `
       position: fixed;
-      bottom: 16px;
-      right: 16px;
+      top: auto;
+      bottom: auto;
+      right: 12px;
       background: rgba(22, 27, 34, 0.94);
       backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
       border: 1px solid #30363d;
       color: #c9d1d9;
-      padding: 6px 14px;
-      border-radius: 20px;
       font-size: 12px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
       z-index: 10000;
       box-shadow: 0 4px 16px rgba(0,0,0,0.5);
       display: flex;
       align-items: center;
-      gap: 8px;
       user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+      cursor: grab;
+      box-sizing: border-box;
       transition: all 0.2s ease;
-      cursor: pointer;
-    `;
-    pill.innerHTML = `
-      <span id="pillModeBadge" style="display:inline-flex; align-items:center; gap:3px; font-weight:700; padding:2px 7px; border-radius:10px; font-size:11px; background:#238636; color:#ffffff; letter-spacing:0.5px;">⚡ P2P</span>
-      <span id="pillNode" style="font-weight:500;" title="Click to open WebRTC HUD">P2P: ${this.escapeHtml(this.peerId)}</span>
-      <span id="pillRtt" style="color:#58a6ff; font-family:monospace;">-- ms</span>
-      <span id="pillSpeed" style="color:#8b949e; font-size:11px; font-family:monospace;">↓ 0 KB/s</span>
-      <span id="pillGear" style="cursor:pointer; opacity:0.75; font-size:13px; margin-left:2px;" title="Connection Settings">⚙</span>
     `;
 
-    pill.addEventListener('click', (e) => {
-      const target = e.target as HTMLElement;
-      if (target && target.id === 'pillGear') {
-        this.openSettingsModal();
-      } else {
-        this.openHUDModal();
+    pill.innerHTML = `
+      <div id="pillExpandedContent" style="display: flex; align-items: center; gap: 8px; white-space: nowrap;">
+        <span id="pillCollapseBtn" style="cursor: pointer; opacity: 0.6; font-size: 11px; padding: 2px 4px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; transition: opacity 0.2s, background 0.2s;" title="收起为小圆点 (Collapse to Mini Dot)">▶</span>
+        <span id="pillModeBadge" style="display:inline-flex; align-items:center; gap:3px; font-weight:700; padding:2px 7px; border-radius:10px; font-size:11px; background:#238636; color:#ffffff; letter-spacing:0.5px;">⚡ P2P</span>
+        <span id="pillNode" style="font-weight:500; font-size:12px; max-width:120px; overflow:hidden; text-overflow:ellipsis;" title="Click to open WebRTC HUD">P2P: ${this.escapeHtml(this.peerId)}</span>
+        <span id="pillRtt" style="color:#58a6ff; font-family:monospace; font-size:12px;">-- ms</span>
+        <span id="pillSpeed" style="color:#8b949e; font-size:11px; font-family:monospace;">↓ 0 KB/s</span>
+        <span id="pillGear" style="cursor:pointer; opacity:0.75; font-size:13px; margin-left:2px; padding: 2px;" title="Connection Settings">⚙</span>
+      </div>
+      <div id="pillCollapsedContent" style="display: none; width: 100%; height: 100%; align-items: center; justify-content: center; position: relative;">
+        <span id="pillDot" style="display: inline-flex; align-items: center; justify-content: center; font-size: 13px;" title="WebRTC 状态指示 - 点击展开">⚡</span>
+      </div>
+    `;
+
+    // Hover styling on buttons
+    const btnCollapse = pill.querySelector('#pillCollapseBtn') as HTMLElement;
+    if (btnCollapse) {
+      btnCollapse.addEventListener('mouseenter', () => {
+        btnCollapse.style.opacity = '1';
+        btnCollapse.style.background = 'rgba(255, 255, 255, 0.12)';
+      });
+      btnCollapse.addEventListener('mouseleave', () => {
+        btnCollapse.style.opacity = '0.6';
+        btnCollapse.style.background = 'transparent';
+      });
+    }
+
+    const btnGear = pill.querySelector('#pillGear') as HTMLElement;
+    if (btnGear) {
+      btnGear.addEventListener('mouseenter', () => {
+        btnGear.style.opacity = '1';
+      });
+      btnGear.addEventListener('mouseleave', () => {
+        btnGear.style.opacity = '0.75';
+      });
+    }
+
+    // Dragging & Anti-Swallowing (Pointer Capture + Iframe pointer-events)
+    let isPointerDown = false;
+    let isDragging = false;
+    let startX = 0;
+    let startY = 0;
+    let initialLeft = 0;
+    let initialTop = 0;
+    let justDragged = false;
+
+    pill.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      isPointerDown = true;
+      isDragging = false;
+      startX = e.clientX;
+      startY = e.clientY;
+
+      const rect = pill.getBoundingClientRect();
+      initialLeft = rect.left;
+      initialTop = rect.top;
+
+      try {
+        pill.setPointerCapture(e.pointerId);
+      } catch {}
+    });
+
+    pill.addEventListener('pointermove', (e: PointerEvent) => {
+      if (!isPointerDown) return;
+
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      const distSq = dx * dx + dy * dy;
+
+      if (!isDragging && distSq > 16) {
+        isDragging = true;
+        pill.style.transition = 'none';
+        pill.style.cursor = 'grabbing';
+        // Deep-water trap 1: Disable pointer events on inner app iframe so it doesn't swallow events
+        if (this.appFrame) {
+          this.appFrame.style.pointerEvents = 'none';
+        }
+      }
+
+      if (isDragging) {
+        let curX = initialLeft + dx;
+        let curY = initialTop + dy;
+
+        const pillWidth = pill.offsetWidth;
+        const pillHeight = pill.offsetHeight;
+        curX = Math.max(4, Math.min(curX, window.innerWidth - pillWidth - 4));
+        curY = Math.max(4, Math.min(curY, window.innerHeight - pillHeight - 4));
+
+        pill.style.left = `${curX}px`;
+        pill.style.right = 'auto';
+        pill.style.top = `${curY}px`;
+        pill.style.bottom = 'auto';
       }
     });
 
+    const onPointerUp = (e: PointerEvent) => {
+      if (!isPointerDown) return;
+      isPointerDown = false;
+
+      try {
+        pill.releasePointerCapture(e.pointerId);
+      } catch {}
+
+      if (this.appFrame) {
+        this.appFrame.style.pointerEvents = 'auto';
+      }
+      pill.style.cursor = 'grab';
+
+      if (isDragging) {
+        isDragging = false;
+        justDragged = true;
+        setTimeout(() => {
+          justDragged = false;
+        }, 120);
+
+        this.snapPillToEdge(true);
+      }
+    };
+
+    pill.addEventListener('pointerup', onPointerUp);
+    pill.addEventListener('pointercancel', onPointerUp);
+
+    // Click handler with drag disambiguation
+    pill.addEventListener(
+      'click',
+      (e: MouseEvent) => {
+        if (justDragged) {
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
+
+        const target = e.target as HTMLElement;
+
+        // If clicked on collapse button
+        if (target && (target.id === 'pillCollapseBtn' || target.closest('#pillCollapseBtn'))) {
+          e.stopPropagation();
+          e.preventDefault();
+          this.setPillCollapsed(true);
+          return;
+        }
+
+        // If clicked on collapsed dot -> expand
+        if (pill.classList.contains('collapsed')) {
+          e.stopPropagation();
+          e.preventDefault();
+          this.setPillCollapsed(false);
+          return;
+        }
+
+        // If clicked on settings gear
+        if (target && (target.id === 'pillGear' || target.closest('#pillGear'))) {
+          e.stopPropagation();
+          e.preventDefault();
+          this.openSettingsModal();
+          return;
+        }
+
+        // Default: open HUD diagnostic modal
+        this.openHUDModal();
+      },
+      true
+    );
+
     document.body.appendChild(pill);
+
+    // Restore user collapsed preference (defaults to false for new users)
+    let isCollapsed = false;
+    try {
+      isCollapsed = localStorage.getItem('p2p_pill_collapsed') === 'true';
+    } catch {}
+
+    if (isCollapsed) {
+      pill.className = 'collapsed';
+      this.updatePillDOMVisibility(true);
+    } else {
+      pill.className = 'expanded';
+      this.updatePillDOMVisibility(false);
+    }
+
+    // Position pill
+    this.loadPillPosition();
+
+    // Listen for window resize
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', () => {
+        this.loadPillPosition();
+      });
+    }
   }
 
   private createSettingsModal() {
@@ -2165,13 +2521,21 @@ class PortalApp {
       return;
     }
 
+    let wsPath = (typeof msg.path === 'string' ? msg.path : '/');
+    while (wsPath.startsWith('//')) {
+      wsPath = wsPath.substring(1);
+    }
+    if (!wsPath.startsWith('/')) {
+      wsPath = '/' + wsPath;
+    }
+
     const stream = this.mux.openStream();
     this.updateStreamsCount(1);
-    this.log(`Bridging WebSocket connection for [${msg.path}] over Stream ID ${stream.id}`);
+    this.log(`Bridging WebSocket connection for [${wsPath}] over Stream ID ${stream.id}`);
 
     // Send WS_CONNECT headers
     stream.sendHeaders({
-      p: msg.path,
+      p: wsPath,
       protocols: msg.protocols,
       h: { upgrade: 'websocket' },
     });

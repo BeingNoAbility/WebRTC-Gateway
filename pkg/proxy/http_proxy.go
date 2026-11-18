@@ -225,6 +225,12 @@ func (p *HTTPProxy) isDomainAllowed(hostOnly string) bool {
 
 func (p *HTTPProxy) resolveTargetURL(reqPath string, headers map[string]string) (*url.URL, string, error) {
 	cleanPath := reqPath
+	// RFC 3986 specifies that a relative URI starting with "//" begins an Authority (Host).
+	// Standard web servers and proxies (e.g. Nginx merge_slashes on;) normalize leading consecutive slashes
+	// into a single slash to prevent parser differential from swallowing the first path segment.
+	for strings.HasPrefix(cleanPath, "//") {
+		cleanPath = cleanPath[1:]
+	}
 	if !strings.HasPrefix(cleanPath, "/") {
 		cleanPath = "/" + cleanPath
 	}

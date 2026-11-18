@@ -287,6 +287,14 @@ async function handleTunneledRequest(request: Request, initialSession: PortalSes
     headers[key.toLowerCase()] = val;
   });
 
+  // Chromium SW privacy gate workaround: FetchEvent.request.headers omits Accept-Language.
+  // Backfill client's real browser language preferences if omitted.
+  if (!headers['accept-language'] && typeof navigator !== 'undefined') {
+    headers['accept-language'] = (navigator.languages && navigator.languages.length)
+      ? navigator.languages.join(', ')
+      : (navigator.language || 'zh-CN,zh;q=0.9,en;q=0.8');
+  }
+
   if (typeof DecompressionStream !== 'undefined') {
     headers['x-p2p-client-decompress'] = 'gzip';
   }
@@ -298,6 +306,11 @@ async function handleTunneledRequest(request: Request, initialSession: PortalSes
   if (url.origin !== sw.location.origin) {
     path = `/--p2p-proxy/${url.host}${url.pathname}${url.search}`;
     headers['x-p2p-dest-host'] = url.host;
+  } else {
+    // Normalize leading duplicate slashes for same-origin requests (e.g. "//synoscgi.sock/..." -> "/synoscgi.sock/...")
+    while (path.startsWith('//')) {
+      path = path.substring(1);
+    }
   }
 
   const hasBody = request.method !== 'GET' && request.method !== 'HEAD';

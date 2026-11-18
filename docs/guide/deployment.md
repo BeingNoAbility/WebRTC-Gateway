@@ -57,9 +57,9 @@ Go 二进制通过 `go:embed` 技术将编译好的 Web 门户（HTML、JS、Ser
 #### 方式 2：局域网 / 开发环境一键开启原生 HTTPS（无需证书文件，自动签发）
 在启动时加上 `-tls-auto` 参数，服务端将在内存中自动生成覆盖 localhost 及局域网所有真实 IP 的 ECDSA SAN 证书：
 ```bash
-./bin/signal_linux_amd64 -addr :8443 -tls-auto
+./bin/signal_linux_amd64 -addr :8888 -tls-auto
 ```
-*启动后直接在浏览器打开 `https://<局域网IP>:8443/#nodeId`，浏览器即可进入安全上下文（Secure Context），Service Worker 完整激活！*
+*启动后直接在浏览器打开 `https://<局域网IP>:8888/#nodeId`，浏览器即可进入安全上下文（Secure Context），Service Worker 完整激活！*
 
 #### 方式 3：纯 HTTP 运行（本地开发或前置自有反代）
 ```bash

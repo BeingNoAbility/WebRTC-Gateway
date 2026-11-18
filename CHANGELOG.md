@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v2.0.5] - 2026-11-18
+
+### Fixed & Protocol Robustness
+- **RFC 3986 Authority Trap Resolution & Double-Slash Path Normalization**:
+  - Normalized leading duplicate slashes (e.g. `//synoscgi.sock/...` -> `/synoscgi.sock/...`) across `pkg/proxy/http_proxy.go`, `pkg/proxy/ws_proxy.go`, `web/src/sw/sw.ts`, and `web/src/portal/app.ts`.
+  - Fixed an RFC 3986 parser differential where Go's standard library `url.Parse` mistook relative URLs starting with `//` as Authority (Host), truncating request paths and causing 404 errors on Synology DSM, Socket.IO long-polling, and real-time resource monitor graphs.
+  - Added unit test `TestResolveTargetURL_LeadingDoubleSlashesAndSynologySocketIO` asserting full path preservation and correct target host routing for HTTP and WebSocket proxies.
+- **Chromium Service Worker Language Preference Passthrough (`Accept-Language`)**:
+  - Implemented automatic language fallback in `web/src/sw/sw.ts` referencing `navigator.languages` to circumvent Chromium Issue 40728185 (Service Worker omitting `Accept-Language` from fetch headers).
+  - Eliminates forced English fallbacks on intranet management consoles (Synology DSM, Proxmox, Nextcloud, TrueNAS).
+
+### Changed & UX Refinement
+- **Smart Pill 2.1 KISS Architecture & Zero Keystroke Interception**:
+  - Streamlined the WebRTC diagnostic HUD into a pure dual-mode interface: [Expanded Pill with RTT/Speed/Settings/Collapse Arrow] ⇋ [28px Magnetic Breathing Dot].
+  - Completely removed global `keydown` event listeners (dropped double `Esc` shortcut and ghost mode), guaranteeing 100% untouched keystroke passthrough for Vim, Neovim, Emacs, and Web SSH terminals (ttyd, Portainer).
+  - Implemented `setPointerCapture` and dynamic `pointer-events: none` on `appFrame` during drag, eliminating event swallowing by child iframes.
+  - Added automated regression test `test/test_smart_pill.cjs` validating DOM lifecycle, Euclidean distance drag disambiguation, boundary clamping, and coordinate sanitization.
+
+### Security & Privacy
+- **Documentation & Test Bed Privacy Cleansing**:
+  - Fully scrubbed all private IP references (`192.168.1.100` -> `192.168.1.100`, `192.168.1.100` -> `192.168.1.100`) and private port mappings (`8443` -> default `:8888`) across `README.md`, `README_en.md`, `docs/`, and test runners.
+
 ## [v2.0.4] - 2026-11-18
 
 ### Performance & Scalability

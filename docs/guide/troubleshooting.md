@@ -25,9 +25,9 @@
 - **一键解法**：
   在启动一体化信令服务端时增加 `-tls-auto` 参数：
   ```bash
-  ./signal -addr :8443 -tls-auto
+  ./signal -addr :8888 -tls-auto
   ```
-  服务端将在内存中动态签发覆盖本机所有局域网真实物理网卡 IP 的 ECDSA SAN 证书。在浏览器直接打开 `https://<局域网IP>:8443/#myhome` 接受证书提示，即可完整激活 Service Worker！
+  服务端将在内存中动态签发覆盖本机所有局域网真实物理网卡 IP 的 ECDSA SAN 证书。在浏览器直接打开 `https://<局域网IP>:8888/#myhome` 接受证书提示，即可完整激活 Service Worker！
 
 ---
 

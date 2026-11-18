@@ -280,7 +280,7 @@ The Go binary embeds the compiled Web portal assets via `go:embed`. **Zero exter
 ./bin/signal_linux_amd64 -addr :443 -tls-cert /path/to/fullchain.pem -tls-key /path/to/privkey.pem
 
 # LAN / Development with Auto-TLS (automatically generates SAN certificate for all physical IPs):
-./bin/signal_linux_amd64 -addr :8443 -tls-auto
+./bin/signal_linux_amd64 -addr :8888 -tls-auto
 ```
 
 #### 2. Launch Intranet Agent
@@ -288,7 +288,7 @@ The Go binary embeds the compiled Web portal assets via `go:embed`. **Zero exter
 ./bin/agent_linux_amd64 -node-id mynode -signal wss://yourdomain.com/ws -target http://127.0.0.1:8080
 
 # When connecting to -tls-auto self-signed server:
-./bin/agent_linux_amd64 -node-id mynode -signal wss://<LAN_IP>:8443/ws -insecure -target http://127.0.0.1:8080
+./bin/agent_linux_amd64 -node-id mynode -signal wss://<LAN_IP>:8888/ws -insecure -target http://127.0.0.1:8080
 ```
 
 ---
