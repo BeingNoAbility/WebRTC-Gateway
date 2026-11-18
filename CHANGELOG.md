@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v2.1.0] - 2026-11-19
+
+### Security & Sandboxing
+- **PostMessage Cross-Origin Hijack Protection & Wildcard Deprecation**:
+  - Enforced strict `event.origin` and `event.source` validation on postMessage handlers (`TUNNEL_WS_CONNECT`, `TUNNEL_COOKIE_UPDATE`, and `P2P_ROUTE_SYNC`) in `web/src/portal/app.ts`, preventing malicious third-party origins from taking over intranet WebSocket tunnels via `window.open` or cross-origin iframes.
+  - Replaced wildcard `'*'` target origin with exact window origin in `web/src/patch/ws_patch.ts`.
+
+### Fixed & Stream Resilience
+- **GET/HEAD Empty-Body Stream Teardown & Leak Prevention**:
+  - Fixed an architectural stream leak where GET/HEAD requests never emitted `REQ_BODY_END`, causing the Portal client to omit the FIN flag and leaving server streams permanently open in `mux.streams` until the 5-minute timeout.
+- **Backpressure Deadlock & Stream Removal Auto-Wakeup**:
+  - Resolved a critical deadlock in `pkg/mux/mux.go` where `m.bpCond.Wait()` hung indefinitely when a stream was reset or closed from `m.streams` (`s == nil`), adding broadcast signaling and fail-fast stream removal checks.
+- **Trickle ICE Candidate Buffering Queue**:
+  - Replaced `time.Sleep` polling in candidate handling with an orderly `pendingCandidates` buffer in `pkg/agent/agent.go` and `cmd/agent/main.go`, guaranteeing no candidate is dropped when `RemoteDescription` is not yet applied.
+- **Protocol Proxy Path Decoupling**:
+  - Removed hardcoded third-party Bilibili `/upgcxcode/` path magic value from `pkg/proxy/http_proxy.go`, converging on standard media extension classification.
+
+### Added & Verification Testbed
+- **Live Cloudflare Worker SQLite Durable Object E2E Test Suite**:
+  - Implemented `test/cf_worker_e2e_test.go` with live public edge testing, verifying WebSocket hibernation, peer status synchronization, and room sharding without local broker dependencies.
+- **Real Linux Bare-Metal Chaos Testbed Verification**:
+  - Implemented `test/real_linux_testbed_e2e_test.go` validating kernel-level network loss and jitter (`tc qdisc netem 30% loss 150ms delay 20ms`), zero race conditions under native Linux CGO `-race`, and strict certificate validation.
+- **Testing Checklist 2.0 & Real Browser Matrix Runner**:
+  - Upgraded real-world testing checklist to 2.0 (`docs/TESTING_CHECKLIST.md`) and added automated CDP browser matrix runner (`test/real_browser_matrix_runner.cjs`).
+  - Signed off and archived official release test report `docs/RELEASE_REPORTS/v2.1.0_TEST_REPORT.md` (100% pass rate).
+
+### Docs & Engineering Governance
+- **Versioning Policy & Deprecation Lifecycle**:
+  - Established formal Semantic Versioning Policy and two-stage Parameter Deprecation Lifecycle in `docs/RELEASE_CHECKLIST.md` and `docs/en/RELEASE_CHECKLIST.md`.
+
 ## [v2.0.8] - 2026-11-18
 
 ### Fixed & Protocol Robustness
