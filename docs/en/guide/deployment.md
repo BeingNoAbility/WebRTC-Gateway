@@ -47,7 +47,7 @@ The `signal` binary embeds all compiled frontend assets and features zero runtim
 
 ```bash
 # Listen on internal port :8888
-./signal -addr :8888 -secret MasterSecretKey
+./signal -addr :8888 -signal-secret MasterSecretKey
 ```
 
 **Nginx Configuration:**
@@ -89,7 +89,7 @@ All images run as independent unprivileged user `appuser` (`UID: 10001, GID: 100
 # Run Server
 docker run -d --name webrtc-server --restart unless-stopped \
   -p 8888:8888 \
-  -e SECRET=YourMasterSecretKey \
+  -e SIGNAL_SECRET=YourMasterSecretKey \
   ghcr.io/beingnoability/webrtc-p2p-server:latest
 
 # Run Agent
@@ -99,6 +99,7 @@ docker run -d --name webrtc-agent --restart unless-stopped \
   -e NODE_ID=nas-vault \
   -e SIGNAL_URL=wss://p2p.yourdomain.com/ws \
   -e TARGET_URL=http://127.0.0.1:8080 \
+  -e SIGNAL_SECRET=YourMasterSecretKey \
   -e ACCESS_SECRET=YourPassword123 \
   ghcr.io/beingnoability/webrtc-p2p-agent:latest
 ```
@@ -117,7 +118,7 @@ services:
       - "8888:8888"
     environment:
       - ADDR=:8888
-      - SECRET=YourMasterSecretKey
+      - SIGNAL_SECRET=YourMasterSecretKey
     healthcheck:
       test: ["CMD", "/app/server", "-health"]
       interval: 15s
@@ -134,5 +135,6 @@ services:
       - NODE_ID=nas-vault
       - SIGNAL_URL=ws://127.0.0.1:8888/ws
       - TARGET_URL=http://127.0.0.1:8080
+      - SIGNAL_SECRET=YourMasterSecretKey
       - ACCESS_SECRET=YourPassword123
 ```

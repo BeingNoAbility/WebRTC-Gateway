@@ -166,4 +166,3 @@ services:
   - `server` 镜像在构建时通过 Linux File Capability 为 `/app/server` 授予 `cap_net_bind_service=+ep`，即便以非特权用户身份运行，也支持直接在容器内监听 `:443` 或 `:80` 等低位特权端口，无需赋予容器 root 权限。
 - **纯内存只读文件系统兼容 (`--read-only`)**：
   - 服务端与 Agent 全链路采用内存流式无状态调度，不向磁盘写任何临时文件，原生支持 `docker run --read-only` 与 Kubernetes `readOnlyRootFilesystem: true` 金融级沙箱加固。
-```
