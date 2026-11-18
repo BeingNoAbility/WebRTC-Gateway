@@ -954,3 +954,35 @@ func TestWSProxy_ClientIP_ForwardingAndAntiSpoofing(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestMetadata_FieldAliasesAndDefaults(t *testing.T) {
+	// 1. Compact format {"m": "POST", "p": "/submit", "h": {"content-type": "application/json"}}
+	compactJSON := []byte(`{"m": "POST", "p": "/submit", "h": {"content-type": "application/json"}}`)
+	var req1 RequestMetadata
+	if err := json.Unmarshal(compactJSON, &req1); err != nil {
+		t.Fatalf("Unmarshal compact failed: %v", err)
+	}
+	if req1.Method != "POST" || req1.Path != "/submit" || req1.Headers["content-type"] != "application/json" {
+		t.Fatalf("Compact unmarshal mismatch: %+v", req1)
+	}
+
+	// 2. Verbose format {"method": "DELETE", "path": "/item/1", "headers": {"authorization": "token"}}
+	verboseJSON := []byte(`{"method": "DELETE", "path": "/item/1", "headers": {"authorization": "token"}}`)
+	var req2 RequestMetadata
+	if err := json.Unmarshal(verboseJSON, &req2); err != nil {
+		t.Fatalf("Unmarshal verbose failed: %v", err)
+	}
+	if req2.Method != "DELETE" || req2.Path != "/item/1" || req2.Headers["authorization"] != "token" {
+		t.Fatalf("Verbose unmarshal mismatch: %+v", req2)
+	}
+
+	// 3. Omitted method defaults to GET
+	noMethodJSON := []byte(`{"path": "/home"}`)
+	var req3 RequestMetadata
+	if err := json.Unmarshal(noMethodJSON, &req3); err != nil {
+		t.Fatalf("Unmarshal no method failed: %v", err)
+	}
+	if req3.Method != "GET" || req3.Path != "/home" {
+		t.Fatalf("Default method mismatch: %+v", req3)
+	}
+}

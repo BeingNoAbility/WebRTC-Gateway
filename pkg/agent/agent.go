@@ -937,6 +937,7 @@ func (a *Agent) streamAcceptLoop(sessionID, cookieSession string, m *mux.Mux) {
 
 			var probe struct {
 				Method     string            `json:"m"`
+				MethodAlt  string            `json:"method"`
 				Path       string            `json:"p"`
 				PathAlt    string            `json:"path"`
 				Headers    map[string]string `json:"h"`
@@ -949,6 +950,12 @@ func (a *Agent) streamAcceptLoop(sessionID, cookieSession string, m *mux.Mux) {
 				return
 			}
 
+			if probe.Method == "" && probe.MethodAlt != "" {
+				probe.Method = probe.MethodAlt
+			}
+			if probe.Method == "" {
+				probe.Method = "GET"
+			}
 			if probe.Path == "" && probe.PathAlt != "" {
 				probe.Path = probe.PathAlt
 			}

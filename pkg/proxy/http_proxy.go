@@ -34,6 +34,34 @@ type RequestMetadata struct {
 	Headers map[string]string `json:"h"` // Request headers
 }
 
+// UnmarshalJSON supports both compact {"m", "p", "h"} and verbose {"method", "path", "headers"} payloads.
+func (r *RequestMetadata) UnmarshalJSON(data []byte) error {
+	type Alias RequestMetadata
+	var aux struct {
+		Alias
+		MethodAlt  string            `json:"method"`
+		PathAlt    string            `json:"path"`
+		HeadersAlt map[string]string `json:"headers"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*r = RequestMetadata(aux.Alias)
+	if r.Method == "" && aux.MethodAlt != "" {
+		r.Method = aux.MethodAlt
+	}
+	if r.Method == "" {
+		r.Method = "GET"
+	}
+	if r.Path == "" && aux.PathAlt != "" {
+		r.Path = aux.PathAlt
+	}
+	if r.Headers == nil && aux.HeadersAlt != nil {
+		r.Headers = aux.HeadersAlt
+	}
+	return nil
+}
+
 // ResponseMetadata represents serialized HTTP response metadata returned to the browser.
 type ResponseMetadata struct {
 	Status  int               `json:"s"`           // HTTP Status Code (200, 404, etc.)

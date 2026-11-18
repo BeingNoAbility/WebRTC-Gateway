@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -453,5 +454,78 @@ func TestAgent_SessionClientIP_LifecycleAndCleanup(t *testing.T) {
 	ag.Close()
 	if ip := ag.getClientIP("sess-test-2"); ip != "" {
 		t.Fatalf("Expected all clientIPs to be cleaned up after Close(), got: %q", ip)
+	}
+}
+
+func TestAgent_StreamProbe_MethodAndFieldTolerance(t *testing.T) {
+	// Verifies that both {"m": "POST", "p": "/test", "h": {...}} and
+	// {"method": "POST", "path": "/test", "headers": {...}} parse cleanly.
+	tests := []struct {
+		name           string
+		payload        string
+		expectedMethod string
+		expectedPath   string
+		expectedHeader string
+	}{
+		{
+			name:           "Compact format",
+			payload:        `{"m":"POST","p":"/upload","h":{"x-custom":"1"}}`,
+			expectedMethod: "POST",
+			expectedPath:   "/upload",
+			expectedHeader: "1",
+		},
+		{
+			name:           "Verbose format (third-party client defense)",
+			payload:        `{"method":"DELETE","path":"/item/42","headers":{"x-custom":"2"}}`,
+			expectedMethod: "DELETE",
+			expectedPath:   "/item/42",
+			expectedHeader: "2",
+		},
+		{
+			name:           "Missing method defaults to GET",
+			payload:        `{"path":"/index.html"}`,
+			expectedMethod: "GET",
+			expectedPath:   "/index.html",
+			expectedHeader: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var probe struct {
+				Method     string            `json:"m"`
+				MethodAlt  string            `json:"method"`
+				Path       string            `json:"p"`
+				PathAlt    string            `json:"path"`
+				Headers    map[string]string `json:"h"`
+				HeadersAlt map[string]string `json:"headers"`
+				Protocols  []string          `json:"protocols"`
+			}
+			if err := json.Unmarshal([]byte(tc.payload), &probe); err != nil {
+				t.Fatalf("Unmarshal failed: %v", err)
+			}
+			if probe.Method == "" && probe.MethodAlt != "" {
+				probe.Method = probe.MethodAlt
+			}
+			if probe.Method == "" {
+				probe.Method = "GET"
+			}
+			if probe.Path == "" && probe.PathAlt != "" {
+				probe.Path = probe.PathAlt
+			}
+			if probe.Headers == nil && probe.HeadersAlt != nil {
+				probe.Headers = probe.HeadersAlt
+			}
+
+			if probe.Method != tc.expectedMethod {
+				t.Errorf("Method mismatch: got %q, want %q", probe.Method, tc.expectedMethod)
+			}
+			if probe.Path != tc.expectedPath {
+				t.Errorf("Path mismatch: got %q, want %q", probe.Path, tc.expectedPath)
+			}
+			if tc.expectedHeader != "" && probe.Headers["x-custom"] != tc.expectedHeader {
+				t.Errorf("Header mismatch: got %q, want %q", probe.Headers["x-custom"], tc.expectedHeader)
+			}
+		})
 	}
 }
