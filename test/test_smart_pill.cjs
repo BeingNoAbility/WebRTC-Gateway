@@ -54,7 +54,16 @@ assert(!portalTs.includes('setupGlobalShortcuts'),
   '[CRITICAL] setupGlobalShortcuts must be eliminated to respect KISS principle');
 console.log('✔ [PASS] Verified Zero Keyboard Interception (100% pristine keystroke passthrough for Vim, SSH, and web terminals)');
 
-// 6. Test defensive parsing logic via simulated unit tests
+// 6. Verify dedicated button click handling and anti-capture isolation
+assert(portalTs.includes("btnCollapse.addEventListener('click'") && portalTs.includes('this.setPillCollapsed(true)'),
+  'Collapse button must have dedicated click listener invoking setPillCollapsed(true)');
+assert(portalTs.includes("btnGear.addEventListener('click'") && portalTs.includes('this.openSettingsModal()'),
+  'Gear button must have dedicated click listener invoking openSettingsModal()');
+assert(portalTs.includes("target.closest('#pillCollapseBtn') || target.closest('#pillGear')"),
+  'pointerdown must bypass drag capture on interactive buttons (#pillCollapseBtn, #pillGear)');
+console.log('✔ [PASS] Verified dedicated button click handlers & anti-capture event isolation');
+
+// 7. Test defensive parsing logic via simulated unit tests
 function parsePillPos(raw, windowHeight = 1080) {
   let side = 'right';
   let topRatio = 0.92;

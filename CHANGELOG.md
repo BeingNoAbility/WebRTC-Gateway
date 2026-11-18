@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v2.0.6] - 2026-11-18
+
+### Fixed & UX
+- **HUD Smart Pill Button Event Isolation & Pointer Capture Conflict Resolution**:
+  - Fixed a critical event hijacking issue where `setPointerCapture` on the parent floating pill caused the browser to redirect all click targets to `#p2pPill`, rendering the collapse arrow (`#pillCollapseBtn`) and settings gear (`#pillGear`) inoperative and mistakenly opening the Diagnostic HUD modal instead.
+  - Added dedicated `pointerdown` and `click` listeners with `e.stopPropagation()` on `#pillCollapseBtn`, `#pillGear`, and `#pillCollapsedContent`.
+  - Added target guard in `pill.onpointerdown` (`target.closest('#pillCollapseBtn') || target.closest('#pillGear')`) to bypass drag initiation on interactive buttons.
+  - Expanded automated test `test/test_smart_pill.cjs` to enforce button click handler presence and anti-capture isolation.
+
 ## [v2.0.5] - 2026-11-18
 
 ### Fixed & Protocol Robustness

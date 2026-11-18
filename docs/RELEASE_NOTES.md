@@ -1,5 +1,17 @@
 # WebRTC Gateway Release Notes
 
+## [v2.0.6] - 2026-11-18
+
+### ⚡ 悬浮指示器按钮事件隔离与指针捕获冲突热修复 (HUD Smart Pill Anti-Capture Event Isolation Hotfix)
+
+本版本为 **v2.0.6 交互冲突热修复补丁 (Hotfix Release)**，紧急修复了 `v2.0.5` 中因 W3C `setPointerCapture` 事件劫持导致的悬浮胶囊交互失效缺陷：
+
+- **指针捕获事件劫持根治**：
+  - 在移动与拖拽加固机制中，原先在 `pointerdown` 阶段对父级容器 `#p2pPill` 施加了 `setPointerCapture`，导致现代浏览器将后续所有子元素点击事件的目标（`e.target`）强行改写为父容器自身；
+  - 导致折叠按钮（`#pillCollapseBtn`）与连接设置按钮（`#pillGear`）的点击命中判定失败，误穿透至底层打开 Diagnostic HUD 诊断面板，无法将胶囊折叠为 28px 小圆点；
+  - 现已为折叠按钮、齿轮按钮与折叠圆点容器注入独立的 `pointerdown` 与 `click` 阻断监听器（`stopPropagation`），并在父级拖拽前置判断中增加了子按钮排他门禁，彻底恢复了**【一键收起为小圆点】**与**【打开连接设置】**的即时响应；
+  - 同步扩充 [test/test_smart_pill.cjs](file:///test/test_smart_pill.cjs) 自动化回归门禁，确保未来迭代零回归。
+
 ## [v2.0.5] - 2026-11-18
 
 ### 🛡️ RFC 3986 路径归一化、浏览器语言透传、Smart Pill 2.1 交互轻量化与隐私深度脱敏 (Synology DSM Socket.IO Fix, SW Accept-Language Passthrough, Smart Pill 2.1 & Privacy Scrubbing)

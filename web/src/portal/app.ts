@@ -1562,19 +1562,19 @@ class PortalApp {
 
     pill.innerHTML = `
       <div id="pillExpandedContent" style="display: flex; align-items: center; gap: 8px; white-space: nowrap;">
-        <span id="pillCollapseBtn" style="cursor: pointer; opacity: 0.6; font-size: 11px; padding: 2px 4px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; transition: opacity 0.2s, background 0.2s;" title="收起为小圆点 (Collapse to Mini Dot)">▶</span>
+        <span id="pillCollapseBtn" style="cursor: pointer; opacity: 0.7; font-size: 11px; padding: 3px 6px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; transition: opacity 0.2s, background 0.2s; position: relative; z-index: 2;" title="收起为小圆点 (Collapse to Mini Dot)">▶</span>
         <span id="pillModeBadge" style="display:inline-flex; align-items:center; gap:3px; font-weight:700; padding:2px 7px; border-radius:10px; font-size:11px; background:#238636; color:#ffffff; letter-spacing:0.5px;">⚡ P2P</span>
         <span id="pillNode" style="font-weight:500; font-size:12px; max-width:120px; overflow:hidden; text-overflow:ellipsis;" title="Click to open WebRTC HUD">P2P: ${this.escapeHtml(this.peerId)}</span>
         <span id="pillRtt" style="color:#58a6ff; font-family:monospace; font-size:12px;">-- ms</span>
         <span id="pillSpeed" style="color:#8b949e; font-size:11px; font-family:monospace;">↓ 0 KB/s</span>
-        <span id="pillGear" style="cursor:pointer; opacity:0.75; font-size:13px; margin-left:2px; padding: 2px;" title="Connection Settings">⚙</span>
+        <span id="pillGear" style="cursor:pointer; opacity:0.75; font-size:13px; margin-left:2px; padding: 3px 5px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; position: relative; z-index: 2;" title="Connection Settings">⚙</span>
       </div>
-      <div id="pillCollapsedContent" style="display: none; width: 100%; height: 100%; align-items: center; justify-content: center; position: relative;">
-        <span id="pillDot" style="display: inline-flex; align-items: center; justify-content: center; font-size: 13px;" title="WebRTC 状态指示 - 点击展开">⚡</span>
+      <div id="pillCollapsedContent" style="display: none; width: 100%; height: 100%; align-items: center; justify-content: center; position: relative; cursor: pointer;">
+        <span id="pillDot" style="display: inline-flex; align-items: center; justify-content: center; font-size: 13px; pointer-events: none;" title="WebRTC 状态指示 - 点击展开">⚡</span>
       </div>
     `;
 
-    // Hover styling on buttons
+    // Hover styling & click handlers on buttons
     const btnCollapse = pill.querySelector('#pillCollapseBtn') as HTMLElement;
     if (btnCollapse) {
       btnCollapse.addEventListener('mouseenter', () => {
@@ -1582,8 +1582,17 @@ class PortalApp {
         btnCollapse.style.background = 'rgba(255, 255, 255, 0.12)';
       });
       btnCollapse.addEventListener('mouseleave', () => {
-        btnCollapse.style.opacity = '0.6';
+        btnCollapse.style.opacity = '0.7';
         btnCollapse.style.background = 'transparent';
+      });
+      // CRITICAL: Stop pointerdown from bubbling to pill so pill never initiates drag or captures pointer
+      btnCollapse.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+      });
+      btnCollapse.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        this.setPillCollapsed(true);
       });
     }
 
@@ -1591,9 +1600,31 @@ class PortalApp {
     if (btnGear) {
       btnGear.addEventListener('mouseenter', () => {
         btnGear.style.opacity = '1';
+        btnGear.style.background = 'rgba(255, 255, 255, 0.12)';
       });
       btnGear.addEventListener('mouseleave', () => {
         btnGear.style.opacity = '0.75';
+        btnGear.style.background = 'transparent';
+      });
+      // CRITICAL: Stop pointerdown from bubbling to pill so pill never initiates drag or captures pointer
+      btnGear.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+      });
+      btnGear.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        this.openSettingsModal();
+      });
+    }
+
+    // Collapsed dot container click handler
+    const colContent = pill.querySelector('#pillCollapsedContent') as HTMLElement;
+    if (colContent) {
+      colContent.addEventListener('click', (e) => {
+        if (justDragged) return;
+        e.stopPropagation();
+        e.preventDefault();
+        this.setPillCollapsed(false);
       });
     }
 
@@ -1608,6 +1639,12 @@ class PortalApp {
 
     pill.addEventListener('pointerdown', (e: PointerEvent) => {
       if (e.button !== 0) return;
+      const target = e.target as HTMLElement;
+      // Do not initiate drag or capture pointer on interactive child buttons
+      if (target && (target.closest('#pillCollapseBtn') || target.closest('#pillGear'))) {
+        return;
+      }
+
       isPointerDown = true;
       isDragging = false;
       startX = e.clientX;
@@ -1703,7 +1740,7 @@ class PortalApp {
         }
 
         // If clicked on collapsed dot -> expand
-        if (pill.classList.contains('collapsed')) {
+        if (pill.classList.contains('collapsed') || (target && target.closest('#pillCollapsedContent'))) {
           e.stopPropagation();
           e.preventDefault();
           this.setPillCollapsed(false);
