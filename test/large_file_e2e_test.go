@@ -19,7 +19,7 @@ import (
 	"webrtc-gateway/pkg/signaling"
 )
 
-func TestPhase4Large100MBStreamingAndBackpressure(t *testing.T) {
+func TestPhase4LargeStreamingAndBackpressure(t *testing.T) {
 	// 1. Build and run Mock Service internally (via httptest.Server)
 	mockBackend := startMockBackendServer()
 	defer mockBackend.Close()
@@ -108,7 +108,7 @@ func TestPhase4Large100MBStreamingAndBackpressure(t *testing.T) {
 
 	select {
 	case <-dcOpenCh:
-		t.Log("WebRTC DataChannel connected for 100MB stream test!")
+		t.Log("WebRTC DataChannel connected for streaming and backpressure test!")
 	case <-time.After(5 * time.Second):
 		t.Fatal("Timeout waiting for DataChannel")
 	}
@@ -119,7 +119,7 @@ func TestPhase4Large100MBStreamingAndBackpressure(t *testing.T) {
 		_ = clientMux.HandleIncomingMessage(msg.Data)
 	})
 
-	// 5. Open stream and request 100MB download
+	// 5. Open stream and request chunked streaming download (1MB)
 	stream, err := clientMux.OpenStream()
 	if err != nil {
 		t.Fatalf("OpenStream error: %v", err)
@@ -128,7 +128,7 @@ func TestPhase4Large100MBStreamingAndBackpressure(t *testing.T) {
 
 	reqMeta := proxy.RequestMetadata{
 		Method: "GET",
-		Path:   "/download/stream", // Uses 1MB in mockBackend, let's verify multi-megabyte stream
+		Path:   "/download/stream", // 1MB mock stream (32 chunks * 32KB)
 	}
 	raw, _ := json.Marshal(reqMeta)
 	_ = stream.WriteHeaders(raw)

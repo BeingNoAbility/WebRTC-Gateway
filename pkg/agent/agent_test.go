@@ -529,3 +529,57 @@ func TestAgent_StreamProbe_MethodAndFieldTolerance(t *testing.T) {
 		})
 	}
 }
+
+func TestAgent_PendingICECandidates_BufferedAndFlushed(t *testing.T) {
+	ag := New("test-agent-ice", "ws://127.0.0.1:8888/ws", "", "", "http://127.0.0.1:8080")
+	defer ag.Close()
+
+	sessionID := "sess-early-ice"
+	earlyCandidate := &webrtc.ICECandidateInit{
+		Candidate: "candidate:1 1 UDP 2130706431 192.168.1.100 50000 typ host",
+	}
+
+	// 1. Candidate arrives before Offer
+	ag.handleRemoteCandidate(sessionID, earlyCandidate)
+
+	ag.connMu.Lock()
+	bufferedCount := len(ag.pendingCandidates[sessionID])
+	ag.connMu.Unlock()
+
+	if bufferedCount != 1 {
+		t.Fatalf("Expected 1 candidate to be buffered in pendingCandidates, got %d", bufferedCount)
+	}
+
+	// 2. Client creates PeerConnection with DataChannel to generate a valid Offer
+	clientPC, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("Failed to create client PC: %v", err)
+	}
+	defer clientPC.Close()
+
+	_, err = clientPC.CreateDataChannel("p2pmux", nil)
+	if err != nil {
+		t.Fatalf("Failed to create DataChannel: %v", err)
+	}
+
+	offer, err := clientPC.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("Failed to create Offer: %v", err)
+	}
+	_ = clientPC.SetLocalDescription(offer)
+
+	// 3. Process Offer: SetRemoteDescription executes, and buffered candidate must be flushed
+	ag.handleOffer(sessionID, "", &offer, "", false)
+
+	ag.connMu.Lock()
+	bufferedAfter := len(ag.pendingCandidates[sessionID])
+	pc := ag.activeConns[sessionID]
+	ag.connMu.Unlock()
+
+	if bufferedAfter != 0 {
+		t.Errorf("Expected pendingCandidates to be flushed (length 0), got %d", bufferedAfter)
+	}
+	if pc == nil {
+		t.Errorf("Expected active PeerConnection to be registered for session %s", sessionID)
+	}
+}

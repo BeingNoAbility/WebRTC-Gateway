@@ -247,6 +247,11 @@ func (s *Stream) Reset() error {
 	s.cancel()
 	s.mu.Unlock()
 
+	// Wake up any goroutines waiting on mux backpressure
+	s.mux.bpMu.Lock()
+	s.mux.bpCond.Broadcast()
+	s.mux.bpMu.Unlock()
+
 	frame := protocol.NewFrame(s.id, protocol.TypeRstStream, protocol.FlagNone, nil)
 	_ = s.mux.writeFrame(frame)
 	s.mux.removeStream(s.id)
@@ -271,6 +276,11 @@ func (s *Stream) pushInboundData(payload []byte, fin bool) {
 			s.err = errors.New("stream inbound buffer exceeded limit")
 			s.cancel()
 			s.cond.Broadcast()
+
+			s.mux.bpMu.Lock()
+			s.mux.bpCond.Broadcast()
+			s.mux.bpMu.Unlock()
+
 			go func() {
 				rstFrame := protocol.NewFrame(s.id, protocol.TypeRstStream, protocol.FlagNone, nil)
 				_ = s.mux.writeFrame(rstFrame)
@@ -318,6 +328,10 @@ func (s *Stream) markRemoteReset() {
 	s.err = ErrStreamReset
 	s.cancel()
 	s.cond.Broadcast()
+
+	s.mux.bpMu.Lock()
+	s.mux.bpCond.Broadcast()
+	s.mux.bpMu.Unlock()
 }
 
 func (s *Stream) checkFullClose() {

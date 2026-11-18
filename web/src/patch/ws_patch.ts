@@ -366,10 +366,11 @@
             } else {
               currentPath = window.location.pathname + window.location.search + window.location.hash;
             }
+            const targetOrigin = (globalScope.__P2P_PORTAL_ORIGIN__ as string) || (typeof window !== 'undefined' ? window.location.origin : '*');
             target.postMessage({
               type: 'P2P_ROUTE_SYNC',
               path: currentPath,
-            }, '*');
+            }, targetOrigin);
           }
         } catch {}
       };
@@ -468,7 +469,8 @@
             try {
               const target = realPortalWindow || (typeof window !== 'undefined' && window.parent && window.parent !== window ? window.parent : null);
               if (target) {
-                target.postMessage({ type: 'TUNNEL_COOKIE_UPDATE', cookie: rewrittenVal }, '*');
+                const targetOrigin = (globalScope.__P2P_PORTAL_ORIGIN__ as string) || (typeof window !== 'undefined' ? window.location.origin : '*');
+                target.postMessage({ type: 'TUNNEL_COOKIE_UPDATE', cookie: rewrittenVal }, targetOrigin);
               }
             } catch {}
           },
@@ -838,13 +840,14 @@
           : null);
 
         if (targetWindow) {
+          const targetOrigin = (globalScope.__P2P_PORTAL_ORIGIN__ as string) || (typeof window !== 'undefined' ? window.location.origin : '*');
           targetWindow.postMessage(
             {
               type: 'TUNNEL_WS_CONNECT',
               path,
               protocols: requestedProtocols,
             },
-            '*',
+            targetOrigin,
             [this.channel.port2]
           );
         }

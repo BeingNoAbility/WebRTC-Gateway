@@ -562,3 +562,118 @@ func TestStreamIDWraparoundAndGhostProtection(t *testing.T) {
 		t.Fatalf("Stream ID mismatch: expected %d, got %d", s1.ID(), accepted.ID())
 	}
 }
+
+// 9. Test that write goroutines blocked on backpressure immediately unblock and abort when the stream is reset
+func TestMux_BackpressureUnblocksOnReset(t *testing.T) {
+	t1, t2 := newMockPair()
+	defer t1.Close()
+	defer t2.Close()
+
+	clientMux := NewMux(t1, true)
+	agentMux := NewMux(t2, false)
+
+	t1.SetMessageHandler(func(data []byte) { _ = clientMux.HandleIncomingMessage(data) })
+	t2.SetMessageHandler(func(data []byte) { _ = agentMux.HandleIncomingMessage(data) })
+
+	defer clientMux.Close()
+	defer agentMux.Close()
+
+	// Simulate high buffered amount (> 256KB) that never drains
+	t1.mu.Lock()
+	t1.bufferedAmount = DefaultBufferedHighWaterMark + 64*1024
+	t1.mu.Unlock()
+
+	s, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+
+	writeErrCh := make(chan error, 1)
+	go func() {
+		_, writeErr := s.Write([]byte("large payload waiting for backpressure drain"))
+		writeErrCh <- writeErr
+	}()
+
+	// Ensure the write is actually blocked waiting on bpCond
+	select {
+	case <-writeErrCh:
+		t.Fatalf("Write should have been blocked by backpressure!")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: blocked on m.bpCond.Wait()
+	}
+
+	// Reset the stream
+	if err := s.Reset(); err != nil {
+		t.Fatalf("Reset failed: %v", err)
+	}
+
+	// Write goroutine MUST immediately unblock without buffer draining!
+	select {
+	case err := <-writeErrCh:
+		if err == nil {
+			t.Errorf("Expected write to fail with error after Reset, got nil")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Deadlock! Write goroutine hung forever on bpCond.Wait() after Reset()")
+	}
+}
+
+// 10. Test that write goroutines blocked on backpressure unblock when remote peer sends RST
+func TestMux_BackpressureUnblocksOnRemoteReset(t *testing.T) {
+	t1, t2 := newMockPair()
+	defer t1.Close()
+	defer t2.Close()
+
+	clientMux := NewMux(t1, true)
+	agentMux := NewMux(t2, false)
+
+	t1.SetMessageHandler(func(data []byte) { _ = clientMux.HandleIncomingMessage(data) })
+	t2.SetMessageHandler(func(data []byte) { _ = agentMux.HandleIncomingMessage(data) })
+
+	defer clientMux.Close()
+	defer agentMux.Close()
+
+	s, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+
+	// Trigger accept
+	_, _ = s.Write([]byte("init"))
+	srvStream, err := agentMux.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatalf("AcceptStream failed: %v", err)
+	}
+
+	// Simulate high buffered amount on agent side
+	t2.mu.Lock()
+	t2.bufferedAmount = DefaultBufferedHighWaterMark + 64*1024
+	t2.mu.Unlock()
+
+	srvWriteDone := make(chan error, 1)
+	go func() {
+		_, writeErr := srvStream.Write([]byte("large payload waiting for backpressure"))
+		srvWriteDone <- writeErr
+	}()
+
+	select {
+	case <-srvWriteDone:
+		t.Fatalf("Server write should be blocked on backpressure")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Client sends Reset
+	if err := s.Reset(); err != nil {
+		t.Fatalf("Client Reset failed: %v", err)
+	}
+
+	// Server write goroutine MUST unblock
+	select {
+	case err := <-srvWriteDone:
+		if err == nil {
+			t.Errorf("Expected write to fail on remote reset, got nil")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Deadlock! Server write hung forever on remote Reset()")
+	}
+}

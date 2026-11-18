@@ -447,7 +447,7 @@ func (p *HTTPProxy) HandleStreamWithMeta(sessionID, clientIP string, stream *mux
 	}
 
 	// Standardize Accept-Encoding to gzip for general text assets, but preserve raw binary streaming for Range/media requests
-	if req.Header.Get("Range") != "" || strings.Contains(destURL.Path, ".m4s") || strings.Contains(destURL.Path, "/upgcxcode/") {
+	if req.Header.Get("Range") != "" || isMediaStreamPath(destURL.Path) {
 		req.Header.Del("Accept-Encoding")
 	} else {
 		req.Header.Set("Accept-Encoding", "gzip")
@@ -642,4 +642,16 @@ func (p *HTTPProxy) sendErrorResponse(stream *mux.Stream, statusCode int, messag
 	metaJSON, _ := json.Marshal(respMeta)
 	_ = stream.WriteHeaders(metaJSON)
 	_, _ = stream.Write([]byte(message))
+}
+
+// isMediaStreamPath checks if the requested path corresponds to segmented video/audio streaming chunks
+func isMediaStreamPath(path string) bool {
+	lower := strings.ToLower(path)
+	mediaExts := []string{".m4s", ".ts", ".mp4", ".m4v", ".webm", ".mkv", ".avi", ".mov", ".flv", ".mp3", ".wav", ".flac", ".aac", ".ogg", ".opus"}
+	for _, ext := range mediaExts {
+		if strings.HasSuffix(lower, ext) || strings.Contains(lower, ext+"?") || strings.Contains(lower, ext+"/") {
+			return true
+		}
+	}
+	return false
 }

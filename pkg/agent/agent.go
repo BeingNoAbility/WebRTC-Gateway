@@ -49,9 +49,10 @@ type Agent struct {
 	wsProxy       *proxy.WSProxy
 	fileProxy     *proxy.FileProxy
 
-	webrtcConfig     webrtc.Configuration
-	activeConns      map[string]*webrtc.PeerConnection
-	activeMuxes      map[string]*mux.Mux
+	webrtcConfig      webrtc.Configuration
+	activeConns       map[string]*webrtc.PeerConnection
+	pendingCandidates map[string][]webrtc.ICECandidateInit
+	activeMuxes       map[string]*mux.Mux
 	clientIPs        map[string]string
 	connMu           sync.Mutex
 	pendingTeardowns map[string]*time.Timer
@@ -112,6 +113,7 @@ func New(nodeID, signalURL, signalSecret, accessSecret, target string) *Agent {
 			},
 		},
 		activeConns:          make(map[string]*webrtc.PeerConnection),
+		pendingCandidates:    make(map[string][]webrtc.ICECandidateInit),
 		activeMuxes:          make(map[string]*mux.Mux),
 		clientIPs:            make(map[string]string),
 		pendingTeardowns:     make(map[string]*time.Timer),
@@ -441,6 +443,7 @@ func (a *Agent) teardownSession(sessionID, cookieSession string, pc *webrtc.Peer
 	if !exists || currPC == pc || pc == nil {
 		delete(a.activeConns, sessionID)
 		delete(a.clientIPs, sessionID)
+		delete(a.pendingCandidates, sessionID)
 	}
 	atomic.StoreInt64(&a.activePeers, int64(len(a.activeConns)))
 	a.connMu.Unlock()
@@ -476,6 +479,7 @@ func (a *Agent) Close() {
 		delete(a.activeConns, id)
 	}
 	a.clientIPs = make(map[string]string)
+	a.pendingCandidates = make(map[string][]webrtc.ICECandidateInit)
 	atomic.StoreInt64(&a.activePeers, 0)
 	a.connMu.Unlock()
 }
@@ -691,6 +695,16 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 		if err := existingPC.SetRemoteDescription(*sdp); err != nil {
 			log.Printf("[Agent] [Session %s] ICE Restart SetRemoteDescription error: %v, falling back to new PC", sessionID, err)
 		} else {
+			a.connMu.Lock()
+			pending := a.pendingCandidates[sessionID]
+			delete(a.pendingCandidates, sessionID)
+			a.connMu.Unlock()
+			for _, cand := range pending {
+				if err := existingPC.AddICECandidate(cand); err != nil {
+					log.Printf("[Agent] [Session %s] Buffered ICE Restart AddICECandidate error: %v", sessionID, err)
+				}
+			}
+
 			answer, err := existingPC.CreateAnswer(nil)
 			if err != nil {
 				log.Printf("[Agent] [Session %s] ICE Restart CreateAnswer error: %v", sessionID, err)
@@ -818,7 +832,15 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 		a.clientIPs[sessionID] = clientIP
 	}
 	atomic.StoreInt64(&a.activePeers, int64(len(a.activeConns)))
+	pending := a.pendingCandidates[sessionID]
+	delete(a.pendingCandidates, sessionID)
 	a.connMu.Unlock()
+
+	for _, cand := range pending {
+		if err := pc.AddICECandidate(cand); err != nil {
+			log.Printf("[Agent] Buffered AddICECandidate error: %v", err)
+		}
+	}
 
 	// Create Answer
 	answer, err := pc.CreateAnswer(nil)
@@ -849,29 +871,16 @@ func (a *Agent) handleRemoteCandidate(sessionID string, candidate *webrtc.ICECan
 
 	a.connMu.Lock()
 	pc, exists := a.activeConns[sessionID]
-	a.connMu.Unlock()
-
-	if !exists || pc == nil {
-		// Buffered retry for trickle ICE candidates arriving before handshake completes
-		go func() {
-			for i := 0; i < 10; i++ {
-				time.Sleep(50 * time.Millisecond)
-				a.connMu.Lock()
-				p, ex := a.activeConns[sessionID]
-				a.connMu.Unlock()
-				if ex && p != nil && p.RemoteDescription() != nil {
-					_ = p.AddICECandidate(*candidate)
-					return
-				}
-			}
-		}()
+	if !exists || pc == nil || pc.RemoteDescription() == nil {
+		// Buffered retry: store candidate in pendingCandidates until SetRemoteDescription completes
+		a.pendingCandidates[sessionID] = append(a.pendingCandidates[sessionID], *candidate)
+		a.connMu.Unlock()
 		return
 	}
+	a.connMu.Unlock()
 
-	if pc.RemoteDescription() != nil {
-		if err := pc.AddICECandidate(*candidate); err != nil {
-			log.Printf("[Agent] AddICECandidate error: %v", err)
-		}
+	if err := pc.AddICECandidate(*candidate); err != nil {
+		log.Printf("[Agent] AddICECandidate error: %v", err)
 	}
 }
 

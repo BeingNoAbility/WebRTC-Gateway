@@ -335,13 +335,16 @@ func (m *Mux) writeFrame(f *protocol.Frame) error {
 				return ErrMuxClosed
 			}
 
-			if s := m.getStream(f.StreamID); s != nil {
-				select {
-				case <-s.Context().Done():
-					m.bpMu.Unlock()
-					return s.Context().Err()
-				default:
-				}
+			s := m.getStream(f.StreamID)
+			if s == nil {
+				m.bpMu.Unlock()
+				return ErrStreamClosed
+			}
+			select {
+			case <-s.Context().Done():
+				m.bpMu.Unlock()
+				return s.Context().Err()
+			default:
 			}
 
 			m.bpCond.Wait()
@@ -354,13 +357,16 @@ func (m *Mux) writeFrame(f *protocol.Frame) error {
 				return ErrMuxClosed
 			}
 
-			if s := m.getStream(f.StreamID); s != nil {
-				select {
-				case <-s.Context().Done():
-					m.bpMu.Unlock()
-					return s.Context().Err()
-				default:
-				}
+			s = m.getStream(f.StreamID)
+			if s == nil {
+				m.bpMu.Unlock()
+				return ErrStreamClosed
+			}
+			select {
+			case <-s.Context().Done():
+				m.bpMu.Unlock()
+				return s.Context().Err()
+			default:
 			}
 		}
 		m.bpMu.Unlock()

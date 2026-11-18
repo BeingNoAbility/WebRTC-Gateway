@@ -126,6 +126,8 @@ class PortalApp {
     // Listen for route synchronization from inner iframe SPA
     if (typeof window !== 'undefined') {
       window.addEventListener('message', (e) => {
+        if (e.origin !== window.location.origin) return;
+        if (this.appFrame && e.source !== this.appFrame.contentWindow) return;
         if (e.data && e.data.type === 'P2P_ROUTE_SYNC') {
           const rawPath = e.data.path;
           if (
@@ -2418,6 +2420,12 @@ class PortalApp {
       h: msg.headers,
     });
 
+    // P0 Defense: If request has no body (GET/HEAD/OPTIONS), close write half immediately to send FIN frame.
+    // This ensures both client and server can reach bothClosed state upon response completion and clean up stream memory.
+    if (!msg.hasBody) {
+      stream.close();
+    }
+
     // Handle upload body from Service Worker with serialized write queue
     let writeQueue: Promise<void> = Promise.resolve();
     port.onmessage = (e: MessageEvent) => {
@@ -2538,6 +2546,10 @@ class PortalApp {
   // Listen to messages from child iframes (e.g. WebSocket Monkey Patch & Cookie sync)
   private listenChildMessages() {
     window.addEventListener('message', (event) => {
+      // Security hardening: origin must match and sender must be internal appFrame
+      if (event.origin !== window.location.origin) return;
+      if (this.appFrame && event.source !== this.appFrame.contentWindow) return;
+
       const msg = event.data;
       if (!msg) return;
 
