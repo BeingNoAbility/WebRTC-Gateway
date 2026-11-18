@@ -18,9 +18,9 @@
 
 ---
 
-## 💡 What is Zero-Client P2P WebRTC Gateway?
+## What is Zero-Client P2P WebRTC Gateway?
 
-This project introduces a revolutionary intranet penetration and remote access architecture: **"Zero client software, zero browser extensions, zero privileged root CA certificates, and zero network configuration on the visitor's side."**
+This project introduces a **zero-client browser-based WebRTC penetration architecture**: **"Zero client software, zero browser extensions, zero privileged root CA certificates, and zero network configuration on the visitor's side."**
 
 In traditional penetration solutions (such as FRP, NPS, Ngrok, or Cloudflare Tunnel), all private intranet traffic must be relayed through public relay servers. This architecture is constrained by expensive and narrow bandwidth quotas on relay VPS instances, creates single-point bandwidth bottlenecks, and raises significant privacy concerns. On the other hand, VPN solutions like Tailscale, WireGuard, or ZeroTier mandate that visitors install dedicated desktop/mobile client applications or system-level TUN/TAP virtual network drivers.
 
@@ -31,44 +31,44 @@ This project is built upon **WebRTC RTCDataChannel (SCTP) + In-Browser Service W
 
 ---
 
-## 📑 Table of Contents
+## Table of Contents
 
-- [🌟 Key Features](#-key-features)
-- [📖 User Guide](#-user-guide)
+- [Key Features](#key-features)
+- [User Guide](#user-guide)
   - [1. 30-Second Quickstart](#1-30-second-quickstart)
   - [2. Classic Intranet Application Practices](#2-classic-intranet-application-practices)
-  - [3. Multi-Node & Subdomain Intelligent Routing](#3-multi-node--subdomain-intelligent-routing)
-  - [4. Web Console & Node Settings Modal](#4-web-console--node-settings-modal)
-  - [5. Agent Command-Line Flags & Environment Variables](#5-agent-command-line-flags--environment-variables)
-  - [6. Integrated Signal Server CLI & Environment Variables](#6-integrated-signal-server-cli--environment-variables)
-  - [7. Security & Access Control](#7-security--access-control)
-- [🛠️ Production Deployment Guide (Self-Hosting & Operations)](#️-production-deployment-guide-self-hosting--operations)
+  - [3. Multi-Node & Subdomain Intelligent Routing](#3-multi-node-subdomain-intelligent-routing)
+  - [4. Web Console & Node Settings Modal](#4-web-console-node-settings-modal)
+  - [5. Agent Command-Line Flags & Environment Variables](#5-agent-command-line-flags-environment-variables)
+  - [6. Integrated Signal Server CLI & Environment Variables](#6-integrated-signal-server-cli-environment-variables)
+  - [7. Security & Access Control](#7-security-access-control)
+- [Production Deployment Guide (Self-Hosting & Operations)](#production-deployment-guide-self-hosting-operations)
   - [Option A: Cloudflare Workers Unified Edge Deployment (Zero Server Cost)](#option-a-cloudflare-workers-unified-edge-deployment-zero-server-cost)
-  - [Option B: Self-Hosted Linux / Windows Standalone Server (Single Binary)](#option-b-self-hosted-linux--windows-standalone-server-single-binary)
-  - [Option C: Docker & Docker Compose Containerized Deployment](#option-c-docker--docker-compose-containerized-deployment)
-- [💻 Developer Guide](#-developer-guide)
-  - [1. System Architecture & End-to-End Data Flow](#1-system-architecture--end-to-end-data-flow)
+  - [Option B: Self-Hosted Linux / Windows Standalone Server (Single Binary)](#option-b-self-hosted-linux-windows-standalone-server-single-binary)
+  - [Option C: Docker & Docker Compose Containerized Deployment](#option-c-docker-docker-compose-containerized-deployment)
+- [Developer Guide](#developer-guide)
+  - [1. System Architecture & End-to-End Data Flow](#1-system-architecture-end-to-end-data-flow)
   - [2. P2PMux v1 Binary Streaming Multiplexing Protocol Specification](#2-p2pmux-v1-binary-streaming-multiplexing-protocol-specification)
-  - [3. In-Browser DOM Virtualization & Service Worker Core Mechanisms](#3-in-browser-dom-virtualization--service-worker-core-mechanisms)
+  - [3. In-Browser DOM Virtualization & Service Worker Core Mechanisms](#3-in-browser-dom-virtualization-service-worker-core-mechanisms)
   - [4. Project Repository Structure Overview](#4-project-repository-structure-overview)
-  - [5. Local Source Build & Automated Test Suite](#5-local-source-build--automated-test-suite)
-- [📄 License](#-license)
+  - [5. Local Source Build & Automated Test Suite](#5-local-source-build-automated-test-suite)
+- [License](#license)
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
-- 🚀 **True Zero-Client Experience**: Visitors only need a modern browser on a desktop or phone. Open the URL to access private intranet services immediately.
-- ⚡ **P2P Direct Line Speed**: Powered by WebRTC ICE/STUN NAT traversal. Enjoy full upstream speeds of home gigabit broadband (verified LAN RTT of 1~3ms; cross-ISP P2P utilizes full broadband uplink without third-party throttling).
-- 🔄 **WebRTC Standard ICE Restart (Mobile Roaming Self-Healing)**: When devices switch networks (e.g. Wi-Fi to 5G cellular, AP roaming, or elevator signal restoration), the client automatically reconnects the signaling socket and negotiates an in-place ICE Restart. Streaming media, WebSockets, and page sessions continue without reloading.
-- 🔗 **Stateless HMAC-SHA256 Time-Limited Share Links**: Pure mathematical zero-database authorization. Generate temporary shareable links (`#nodeId?exp=xxx&sign=yyy`) with 1-click in the Web UI or CLI. Mathematically expires when elapsed without leaking master credentials.
-- 📊 **WebRTC HUD Real-time Diagnostic Dashboard**: Floating status pill dynamically displays `⚡ P2P Direct` vs `🛡️ TURN Relay` connection status. 1-click opens an interactive diagnostics HUD displaying real-time RTT, downlink/uplink transfer rates, packet loss, and candidate IPs with on-demand ICE Restart testing.
-- 🛡️ **Production Capacity Governance & Anti-DoS**: Agent features a semaphore-guarded capacity limit (`-max-streams`, default 512) that gracefully returns 503 to protect NAS memory; signaling server enforces per-IP concurrent connection quotas (`-max-ip-conns`), message rate limits, and brute-force lockouts.
-- 🛡️ **Authoritative Client IP & Enterprise WAF Integration**: The Agent reverse proxy injects the authoritative client IP into standard `X-Forwarded-For` and `X-Real-IP` headers. Upstream WAFs (SafeLine, ModSecurity, Cloudflare WAF, Nginx `real_ip`) can accurately perform per-IP rate limiting, blacklisting, and GeoIP auditing without mistaking all traffic for `127.0.0.1`. Features strict anti-spoofing overwrite and mobile roaming in-place ICE Restart IP updates.
-- 📈 **Prometheus Metrics Out-of-the-Box**: Signaling server serves `/metrics`; Agent strictly adheres to the pure outbound daemon principle and supports optional opt-in `-metrics-addr` to export peer counts, active streams, traffic bytes, and backpressure rejections.
-- 🔒 **End-to-End Native Encryption**: Transport layer enforces DTLS-SRTP asymmetric negotiation and strong cryptography. The signaling broker only routes metadata; relay nodes cannot decrypt or inspect application traffic.
-- 🌐 **Multi-Node & Subdomain Awareness**: Run multiple machines and services simultaneously. Route seamlessly via `<nodeId>.p2p.domain.com`, `#nodeId`, or interactive settings modal.
-- 🧰 **Transparent Web Protocol Stack Virtualization**:
+- **Zero-Client Architecture**: Visitors only need a modern browser on a desktop or mobile device. Open the URL to access private intranet services directly.
+- **Direct P2P Traversal**: Powered by standard WebRTC ICE/STUN NAT traversal. Direct P2P throughput is bounded by physical link bandwidth and SCTP congestion control without cloud relay throttling (verified LAN RTT of 1~3ms; cross-ISP P2P utilizes available physical uplink).
+- **WebRTC Standard ICE Restart (Mobile Roaming Self-Healing)**: When devices switch networks (e.g. Wi-Fi to 5G cellular, AP roaming, or signal restoration), the client automatically reconnects the signaling socket and negotiates an in-place ICE Restart. Streaming media, WebSockets, and page sessions continue without reloading.
+- **Stateless HMAC-SHA256 Time-Limited Share Links**: Pure mathematical zero-database authorization. Generate temporary shareable links (`#nodeId?exp=xxx&sign=yyy`) with 1-click in the Web UI or CLI. Mathematically expires when elapsed without leaking master credentials.
+- **Real-Time WebRTC Link Diagnostic HUD**: Floating status pill dynamically displays `P2P Direct` vs `TURN Relay` connection status. 1-click opens an interactive diagnostics HUD displaying real-time RTT, downlink/uplink transfer rates, packet loss, candidate pair topology, and on-demand ICE Restart testing.
+- **Production Capacity Governance & Anti-DoS**: Agent features a semaphore-guarded capacity limit (`-max-streams`, default 512) that gracefully returns 503 to protect NAS memory; signaling server enforces per-IP concurrent connection quotas (`-max-ip-conns`), message rate limits, and brute-force lockouts.
+- **Authoritative Client IP & Enterprise WAF Integration**: The Agent reverse proxy injects the authoritative client IP into standard `X-Forwarded-For` and `X-Real-IP` headers. Upstream WAFs (SafeLine, ModSecurity, Cloudflare WAF, Nginx `real_ip`) can accurately perform per-IP rate limiting, blacklisting, and GeoIP auditing without mistaking all traffic for `127.0.0.1`. Features strict anti-spoofing overwrite and mobile roaming in-place ICE Restart IP updates.
+- **Prometheus Metrics Out-of-the-Box**: Signaling server serves `/metrics`; Agent strictly adheres to the pure outbound daemon principle and supports optional opt-in `-metrics-addr` to export peer counts, active streams, traffic bytes, and backpressure rejections.
+- **End-to-End Transport Encryption**: Transport layer enforces standard WebRTC DTLS 1.2 / SRTP transport encryption (RFC 8831). The signaling broker only routes metadata; relay nodes cannot decrypt or inspect application traffic.
+- **Multi-Node & Subdomain Awareness**: Run multiple machines and services simultaneously. Route seamlessly via `<nodeId>.p2p.domain.com`, `#nodeId`, or interactive settings modal.
+- **Transparent Web Protocol Stack Virtualization**:
   - **HTTP/HTTPS**: Full method support (GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD), chunked streaming responses, and file downloads.
   - **HTTP 206 Partial Content**: Complete support for video/audio Range streaming; instant seeking and fast forwarding without waiting for full downloads.
   - **WebSocket Full-Duplex**: Built-in fragmentation and defragmentation across SCTP frames, supporting arbitrarily large payloads without frame drops.
@@ -79,7 +79,7 @@ This project is built upon **WebRTC RTCDataChannel (SCTP) + In-Browser Service W
 
 ---
 
-## 📖 User Guide
+## User Guide
 
 ### 1. 30-Second Quickstart
 
@@ -248,7 +248,7 @@ The Agent supports both command-line flags and environment variables:
 
 ---
 
-## 🛠️ Production Deployment Guide (Self-Hosting & Operations)
+## Production Deployment Guide (Self-Hosting & Operations)
 
 ### Option A: Cloudflare Workers Unified Edge Deployment (Zero Server Cost)
 
@@ -361,7 +361,7 @@ docker run --rm -e ACCESS_SECRET=your_visitor_password \
 
 ---
 
-## 💻 Developer Guide
+## Developer Guide
 
 ### 1. System Architecture & End-to-End Data Flow
 
@@ -559,7 +559,7 @@ node test/verify_features.cjs
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the [MIT License](LICENSE).
 Contributions, issues, and feature requests are welcome! If this project helped you, please give it a ⭐️ **Star**!

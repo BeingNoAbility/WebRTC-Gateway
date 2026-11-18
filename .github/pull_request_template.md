@@ -1,4 +1,4 @@
-## 📝 Pull Request 概述 (PR Overview)
+## Pull Request 概述 (PR Overview)
 <!-- 请简要描述此 PR 的改动背景、目的及解决的问题 -->
 <!-- Please briefly describe the purpose, context, and issue resolved by this PR -->
 
@@ -12,7 +12,7 @@
 
 ---
 
-## 🛡️ 架构审查与范式自检 (Systemic Invariants Check)
+## 架构审查与范式自检 (Systemic Invariants Check)
 > 涉及协议层、并发状态机、沙箱虚拟化或边界处理的改动，必须对照 [docs/REVIEW_GUIDELINES.md](file:///docs/REVIEW_GUIDELINES.md) 进行对抗性思维推演：
 
 - [ ] **是否引入了新架构范式（Paradigm Shift）？**
@@ -34,7 +34,7 @@
 
 ---
 
-## 🤖 自动化机器防线预检 (Machine Gate Self-Check)
+## 自动化机器防线预检 (Machine Gate Self-Check)
 在提交 PR 之前，请确认本地已通过以下机器门禁：
 - [ ] `npm --prefix web run typecheck` 通过（TypeScript 0 errors）
 - [ ] `npm --prefix web run build` 成功，且 `git diff --exit-code web/dist` 干净无差异

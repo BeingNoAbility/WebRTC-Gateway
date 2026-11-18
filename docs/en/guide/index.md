@@ -4,32 +4,32 @@ Welcome to the **Zero-Client P2P WebRTC Intranet Penetration Gateway** documenta
 
 ---
 
-## 🌟 Core Philosophy & Vision
+## Core Philosophy & Vision
 
-This project introduces a revolutionary intranet penetration and remote access architecture:
+This project introduces a zero-client browser-based WebRTC penetration architecture:
 
-- **100% Zero-Client in Visitor Browsers**: Visitors do not need to install software, install browser extensions, configure root CA certificates, or configure virtual network drivers.
-- **True P2P Direct Line Speed**: Powered by WebRTC ICE/STUN NAT traversal. Traffic is routed directly between visitor browsers and private servers without consuming relay bandwidth.
-- **End-to-End Native Encryption**: Transport layer enforces military-grade DTLS-SRTP encryption. The public signaling server only negotiates topologies and cannot inspect user data.
+- **Zero-Client in Visitor Browsers**: Visitors do not need to install software, install browser extensions, configure root CA certificates, or configure virtual network drivers.
+- **Direct P2P Traversal**: Powered by WebRTC ICE/STUN NAT traversal. Traffic is routed directly between visitor browsers and private servers without consuming relay bandwidth.
+- **End-to-End Transport Encryption**: Transport layer enforces standard DTLS 1.2 / SRTP transport encryption (RFC 8831). The public signaling server only negotiates topologies and cannot inspect user data.
 - **Full Transparent Web Protocol Stack**: HTTP/HTTPS, HTTP 206 Partial Content (video streaming seeking), WebSocket full-duplex, CookieJar isolation, and W3C upload progress virtualization out of the box.
 
 ---
 
-## 📚 Topics Navigation
+## Topics Navigation
 
 | Topic | Overview | Audience |
 | :--- | :--- | :--- |
-| **[📐 Architecture & Design](./architecture)** | P2PMux v1 binary framing protocol, Service Worker interception, DOM virtualization monkey patches, and isolated CookieJars. | Architects & Developers |
-| **[🚀 Production Deployment](./deployment)** | Cloudflare Workers edge deployment, single self-contained Go binaries, and Docker / Docker Compose orchestration. | DevOps & Self-Hosters |
-| **[⚙️ Agent Configuration](./agent-configuration)** | Complete CLI flags, environment variables, YAML configuration templates, and priority resolution. | All Users & NAS Admins |
-| **[📂 P2P File & Directory Server](./file-server)** | Zero-port in-memory file sharing, private AirDrop / Wormhole, and static directory hosting. | All Users & Collaborators |
-| **[🔒 Security & Access Control](./security)** | Dual-secret decoupling, HMAC-SHA256 expiring links, and authoritative client IP propagation. | Security & System Admins |
-| **[🌐 Browser Compatibility](./browser-compatibility)** | Tier 1 (Chrome, Edge, Firefox) & Tier 2 (Safari, WebKit) support details, background hibernation, and mobile recovery. | Frontend Engineers |
-| **[❓ Troubleshooting & FAQ](./troubleshooting)** | Symmetric NAT diagnosis, TURN relay setup, self-signed HTTPS certificates, and roaming ICE Restart. | Troubleshooting & Support |
+| **[Architecture & Design](./architecture)** | P2PMux v1 binary framing protocol, Service Worker interception, DOM virtualization monkey patches, and isolated CookieJars. | Architects & Developers |
+| **[Production Deployment](./deployment)** | Cloudflare Workers edge deployment, single self-contained Go binaries, and Docker / Docker Compose orchestration. | DevOps & Self-Hosters |
+| **[Agent Configuration](./agent-configuration)** | Complete CLI flags, environment variables, YAML configuration templates, and priority resolution. | All Users & NAS Admins |
+| **[P2P File & Directory Server](./file-server)** | Zero-port in-memory file sharing, private lightweight file delivery, and static directory hosting. | All Users & Collaborators |
+| **[Security & Access Control](./security)** | Dual-secret decoupling, HMAC-SHA256 expiring links, and authoritative client IP propagation. | Security & System Admins |
+| **[Browser Compatibility](./browser-compatibility)** | Tier 1 (Chrome, Edge, Firefox) & Tier 2 (Safari, WebKit) support details, background hibernation, and mobile recovery. | Frontend Engineers |
+| **[Troubleshooting & FAQ](./troubleshooting)** | Symmetric NAT diagnosis, TURN relay setup, self-signed HTTPS certificates, and roaming ICE Restart. | Troubleshooting & Support |
 
 ---
 
-## 🚀 30-Second Quickstart
+## 30-Second Quickstart
 
 ::: code-group
 

@@ -6,7 +6,7 @@
 
 ---
 
-## 🗺️ Seven Dimensions of Real-World Integration Testing
+## Seven Dimensions of Real-World Integration Testing
 
 ```mermaid
 flowchart TD
@@ -23,7 +23,7 @@ flowchart TD
 
 ---
 
-## 🛠️ Testbed Topology & Anonymization Conventions
+## Testbed Topology & Anonymization Conventions
 
 Before executing tests, establish a staging environment mirroring production topologies:
 
@@ -335,7 +335,7 @@ tc qdisc del dev eth0 root
 
 ---
 
-## 📋 Sign-off Protocol for Major Releases
+## Sign-off Protocol for Major Releases
 
 | Dimension | Focus Area | Mandatory Requirement | Signee | Status |
 | :---: | :--- | :--- | :---: | :---: |

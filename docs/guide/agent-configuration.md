@@ -2,7 +2,7 @@
 
 WebRTC Gateway 遵循现代云原生十二要素应用原则（Twelve-Factor App），支持 **命令行参数 (CLI Flags)**、**环境变量 (ENV)** 与 **YAML / JSON 配置文件** 三种配置方式。
 
-### ⚙️ 参数生效优先级 (Configuration Precedence)
+### 参数生效优先级 (Configuration Precedence)
 ```text
 命令行参数 (CLI Flags)
   ➔ 环境变量 (Environment Variables)
@@ -20,7 +20,7 @@ Agent 支持三种核心运行模式，三者在业务上严格三选一（互�
 | :--- | :--- | :--- | :--- |
 | **模式 A：反向代理模式** | `-target` / `TARGET_URL` | 将请求反向代理到本地或局域网现有的 HTTP/WS 服务。 | 穿透 Jellyfin、NAS 面板、Vaultwarden 等。 |
 | **模式 B：目录与静态站模式** | `-dir` / `DIR_PATH` | 直接将本地文件夹托管为只读网站，自动索引 `index.html` 或展现文件树。 | 托管文档站、前端打包产物 dist、公共下载目录。 |
-| **模式 C：单文件极速秒传** | `-file` / `FILE_PATH` | 将本地单个文件作为分发目标，支持 Range 206 断点续传，不限大小。 | 私有版 Wormhole / 跨公网 AirDrop，分享 ISO、视频、日志。 |
+| **模式 C：单文件轻量分发** | `-file` / `FILE_PATH` | 将本地单个文件作为分发目标，支持 Range 206 断点续传，不限大小。 | 私有版 Wormhole / 跨公网文件分发，分享 ISO、视频、日志。 |
 
 ---
 

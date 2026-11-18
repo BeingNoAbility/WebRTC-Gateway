@@ -10,32 +10,32 @@ hero:
     alt: WebRTC Gateway Logo
   actions:
     - theme: brand
-      text: Get Started 🚀
+      text: Get Started
       link: /en/guide/
     - theme: alt
-      text: Architecture 📐
+      text: Architecture
       link: /en/guide/architecture
     - theme: alt
-      text: GitHub Repo ⭐️
+      text: GitHub Repo
       link: https://github.com/BeingNoAbility/WebRTC-Gateway
 
 features:
   - icon: 🌐
-    title: 100% Zero-Client Experience
-    details: Visitors do not need to install applications, privileged network drivers, or browser extensions. Open the portal URL in any browser to connect immediately.
+    title: Zero-Client Experience
+    details: Visitors do not need to install applications, privileged network drivers, or browser extensions. Open the portal URL in any browser to connect directly.
   - icon: ⚡
-    title: True P2P Direct Line Speed
-    details: Powered by WebRTC STUN/ICE NAT traversal. Traffic flows directly between visitor browsers and private servers, consuming zero public relay bandwidth.
+    title: P2P Direct Traversal
+    details: Powered by WebRTC STUN/ICE NAT traversal. Traffic flows directly between visitor browsers and private servers, without public relay bandwidth bottlenecks.
   - icon: 🔒
-    title: End-to-End Native Encryption
-    details: Enforces DTLS-SRTP transport-layer physical encryption. Signaling servers only negotiate network topologies and cannot decrypt application data.
+    title: End-to-End Transport Encryption
+    details: Enforces standard DTLS 1.2 / SRTP transport encryption (RFC 8831). Signaling servers only negotiate network topologies and cannot decrypt application data.
   - icon: 🧩
     title: Full Transparent Web Stack
     details: Features P2PMux binary multiplexing, HTTP/HTTPS, HTTP 206 Partial Content (media streaming), WebSocket full-duplex, and session-isolated CookieJars.
   - icon: 📂
-    title: In-Memory Fast File Distribution
-    details: Built-in zero-port-listening file and directory server. Distribute ISO/media files in 1 second with stateless HMAC-SHA256 time-limited links.
+    title: In-Memory File Distribution
+    details: Built-in zero-port-listening file and directory server. Distribute files via memory-mapped streaming with stateless HMAC-SHA256 time-limited links.
   - icon: 🛡️
-    title: Enterprise Sandbox & Non-Root
+    title: Unprivileged Container Sandbox
     details: Container images run as unprivileged user 10001:10001 by default, fully supporting --user $(id -u):$(id -g) and read-only root filesystems.
 ---

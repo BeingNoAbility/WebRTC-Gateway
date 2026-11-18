@@ -18,9 +18,9 @@
 
 ---
 
-## 💡 什么是 Zero-Client P2P WebRTC Gateway？
+## 什么是 Zero-Client P2P WebRTC Gateway？
 
-这是一个颠覆传统内网穿透思路的开源解决方案：**访客浏览器端“零客户端依赖、零浏览器插件、零特权根证书、零网络配置”**。
+这是一个采用**免装客户端浏览器端 WebRTC 穿透架构**的开源解决方案：**访客浏览器端“零客户端依赖、零浏览器插件、零特权根证书、零额外网络配置”**。
 
 在传统穿透方案中（如 FRP、NPS、Ngrok、Cloudflare Tunnel 等），所有内网流量均需经由公网服务器中转，不仅受限于中继 VPS 昂贵且贫瘠的下行带宽，还存在单点流量成本与隐私顾虑；而 Tailscale、WireGuard、ZeroTier 则强制访客终端必须预装客户端软件或系统级 VPN 驱动。
 
@@ -31,10 +31,10 @@
 
 ---
 
-## 📑 目录
+## 目录
 
-- [🌟 核心特性](#-核心特性)
-- [📖 使用者指南 (User Guide)](#-使用者指南-user-guide)
+- [核心特性](#核心特性)
+- [使用者指南 (User Guide)](#使用者指南-user-guide)
   - [1. 30 秒快速上手](#1-30-秒快速上手)
   - [2. 经典内网应用实践 (NAS / Jellyfin / Vaultwarden 等)](#2-经典内网应用实践)
   - [3. 多节点与子域名智能路由 (Subdomain & Routing)](#3-多节点与子域名智能路由)
@@ -42,33 +42,33 @@
   - [5. Agent 命令行参数与环境变量全量说明](#5-agent-命令行参数与环境变量全量说明)
   - [6. 一体化服务端 (Signal Server) 命令行参数全量说明](#6-一体化服务端-signal-server-命令行参数全量说明)
   - [7. 安全性与访问控制](#7-安全性与访问控制)
-- [🛠️ 生产部署指南 (Self-Hosting & Operations)](#️-生产部署指南-self-hosting--operations)
+- [生产部署指南 (Self-Hosting & Operations)](#生产部署指南-self-hosting-operations)
   - [方案 A：Cloudflare Workers 一体化边缘部署 (零服务器成本)](#方案-acloudflare-workers-一体化边缘部署-零服务器成本)
-  - [方案 B：自建 Linux / Windows 一体化自包含服务器 (单一二进制)](#方案-b自建-linux--windows-一体化自包含服务器-单一二进制)
-  - [方案 C：Docker & Docker Compose 一键编排容器部署](#方案-cdocker--docker-compose-一键编排容器部署)
-- [💻 开发者指南 (Developer Guide)](#-开发者指南-developer-guide)
+  - [方案 B：自建 Linux / Windows 一体化自包含服务器 (单一二进制)](#方案-b自建-linux-windows-一体化自包含服务器-单一二进制)
+  - [方案 C：Docker & Docker Compose 一键编排容器部署](#方案-cdocker-docker-compose-一键编排容器部署)
+- [开发者指南 (Developer Guide)](#开发者指南-developer-guide)
   - [1. 系统架构与端到端数据流向](#1-系统架构与端到端数据流向)
   - [2. P2PMux v1 二进制流式多路复用协议规范](#2-p2pmux-v1-二进制流式多路复用协议规范)
   - [3. 浏览器端 DOM 虚拟化与 Service Worker 核心机制](#3-浏览器端-dom-虚拟化与-service-worker-核心机制)
   - [4. 项目代码仓库结构全景](#4-项目代码仓库结构全景)
   - [5. 本地源码构建与自动化测试套件](#5-本地源码构建与自动化测试套件)
-- [📄 开源协议 (License)](#-开源协议-license)
+- [开源协议 (License)](#开源协议-license)
 
 ---
 
-## 🌟 核心特性
+## 核心特性
 
-- 🚀 **真正的零客户端 (Zero-Client)**：访客只要有一台带有现代浏览器的电脑或手机，点开 URL 即可直达内网应用。
-- ⚡ **P2P 点对点极速直连**：基于标准 WebRTC ICE/STUN 打洞，家庭千兆宽带能跑多快就跑多快（实测内网/局域网 RTT 1~3ms，跨运营商直连跑满宽带上行），完全脱离云中继带宽限制。
-- 🔄 **WebRTC 标准 ICE Restart（移动漫游自愈）**：在手机或笔记本网络突变（Wi-Fi 切换 5G 蜂窝网络、AP 漫游、弱网恢复）时，自动触发信令保活与 in-place ICE Restart 双阶段重协商，无需刷新浏览器页面，正在播放的视频与底层长连接不中断。
-- 🔗 **HMAC-SHA256 无状态时效安全分享**：纯数学自包含签名，零中心化数据库依赖。支持在 Web 控制台或 CLI 中一键生成限时免密分享链接（`#nodeId?exp=xxx&sign=yyy`），到期自动失效，免向访客透露主口令。
-- 📊 **前端 WebRTC HUD 实时诊断看板**：悬浮药丸实时显示 `⚡ P2P Direct` 直连或 `🛡️ TURN Relay` 中继状态，一键展开高科技诊断 HUD，透视往返延迟 (RTT)、丢包率、瞬时上下行流速与双方候选 IP，支持一键现场触发 ICE Restart 测试。
-- 🛡️ **生产容量治理与防 DoS 限流**：Agent 端支持 `-max-streams` 并发流信号量容量防守（默认 512），超出时平滑回复 503 保护 NAS 内存；信令服务端支持单 IP 并发连接限制 (`-max-ip-conns`)、请求速率频控与防暴力破解锁定。
-- 🛡️ **真实客户端 IP 权威透传与 WAF 兼容 (WAF & Security Ready)**：穿透 Agent 转发流量时，自动将信令端物理/受信提取的真实客户端公网 IP 强制注入 `X-Forwarded-For` 与 `X-Real-IP` 请求头，彻底告别穿透导致的所有访客显示为 `127.0.0.1` 的痛点，完美适配雷池 SafeLine、Nginx WAF、ModSecurity 单 IP 精准封禁、限流防刷与 GeoIP 审计；严格覆写抵御伪造，支持移动端漫游实时热更新。
-- 📈 **Prometheus 监控开箱支持**：服务端开箱提供 `/metrics`；Agent 严格遵循纯出站安全原则，支持显式 opt-in `-metrics-addr` 导出活跃连接、流数、吞吐字节与拒绝量。
-- 🔒 **端到端原生加密**：传输层采用 WebRTC 强制的 DTLS-SRTP 军工级非对称协商与强加密，信令服务仅撮合网络拓扑，中继节点不可见、无法解密任何业务数据。
-- 🌐 **多节点与子域名智能感知**：支持多台机器/多个服务并发在线，通过 `<nodeId>.p2p.domain.com`、`#nodeId` 或前端可视化设置弹窗秒级切换。
-- 🧰 **全类型 Web 协议透明透传**：
+- **真正的零客户端 (Zero-Client)**：访客只要有一台带有现代浏览器的电脑或手机，点开 URL 即可直达内网应用。
+- **P2P 点对点直连**：基于标准 WebRTC ICE/STUN 打洞，P2P 直连吞吐受限于物理链路带宽与 SCTP 拥塞控制，无云中继带宽限制（实测局域网 RTT 1~3ms，跨运营商直连跑满物理带宽上行）。
+- **WebRTC 标准 ICE Restart（移动漫游自愈）**：在手机或笔记本网络突变（Wi-Fi 切换 5G 蜂窝网络、AP 漫游、弱网恢复）时，自动触发信令保活与 in-place ICE Restart 双阶段重协商，无需刷新浏览器页面，传输与底层长连接不中断。
+- **HMAC-SHA256 无状态时效安全分享**：纯数学自包含签名，零中心化数据库依赖。支持在 Web 控制台或 CLI 中一键生成限时免密分享链接（`#nodeId?exp=xxx&sign=yyy`），到期自动失效，免向访客透露主口令。
+- **前端 WebRTC HUD 实时链路诊断面板**：悬浮药丸实时显示 `P2P Direct` 直连或 `TURN Relay` 中继状态，一键展开实时链路诊断面板，直观展现往返延迟 (RTT)、丢包率、瞬时上下行流速与双方候选 IP 拓扑，支持一键现场触发 ICE Restart 测试。
+- **生产容量治理与防 DoS 限流**：Agent 端支持 `-max-streams` 并发流信号量容量防守（默认 512），超出时平滑回复 503 保护 NAS 内存；信令服务端支持单 IP 并发连接限制 (`-max-ip-conns`)、请求速率频控与防暴力破解锁定。
+- **真实客户端 IP 权威透传与 WAF 兼容 (WAF & Security Ready)**：穿透 Agent 转发流量时，自动将信令端物理/受信提取的真实客户端公网 IP 强制注入 `X-Forwarded-For` 与 `X-Real-IP` 请求头，支持权威客户端 IP 透传，适配雷池 SafeLine、Nginx WAF、ModSecurity 单 IP 精准封禁、限流防刷与 GeoIP 审计；严格覆写抵御伪造，支持移动端漫游实时热更新。
+- **Prometheus 监控开箱支持**：服务端开箱提供 `/metrics`；Agent 严格遵循纯出站安全原则，支持显式 opt-in `-metrics-addr` 导出活跃连接、流数、吞吐字节与拒绝量。
+- **端到端传输加密**：传输层采用 WebRTC 强制的 DTLS 1.2 / SRTP 传输层加密（RFC 8831），信令服务仅撮合网络拓扑，中继节点不可见、无法解密任何业务数据。
+- **多节点与子域名智能感知**：支持多台机器/多个服务并发在线，通过 `<nodeId>.p2p.domain.com`、`#nodeId` 或前端可视化设置弹窗实现即时路由切换。
+- **全类型 Web 协议透明透传**：
   - **HTTP/HTTPS**：支持全方法、流式响应（Streaming）、文件下载。
   - **HTTP 206 Partial Content**：完整支持音视频流媒体 Range 分片请求，进度条拖动即时响应。
   - **WebSocket 双向全双工**：自带跨 SCTP 帧的流式分片重组引擎，超大消息零丢失。
@@ -79,7 +79,7 @@
 
 ---
 
-## 📖 使用者指南 (User Guide)
+## 使用者指南 (User Guide)
 
 ### 1. 30 秒快速上手
 
@@ -252,7 +252,7 @@ Agent 既支持标准命令行 Flag，也完全支持环境变量，方便在 Li
 
 ---
 
-## 🛠️ 生产部署指南 (Self-Hosting & Operations)
+## 生产部署指南 (Self-Hosting & Operations)
 
 本系统采用极度解耦的现代化工程架构，支持三种自建与生产部署方式：
 
@@ -483,9 +483,9 @@ services:
 
 ---
 
-#### 3. 极速生成 HMAC-SHA256 时效安全分享链接 (Docker 运行)
+#### 3. 生成 HMAC-SHA256 时效安全分享链接 (Docker 运行)
 
-无需在宿主机安装 Go 环境，通过 Docker Compose 或独立 Agent 容器即可极速生成数学级安全时效分享链接：
+无需在宿主机安装 Go 环境，通过 Docker Compose 或独立 Agent 容器即可生成高强度时效安全分享链接：
 
 ```bash
 # 方式 A：通过 Docker Compose 极速生成 (例如 24 小时有效)
@@ -522,7 +522,7 @@ docker run --rm -e ACCESS_SECRET=your_visitor_password \
 | `SIGNAL_URL` | `ws://127.0.0.1:8888/ws` | `-signal` | 信令服务器 WebSocket 端点（支持 `ws://` 与 `wss://`） |
 | `TARGET_URL` | `http://127.0.0.1:8080` (缺省) | `-target` | 需要反代的目标 Web 服务地址（模式 A，与 `DIR_PATH`/`FILE_PATH` 互斥） |
 | `DIR_PATH` | 空 | `-dir` | 托管为静态网站或目录浏览的本地文件夹路径（模式 B） |
-| `FILE_PATH` | 空 | `-file` | 直接作为单文件分发服务的本地文件路径（模式 C，极速 P2P 闪传） |
+| `FILE_PATH` | 空 | `-file` | 直接作为单文件分发服务的本地文件路径（模式 C，P2P 文件分发模式） |
 | `CONFIG_FILE` / `CONFIG` | 空 | `-config` | YAML / JSON 配置文件路径 |
 | `SIGNAL_SECRET` | 空 | `-signal-secret` | 信令集群准入密钥（控制面，必须与信令端匹配，防节点冒领） |
 | `ACCESS_SECRET` | 空 | `-access-secret` | 访客访问口令（数据面，留空免密直连，配置后访客需输入密码） |
@@ -597,11 +597,11 @@ docker run -d --name webrtc-agent --restart unless-stopped \
 - **特权端口能力集绑定 (`CAP_NET_BIND_SERVICE`)**：
   - `server` 镜像在构建时通过 Linux File Capability 为 `/app/server` 授予 `cap_net_bind_service=+ep`，即便以非特权用户身份运行，也支持直接在容器内监听 `:443` 或 `:80` 等低位特权端口，无需赋予容器 root 权限。
 - **纯内存只读文件系统兼容 (`--read-only`)**：
-  - 服务端与 Agent 全链路采用内存流式无状态调度，不向磁盘写任何临时文件，原生支持 `docker run --read-only` 与 Kubernetes `readOnlyRootFilesystem: true` 金融级沙箱加固。
+  - 服务端与 Agent 全链路采用内存流式无状态调度，不向磁盘写任何临时文件，原生支持 `docker run --read-only` 与 Kubernetes `readOnlyRootFilesystem: true` 只读沙箱加固。
 
 ---
 
-## 💻 开发者指南 (Developer Guide)
+## 开发者指南 (Developer Guide)
 
 本节专为希望深入理解技术原理、二次开发、定制功能或参与开源贡献的工程师提供。
 
@@ -858,6 +858,6 @@ node test/verify_features.cjs
 
 ---
 
-## 📄 开源协议 (License)
+## 开源协议 (License)
 
 本项目基于 [MIT License](LICENSE) 开源协议发布，欢迎自由商用、个人使用、学术研究与二次开发。如果本项目对您有所帮助，欢迎点亮右上角的 ⭐️ **Star** 给予支持！

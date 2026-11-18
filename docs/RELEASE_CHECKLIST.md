@@ -6,7 +6,7 @@
 
 ---
 
-## 🗺️ 发版工作流全景图 (Release Workflow)
+## 发版工作流全景图 (Release Workflow)
 
 ```mermaid
 flowchart TD
@@ -295,7 +295,7 @@ flowchart TD
 
 ---
 
-## 🚨 应急回滚流程 (Emergency Rollback Playbook)
+## 应急回滚流程 (Emergency Rollback Playbook)
 
 如果在打标推送后发现致命 P0 漏洞或流水线阻断：
 
@@ -312,7 +312,7 @@ flowchart TD
 
 ---
 
-## 📝 附录：新确认项追加指南模板
+## 附录：新确认项追加指南模板
 
 当后续项目引入新组件（如移动端 SDK、自动化 ACME、新协议集成等）时，请在对应阶段下方按此格式追加：
 

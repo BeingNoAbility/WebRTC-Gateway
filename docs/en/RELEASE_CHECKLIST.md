@@ -5,7 +5,7 @@
 
 ---
 
-## 🗺️ Release Workflow Overview
+## Release Workflow Overview
 
 ```mermaid
 flowchart TD

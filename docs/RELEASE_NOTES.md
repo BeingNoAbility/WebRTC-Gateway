@@ -2,7 +2,7 @@
 
 ## [v2.0.7] - 2026-11-18
 
-### 🛡️ Service Worker 流式控制器中断防御与客户端韧性加固 (Service Worker Stream Controller Resilience & Client Robustness)
+### Service Worker 流式控制器中断防御与客户端韧性加固 (Service Worker Stream Controller Resilience & Client Robustness)
 
 本版本为 **v2.0.7 稳定性与客户端韧性加固版本 (Client Robustness & Stream Resilience Release)**。重点修复了在高并发反向代理、富前端资源密集加载以及第三方浏览器扩展（如 Dark Reader、拦截器）主动中止网络请求时暴露的 Service Worker 运行时流控制边界异常，并巩固了悬浮控制器的事件隔离机制：
 
@@ -18,12 +18,12 @@
 
 ---
 
-### ⚠️ 破坏性变更提示 (Breaking Changes)
+### 破坏性变更提示 (Breaking Changes)
 - **无破坏性变更 (None)**。本版本完全兼容既有的 WebRTC 通信协议、信令握手格式、配置文件及数据通道多路复用模型。所有已部署的 Agent 与 Signal 节点均可无缝平滑升级。
 
 ---
 
-### 📦 资产下载与快速验证 (Downloads & Verification)
+### 资产下载与快速验证 (Downloads & Verification)
 - **预编译二进制跨平台支持**：
   - Linux (amd64 / arm64)
   - Windows (amd64 / arm64)
