@@ -300,11 +300,15 @@ func TestCloudflareLive_P2P_WebRTC_DataChannel_E2E(t *testing.T) {
 	}
 
 	var statusMsg signaling.Message
-	if err := clientWS.ReadJSON(&statusMsg); err != nil {
-		t.Fatalf("Client read peer_status error: %v", err)
-	}
-	if statusMsg.Status != "online" {
-		t.Fatalf("Expected peer status online, got: %s", statusMsg.Status)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_ = clientWS.SetReadDeadline(deadline)
+		if err := clientWS.ReadJSON(&statusMsg); err != nil {
+			t.Fatalf("Client read peer_status error: %v", err)
+		}
+		if statusMsg.Type == signaling.TypePeerStatus && statusMsg.Status == "online" {
+			break
+		}
 	}
 	t.Logf("[PASS] Live Cloudflare signaling reported agent '%s' online", testNodeID)
 
@@ -526,11 +530,15 @@ func TestCloudflareLive_CrossNetwork_DebianToWindows_E2E(t *testing.T) {
 	}
 
 	var statusMsg signaling.Message
-	if err := clientWS.ReadJSON(&statusMsg); err != nil {
-		t.Fatalf("Client read peer_status error: %v", err)
-	}
-	if statusMsg.Status != "online" {
-		t.Fatalf("Expected peer status online for Linux node, got: %s", statusMsg.Status)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_ = clientWS.SetReadDeadline(deadline)
+		if err := clientWS.ReadJSON(&statusMsg); err != nil {
+			t.Fatalf("Client read peer_status error: %v", err)
+		}
+		if statusMsg.Type == signaling.TypePeerStatus && statusMsg.Status == "online" {
+			break
+		}
 	}
 	t.Logf("[PASS] Linux VM Agent registered with Cloudflare DO and reported online: %s", testNodeID)
 
