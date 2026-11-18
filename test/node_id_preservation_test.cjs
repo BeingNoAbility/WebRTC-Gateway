@@ -44,6 +44,7 @@ assert(swCode.includes('clients.get') || swCode.includes('.clients.get'), 'sw.js
 assert(swCode.includes('DecompressionStream') && swCode.includes('x-p2p-client-decompress'), 'sw.js supports hardware streaming decompression and x-p2p-client-decompress (v2.0.0 Task 1)');
 assert(swCode.includes('_p2p_worker') && swCode.includes('import "/patch.js";'), 'sw.js supports dynamic ES module worker import (v2.0.0 Task 2)');
 assert(swCode.includes('!doctype'), 'sw.js supports DOCTYPE-safe HTML script injection (F-10)');
+assert(swCode.includes('application/xhtml+xml'), 'sw.js includes navigation document guard against API fetch pollution');
 assert(patchCode.includes('_p2p_worker'), 'patch.js wraps Worker for dynamic module worker adaptation (v2.0.0 Task 2)');
 assert(!portalCode.includes('value="${this.peerId}"'), 'portal.js MUST NOT interpolate peerId into input value attribute (P0-2)');
 assert(!portalCode.includes('value="${this.secret}"'), 'portal.js MUST NOT interpolate secret into input value attribute (P0-2)');
@@ -605,6 +606,149 @@ function createMockDOM(options = {}) {
   const checked = lazyGCVerify(deadSess);
   assert(checked === null, 'Lazy GC detects dead window client and invalidates session');
   assert(!sessions.has('tab_nas'), 'Lazy GC purges dead session from sessions map');
+
+  // D. Service Worker HTML Document Navigation Guard & Subresource Non-HTML Fallback Verification (Tailscale / Synology DSM Fix)
+  console.log('\n--- Testing SW Document Navigation Guard & Subresource Non-HTML Fallback ---');
+
+  // Simulate sw.ts request classification logic
+  function classifyIsHtml(request, contentType) {
+    const isNavDoc = request.mode === 'navigate' ||
+                     request.destination === 'document' ||
+                     request.destination === 'iframe';
+    return Boolean(isNavDoc && (contentType.includes('text/html') || contentType.includes('application/xhtml+xml')));
+  }
+
+  // Subresource fetch/XHR (e.g. Tailscale api/data returning text/html)
+  const apiReqCors = { mode: 'cors', destination: '' };
+  const apiReqSameOrigin = { mode: 'same-origin', destination: '' };
+  const apiReqEmpty = { mode: '', destination: '' };
+  assert(!classifyIsHtml(apiReqCors, 'text/html'), 'API fetch with mode:cors and text/html is NOT classified as isHtml');
+  assert(!classifyIsHtml(apiReqSameOrigin, 'text/html; charset=UTF-8'), 'API fetch with mode:same-origin and text/html is NOT classified as isHtml');
+  assert(!classifyIsHtml(apiReqEmpty, 'text/html'), 'API XHR with empty mode and text/html is NOT classified as isHtml');
+
+  // Real document navigations
+  const navDocReq = { mode: 'navigate', destination: 'document' };
+  const navIframeReq = { mode: 'navigate', destination: 'iframe' };
+  assert(classifyIsHtml(navDocReq, 'text/html'), 'Document navigation with text/html IS classified as isHtml');
+  assert(classifyIsHtml(navIframeReq, 'text/html'), 'Iframe navigation with text/html IS classified as isHtml');
+  assert(classifyIsHtml(navDocReq, 'application/xhtml+xml'), 'Document navigation with application/xhtml+xml IS classified as isHtml');
+
+  // Stream injection pipeline simulation
+  function findAsciiTagEnd(bytes, tagName) {
+    const target = tagName.toLowerCase();
+    const len = bytes.length;
+    const tagLen = target.length;
+    for (let i = 0; i <= len - tagLen - 1; i++) {
+      if (bytes[i] === 0x3C) { // '<'
+        let match = true;
+        for (let j = 0; j < tagLen; j++) {
+          const b = bytes[i + 1 + j];
+          if ((b >= 0x41 && b <= 0x5A ? b + 0x20 : b) !== target.charCodeAt(j)) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          const nextByte = bytes[i + 1 + tagLen];
+          if (nextByte === 0x3E || nextByte === 0x20 || nextByte === 0x09 || nextByte === 0x0A || nextByte === 0x0D || nextByte === 0x2F) {
+            let inQuote = 0;
+            for (let k = i + 1 + tagLen; k < len; k++) {
+              const kb = bytes[k];
+              if (inQuote) {
+                if (kb === inQuote) inQuote = 0;
+              } else {
+                if (kb === 0x22 || kb === 0x27) inQuote = kb;
+                else if (kb === 0x3E) return k + 1;
+              }
+            }
+          }
+        }
+      }
+    }
+    return -1;
+  }
+
+  function concatByteArrays(...arrays) {
+    let total = 0;
+    for (const a of arrays) if (a) total += a.length;
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const a of arrays) {
+      if (a) {
+        out.set(a, offset);
+        offset += a.length;
+      }
+    }
+    return out;
+  }
+
+  function simulateStreamPipeline(request, contentType, inputBytes) {
+    const isHtml = classifyIsHtml(request, contentType);
+    if (!isHtml) {
+      // Transparent passthrough, zero injection
+      return inputBytes;
+    }
+
+    // If isHtml is true, run injection scanner
+    const patchScript = '<meta name="referrer" content="no-referrer"><script src="/patch.js"></script>';
+    const encoder = new TextEncoder();
+    const patchBytes = encoder.encode(patchScript);
+
+    const headPos = findAsciiTagEnd(inputBytes, 'head');
+    if (headPos !== -1) {
+      const before = inputBytes.subarray(0, headPos);
+      const after = inputBytes.subarray(headPos);
+      return concatByteArrays(before, patchBytes, after);
+    }
+
+    const htmlPos = findAsciiTagEnd(inputBytes, 'html');
+    if (htmlPos !== -1) {
+      const headWrapper = encoder.encode(`<head>${patchScript}</head>`);
+      const before = inputBytes.subarray(0, htmlPos);
+      const after = inputBytes.subarray(htmlPos);
+      return concatByteArrays(before, headWrapper, after);
+    }
+
+    const doctypePos = findAsciiTagEnd(inputBytes, '!doctype');
+    if (doctypePos !== -1) {
+      const headWrapper = encoder.encode(`<head>${patchScript}</head>`);
+      const before = inputBytes.subarray(0, doctypePos);
+      const after = inputBytes.subarray(doctypePos);
+      return concatByteArrays(before, headWrapper, after);
+    }
+
+    // Fallback: If no HTML skeleton found, return raw bytes unchanged
+    return inputBytes;
+  }
+
+  // Assertion 1: Simulate request.mode = 'cors', Content-Type: text/html with JSON body
+  const rawJsonStr = JSON.stringify({ status: 'success', data: { tailscale: 'active', ip: '100.64.0.1' } });
+  const rawJsonBytes = Buffer.from(rawJsonStr, 'utf-8');
+  const processedApiBytes = simulateStreamPipeline(apiReqCors, 'text/html; charset=UTF-8', rawJsonBytes);
+
+  assert(Buffer.compare(processedApiBytes, rawJsonBytes) === 0, 'API response Body with text/html remains 100% byte-identical raw JSON');
+  assert(!Buffer.from(processedApiBytes).toString('utf-8').includes('<meta'), 'API response Body is NOT polluted with <meta>');
+  assert(!Buffer.from(processedApiBytes).toString('utf-8').includes('<script'), 'API response Body is NOT polluted with <script>');
+  let parsedSuccess = false;
+  try {
+    const parsed = JSON.parse(Buffer.from(processedApiBytes).toString('utf-8'));
+    if (parsed.status === 'success' && parsed.data.tailscale === 'active') parsedSuccess = true;
+  } catch {}
+  assert(parsedSuccess, 'API response parsed cleanly by JSON.parse() without SyntaxError');
+
+  // Edge case assertion: Even if raw non-HTML JSON was fed to HTML injection scanner directly, fallback preserves 100% raw bytes
+  const directFallbackBytes = simulateStreamPipeline(navDocReq, 'text/html', rawJsonBytes);
+  assert(Buffer.compare(directFallbackBytes, rawJsonBytes) === 0, 'Non-HTML JSON fed to scanner is untouched by fallback defense (no blind patchBytes prepend)');
+
+  // Assertion 2: Simulate request.mode = 'navigate' returning valid HTML document
+  const rawHtmlStr = '<!DOCTYPE html><html><head><title>Tailscale</title></head><body><h1>Admin</h1></body></html>';
+  const rawHtmlBytes = Buffer.from(rawHtmlStr, 'utf-8');
+  const processedHtmlBytes = simulateStreamPipeline(navDocReq, 'text/html', rawHtmlBytes);
+  const processedHtmlStr = Buffer.from(processedHtmlBytes).toString('utf-8');
+
+  assert(processedHtmlStr.includes('<head><meta name="referrer" content="no-referrer"><script src="/patch.js"></script><title>Tailscale</title>'),
+    'Document navigation with valid HTML successfully injects patch script and meta tags into <head>');
+  assert(processedHtmlStr.includes('<h1>Admin</h1>'), 'Document navigation preserves HTML body content');
 }
 
 console.log(`\n=== Verification Complete: ${passCount} Passed, ${failCount} Failed ===`);

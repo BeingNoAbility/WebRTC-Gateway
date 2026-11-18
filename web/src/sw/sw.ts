@@ -417,7 +417,11 @@ async function handleTunneledRequest(request: Request, initialSession: PortalSes
         }
 
         const contentType = (msg.headers?.['content-type'] || '').toLowerCase();
-        const isHtml = contentType.includes('text/html');
+        // 严格校验是否为顶级窗口或 iframe 的文档导航请求，杜绝 API/Fetch 子资源被误判为 HTML
+        const isNavDoc = request.mode === 'navigate' ||
+                         request.destination === 'document' ||
+                         request.destination === 'iframe';
+        const isHtml = isNavDoc && (contentType.includes('text/html') || contentType.includes('application/xhtml+xml'));
         // Task 2: Worker script injection strict precision check
         const isWorker = (request.destination === 'worker' ||
                           request.destination === 'sharedworker' ||
@@ -667,7 +671,8 @@ function injectScriptIntoHtmlStream(
                 const after = combined.subarray(doctypePos);
                 controller.enqueue(concatByteArrays(before, headWrapper, after));
               } else {
-                controller.enqueue(concatByteArrays(patchBytes, combined));
+                // 兜底防御：若无任何 HTML 标签骨架，判定为非标准 HTML 或纯文本/API 数据，严禁盲目注入 patchBytes
+                controller.enqueue(combined);
               }
             }
 
