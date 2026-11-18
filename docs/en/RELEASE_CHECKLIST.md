@@ -131,8 +131,18 @@ flowchart TD
 
 ## Phase 5: Documentation & Release Notes Audit
 
-- [ ] **5.1 🌟 docs/RELEASE_NOTES.md Single-Version Principle (Strict Red Line)**
-  - **Rule**: `docs/RELEASE_NOTES.md` **must only contain release notes for the single latest version being released**. Historical records belong exclusively in `CHANGELOG.md`.
+- [ ] **5.1 docs/RELEASE_NOTES.md Single-Version & High-Signal Standard (Strict Red Line)**
+  - **Location**: `docs/RELEASE_NOTES.md`
+  - **Single-Version Invariant**: Must exclusively contain the **single latest version** being released; historical changelogs belong strictly in `CHANGELOG.md`.
+  - **Conciseness & Structure Red Lines (High-Signal Standard)**:
+    - **Length Limit**: Strictly capped at **20–30 lines**. Eliminate narrative preambles, marketing fluff, and deeply nested clauses.
+    - **No Redundant Asset Duplication**: GitHub Releases natively displays attached binary assets and checksums; **strictly prohibit reciting platform filenames and SHA256SUMS lists in release notes prose**.
+    - **Minimal Docker Reference**: Provide only 1–2 lines of clean image pull commands; **strictly prohibit repeating multi-line container deployment manifests**.
+    - **Standard Four Sections**:
+      1. Header (`## [vX.Y.Z] - YYYY-MM-DD`)
+      2. Highlights & Fixes (`### Highlights & Fixes`, concise bullets with bold topic + empirical technical facts)
+      3. Breaking Changes (`### Breaking Changes`, explicitly stating `None` or migration steps)
+      4. Docker Image Pull (`### Docker Pull`, minimal pull commands)
 
 - [ ] **5.2 CHANGELOG.md Historical Archival**
   - **Audit**: Append the new version entry at the top following [Keep a Changelog](https://keepachangelog.com/) standards (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`).

@@ -220,6 +220,11 @@ flowchart TD
 
 1. **`docs/RELEASE_NOTES.md`**:  
    - **Core Invariant**: Maintains **only the current, active version** with neutral, rigorous copy.  
+   - **High-Signal Standard**:
+     - **Strictly capped at 20–30 lines**, leading with conclusions and zero fluff;
+     - **No redundant asset lists** (GitHub Releases natively presents download assets and checksums);
+     - **Minimal Docker reference** (single-line pull command only, no repeated deployment manifests);
+     - **Four standard sections**: Header & focus ➔ Highlights & fixes ➔ Breaking changes ➔ Docker pull.
    - **Forbidden Action**: Never append or accumulate previous releases into this file.
 2. **`CHANGELOG.md`**:  
    - Chronologically records the entire lifecycle history. Prior to each release, prepend the new version entry to the top of `CHANGELOG.md`.
