@@ -8,16 +8,73 @@
 // ==============================================================================
 
 const http = require('http');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
 const rootDir = path.resolve(__dirname, '..');
-const signalBin = path.join(rootDir, 'bin', 'signal.exe');
-const agentBin = path.join(rootDir, 'bin', 'agent.exe');
-const mockBin = path.join(rootDir, 'bin', 'mock_service.exe');
-const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+const ext = os.platform() === 'win32' ? '.exe' : '';
+const binDir = path.join(rootDir, 'bin');
+const signalBin = path.join(binDir, `signal${ext}`);
+const agentBin = path.join(binDir, `agent${ext}`);
+const mockBin = path.join(binDir, `mock_service${ext}`);
+
+function findBrowserPath() {
+  if (process.env.BROWSER_BIN && fs.existsSync(process.env.BROWSER_BIN)) return process.env.BROWSER_BIN;
+  if (process.env.CHROME_BIN && fs.existsSync(process.env.CHROME_BIN)) return process.env.CHROME_BIN;
+  if (process.env.EDGE_BIN && fs.existsSync(process.env.EDGE_BIN)) return process.env.EDGE_BIN;
+
+  const candidates = [];
+  if (os.platform() === 'win32') {
+    const progFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+    const progFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+    const localAppData = process.env['LOCALAPPDATA'] || '';
+    candidates.push(
+      path.join(progFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      path.join(progFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      path.join(progFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(progFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(localAppData, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe')
+    );
+  } else if (os.platform() === 'darwin') {
+    candidates.push(
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium'
+    );
+  } else {
+    candidates.push(
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/microsoft-edge',
+      '/usr/bin/microsoft-edge-stable'
+    );
+  }
+  for (const c of candidates) {
+    if (c && fs.existsSync(c)) return c;
+  }
+  return null;
+}
+
+function ensureBinaries() {
+  if (!fs.existsSync(binDir)) fs.mkdirSync(binDir, { recursive: true });
+  const binaries = [
+    { name: `signal${ext}`, pkg: './cmd/signal' },
+    { name: `agent${ext}`, pkg: './cmd/agent' },
+    { name: `mock_service${ext}`, pkg: './cmd/mock_service' }
+  ];
+  for (const b of binaries) {
+    const fullPath = path.join(binDir, b.name);
+    if (!fs.existsSync(fullPath)) {
+      console.log(`[Build] Compiling missing test binary: ${b.name}...`);
+      execSync(`go build -o "${fullPath}" ${b.pkg}`, { cwd: rootDir, stdio: 'inherit' });
+    }
+  }
+}
 
 const SIGNAL_PORT = 28888;
 const MOCK_PORT = 18090;
@@ -174,6 +231,15 @@ async function main() {
   console.log('🚀 STARTING REAL BROWSER TEST MATRIX (CHROMIUM CDP + TOP 10 SITES + DEDICATED TEST APP)');
   console.log('========================================================================================\n');
 
+  // 0. Ensure binaries are ready & find browser executable
+  ensureBinaries();
+  const browserPath = findBrowserPath();
+  if (!browserPath) {
+    console.error('❌ Error: No Chromium, Chrome, or Microsoft Edge browser executable detected on system!');
+    process.exit(1);
+  }
+  console.log(`[Browser] Using browser executable: ${browserPath}`);
+
   // 1. Launch Signaling Server
   spawnProcess('SignalServer', signalBin, ['-addr', `:${SIGNAL_PORT}`]);
   await waitForHttp(`http://127.0.0.1:${SIGNAL_PORT}/`);
@@ -193,12 +259,12 @@ async function main() {
   await sleep(1000);
   console.log(`[OK] Agent registered for node [testapp]`);
 
-  // 4. Launch Edge in Headless Mode with Remote Debugging
-  userDataDir = path.join(os.tmpdir(), 'edge_matrix_profile_' + Date.now());
+  // 4. Launch Browser in Headless Mode with Remote Debugging
+  userDataDir = path.join(os.tmpdir(), 'browser_matrix_profile_' + Date.now());
   fs.mkdirSync(userDataDir, { recursive: true });
 
-  console.log(`[Browser] Launching Headless Chromium Edge on CDP port ${CDP_PORT}...`);
-  edgeProcess = spawn(edgePath, [
+  console.log(`[Browser] Launching Headless Browser on CDP port ${CDP_PORT}...`);
+  edgeProcess = spawn(browserPath, [
     '--headless=new',
     `--remote-debugging-port=${CDP_PORT}`,
     '--disable-gpu',
@@ -354,33 +420,39 @@ async function main() {
   // ============================================================================
   // SECTION 2: TOP 10 REAL WEBSITES MATRIX TESTING
   // ============================================================================
-  console.log('\n========================================================================================');
-  console.log('🌐 PART 2: Real Browser Testing Across Top 10 Real Websites');
-  console.log('========================================================================================\n');
+  const isLocalOnly = process.argv.includes('--local-only') || process.env.E2E_LOCAL_ONLY === '1';
+  if (isLocalOnly) {
+    console.log('\n========================================================================================');
+    console.log('🌐 PART 2: Skipped Top 10 External Websites (--local-only mode active)');
+    console.log('========================================================================================\n');
+  } else {
+    console.log('\n========================================================================================');
+    console.log('🌐 PART 2: Real Browser Testing Across Top 10 Real Websites');
+    console.log('========================================================================================\n');
 
-  const top10Sites = [
-    { nodeId: 'wiki', name: 'Wikipedia', target: 'https://en.wikipedia.org' },
-    { nodeId: 'google', name: 'Google', target: 'https://www.google.com' },
-    { nodeId: 'bilibili', name: 'Bilibili', target: 'https://www.bilibili.com' },
-    { nodeId: 'baidu', name: 'Baidu', target: 'https://www.baidu.com' },
-    { nodeId: 'bing', name: 'Bing', target: 'https://www.bing.com' },
-    { nodeId: 'duckduckgo', name: 'DuckDuckGo', target: 'https://duckduckgo.com' },
-    { nodeId: 'github', name: 'GitHub', target: 'https://github.com' },
-    { nodeId: 'python', name: 'Python', target: 'https://www.python.org' },
-    { nodeId: 'godev', name: 'Go Dev', target: 'https://go.dev' },
-    { nodeId: 'hackernews', name: 'Hacker News', target: 'https://news.ycombinator.com' },
-  ];
+    const top10Sites = [
+      { nodeId: 'wiki', name: 'Wikipedia', target: 'https://en.wikipedia.org' },
+      { nodeId: 'google', name: 'Google', target: 'https://www.google.com' },
+      { nodeId: 'bilibili', name: 'Bilibili', target: 'https://www.bilibili.com' },
+      { nodeId: 'baidu', name: 'Baidu', target: 'https://www.baidu.com' },
+      { nodeId: 'bing', name: 'Bing', target: 'https://www.bing.com' },
+      { nodeId: 'duckduckgo', name: 'DuckDuckGo', target: 'https://duckduckgo.com' },
+      { nodeId: 'github', name: 'GitHub', target: 'https://github.com' },
+      { nodeId: 'python', name: 'Python', target: 'https://www.python.org' },
+      { nodeId: 'godev', name: 'Go Dev', target: 'https://go.dev' },
+      { nodeId: 'hackernews', name: 'Hacker News', target: 'https://news.ycombinator.com' },
+    ];
 
-  for (let i = 0; i < top10Sites.length; i++) {
-    const site = top10Sites[i];
-    console.log(`\n[${i + 1}/10] Testing Target: ${site.name} (${site.target}) via Node [#${site.nodeId}]`);
+    for (let i = 0; i < top10Sites.length; i++) {
+      const site = top10Sites[i];
+      console.log(`\n[${i + 1}/10] Testing Target: ${site.name} (${site.target}) via Node [#${site.nodeId}]`);
 
-    // 1. Launch Agent for this site
-    const siteAgent = spawnProcess(`Agent_${site.nodeId}`, agentBin, [
-      '-node-id', site.nodeId,
-      '-signal', `ws://127.0.0.1:${SIGNAL_PORT}/ws`,
-      '-target', site.target
-    ]);
+      // 1. Launch Agent for this site
+      const siteAgent = spawnProcess(`Agent_${site.nodeId}`, agentBin, [
+        '-node-id', site.nodeId,
+        '-signal', `ws://127.0.0.1:${SIGNAL_PORT}/ws`,
+        '-target', site.target
+      ]);
     await sleep(1500);
 
     // Stop any ongoing loads from previous site
@@ -466,6 +538,7 @@ async function main() {
     // Kill this site's agent to release sockets
     try { siteAgent.kill(); } catch (e) {}
     await sleep(500);
+  }
   }
 
   // ============================================================================
