@@ -605,10 +605,10 @@
         return originalSend.call(this, body);
       }
 
-      // Determine upload body length if computable
+      // Determine upload body length if computable (using native Blob.size avoids TextEncoder string duplicate in V8 heap)
       let totalBytes = 0;
       if (typeof body === 'string') {
-        totalBytes = new TextEncoder().encode(body).length;
+        totalBytes = new Blob([body]).size;
       } else if (body instanceof Blob) {
         totalBytes = body.size;
       } else if (body instanceof ArrayBuffer) {

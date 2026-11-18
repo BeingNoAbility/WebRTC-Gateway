@@ -223,21 +223,32 @@ func (wp *WSProxy) resolveTargetWSURL(reqPath string, headers map[string]string)
 
 // HandleStream handles a WebSocket proxy stream.
 func (wp *WSProxy) HandleStream(sessionID, clientIP string, stream *mux.Stream) {
-	defer stream.Close()
-
-	// 1. Read handshake metadata
 	ctx, cancel := context.WithTimeout(stream.Context(), 10*time.Second)
 	headersPayload, err := stream.ReadHeaders(ctx)
 	cancel()
 
 	if err != nil {
 		log.Printf("[WSProxy] Stream %d failed to read WS handshake: %v", stream.ID(), err)
+		_ = stream.Close()
 		return
 	}
 
 	var meta WSConnectMetadata
 	if err := json.Unmarshal(headersPayload, &meta); err != nil {
 		log.Printf("[WSProxy] Stream %d invalid WS metadata: %v", stream.ID(), err)
+		_ = stream.Close()
+		return
+	}
+
+	wp.HandleStreamWithMeta(sessionID, clientIP, stream, &meta)
+}
+
+// HandleStreamWithMeta handles a WebSocket proxy stream directly with pre-parsed metadata.
+func (wp *WSProxy) HandleStreamWithMeta(sessionID, clientIP string, stream *mux.Stream, meta *WSConnectMetadata) {
+	defer stream.Close()
+
+	if meta == nil {
+		log.Printf("[WSProxy] Stream %d missing WS metadata", stream.ID())
 		return
 	}
 	if meta.Headers == nil && meta.H != nil {

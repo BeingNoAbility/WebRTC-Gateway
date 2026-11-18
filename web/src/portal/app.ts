@@ -60,6 +60,7 @@ class PortalApp {
   private initialSubpath: string = '/';
   private ws: WebSocket | null = null;
   private pc: RTCPeerConnection | null = null;
+  private legacyFallbackAttempted: boolean = false;
 
   // WebRTC HUD Diagnostics & Real-time Metrics
   private hudStatsTimer: any = null;
@@ -135,6 +136,16 @@ class PortalApp {
           ) {
             this.syncRouteToHash(rawPath);
           }
+        }
+      });
+    }
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          this.stopHUDStatsMonitor();
+        } else if (this.pc && (this.pc.connectionState === 'connected' || this.pc.iceConnectionState === 'connected')) {
+          this.startHUDStatsMonitor();
         }
       });
     }
@@ -582,11 +593,28 @@ class PortalApp {
     }
   }
 
+  private getSignalingWsUrl(): string {
+    if (this.legacyFallbackAttempted || !this.peerId) {
+      return this.signalUrl;
+    }
+    try {
+      const u = new URL(this.signalUrl, window.location.href);
+      if (!u.searchParams.has('node')) {
+        u.searchParams.set('node', this.peerId);
+      }
+      return u.toString();
+    } catch {
+      const sep = this.signalUrl.includes('?') ? '&' : '?';
+      return `${this.signalUrl}${sep}node=${encodeURIComponent(this.peerId)}`;
+    }
+  }
+
   private startSignaling() {
-    this.log(`Connecting to signaling server at ${this.signalUrl}...`);
+    const wsUrl = this.getSignalingWsUrl();
+    this.log(`Connecting to signaling server at ${wsUrl}...`);
     this.signalVal.textContent = 'Connecting...';
 
-    this.ws = new WebSocket(this.signalUrl);
+    this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
       this.log('Signaling WebSocket connected. Joining peer room...');
@@ -626,6 +654,7 @@ class PortalApp {
           return;
         }
         if (msg.status === 'online') {
+          this.legacyFallbackAttempted = false;
           this.hideOfflinePrompt();
           if (this.authKeyPromise) {
             await this.authKeyPromise;
@@ -642,6 +671,17 @@ class PortalApp {
           await this.initWebRTC();
         } else {
           this.log(`Target peer [${this.peerId}] is OFFLINE.`);
+          // Cloudflare DO edge sharding fallback (PERF-10 / Trap 4):
+          // If connection was sharded via ?node= and peer reported offline, retry once on legacy global room
+          if (!this.legacyFallbackAttempted && this.ws && this.ws.url && this.ws.url.includes('node=')) {
+            this.legacyFallbackAttempted = true;
+            this.log(`Peer reported offline in sharded room. Falling back to legacy global signaling for compatibility...`);
+            try {
+              this.ws.close();
+            } catch {}
+            this.startSignaling();
+            return;
+          }
           if (this.signalVal) this.signalVal.textContent = 'Peer Offline';
           this.showOfflinePrompt(this.peerId);
         }
@@ -983,11 +1023,27 @@ class PortalApp {
     });
   }
 
+  private isHUDModalOpen(): boolean {
+    const modal = document.getElementById('p2pHudModal');
+    return !!modal && modal.style.display === 'flex';
+  }
+
   private startHUDStatsMonitor() {
-    if (this.hudStatsTimer) return;
+    this.stopHUDStatsMonitor();
+    if (typeof document !== 'undefined' && document.hidden) return;
+
+    const interval = this.isHUDModalOpen() ? 1000 : 3000;
     this.hudStatsTimer = setInterval(async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       await this.updateWebRTCStats();
-    }, 1000);
+    }, interval);
+  }
+
+  private stopHUDStatsMonitor() {
+    if (this.hudStatsTimer) {
+      clearInterval(this.hudStatsTimer);
+      this.hudStatsTimer = null;
+    }
   }
 
   private async updateWebRTCStats() {
@@ -1082,13 +1138,17 @@ class PortalApp {
     const modal = document.getElementById('p2pHudModal');
     if (modal) {
       modal.style.display = 'flex';
+      this.startHUDStatsMonitor();
       this.updateHUDUI();
     }
   }
 
   private closeHUDModal() {
     const modal = document.getElementById('p2pHudModal');
-    if (modal) modal.style.display = 'none';
+    if (modal) {
+      modal.style.display = 'none';
+      this.startHUDStatsMonitor();
+    }
   }
 
   private createHUDModal() {
@@ -1231,7 +1291,11 @@ class PortalApp {
       pillSpeed.textContent = `↓ ${this.hudInfo.rxRateKB} KB/s`;
     }
 
-    // Update HUD Modal if open
+    // Update HUD Modal only if open (PERF-13)
+    if (!this.isHUDModalOpen()) {
+      return;
+    }
+
     const hudBadge = document.getElementById('hudBadge');
     if (hudBadge) {
       if (isRelay) {
@@ -1830,8 +1894,9 @@ class PortalApp {
           try { this.ws.close(); } catch {}
           this.ws = null;
         }
-        this.log(`Re-establishing signaling WebSocket to ${this.signalUrl}...`);
-        this.ws = new WebSocket(this.signalUrl);
+        const wsUrl = this.getSignalingWsUrl();
+        this.log(`Re-establishing signaling WebSocket to ${wsUrl}...`);
+        this.ws = new WebSocket(wsUrl);
 
         this.ws.onopen = () => {
           clearTimeout(timeout);
@@ -1872,6 +1937,7 @@ class PortalApp {
   private reconnect() {
     this.hideOfflinePrompt();
     this.hideAuthPrompt();
+    this.legacyFallbackAttempted = false;
     this.isIceRestarting = false;
     if (this.iceRestartTimer) {
       clearTimeout(this.iceRestartTimer);
@@ -2059,7 +2125,11 @@ class PortalApp {
     // Stream response chunks into Service Worker
     stream.onData((chunk: Uint8Array, fin: boolean) => {
       if (chunk.byteLength > 0) {
-        const buf = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+        // Fast zero-copy transfer when chunk buffer is unshared, slice only if bounded view
+        const canTransfer = chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength;
+        const buf = canTransfer
+          ? chunk.buffer
+          : chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
         port.postMessage({
           type: 'RESP_CHUNK',
           chunk: buf,
@@ -2115,37 +2185,90 @@ class PortalApp {
       }
     });
 
-    // Relays incoming stream data to WS port with defragmentation buffer
-    let wsBuffer = new Uint8Array(0);
+    // Relays incoming stream data to WS port with linear defragmentation accumulator (PERF-03)
+    const pendingChunks: Uint8Array[] = [];
+    let totalBuffered = 0;
+
+    const peekHeader = (): { opcode: number; length: number } | null => {
+      if (totalBuffered < 5) return null;
+      if (pendingChunks[0].byteLength >= 5) {
+        const c = pendingChunks[0];
+        const view = new DataView(c.buffer, c.byteOffset, c.byteLength);
+        return { opcode: c[0], length: view.getUint32(1, false) };
+      }
+      const hdr = new Uint8Array(5);
+      let copied = 0;
+      for (const c of pendingChunks) {
+        const toCopy = Math.min(5 - copied, c.byteLength);
+        hdr.set(c.subarray(0, toCopy), copied);
+        copied += toCopy;
+        if (copied === 5) break;
+      }
+      const view = new DataView(hdr.buffer, hdr.byteOffset, hdr.byteLength);
+      return { opcode: hdr[0], length: view.getUint32(1, false) };
+    };
+
+    const consumeBytes = (n: number): Uint8Array => {
+      if (pendingChunks.length === 0 || n <= 0) return new Uint8Array(0);
+      if (pendingChunks[0].byteLength === n) {
+        const result = pendingChunks.shift()!;
+        totalBuffered -= n;
+        return result;
+      }
+      if (pendingChunks[0].byteLength > n) {
+        const first = pendingChunks[0];
+        const result = first.subarray(0, n);
+        pendingChunks[0] = first.subarray(n);
+        totalBuffered -= n;
+        return result;
+      }
+      const result = new Uint8Array(n);
+      let copied = 0;
+      while (copied < n && pendingChunks.length > 0) {
+        const first = pendingChunks[0];
+        const toCopy = Math.min(n - copied, first.byteLength);
+        result.set(first.subarray(0, toCopy), copied);
+        copied += toCopy;
+        if (toCopy === first.byteLength) {
+          pendingChunks.shift();
+        } else {
+          pendingChunks[0] = first.subarray(toCopy);
+        }
+      }
+      totalBuffered -= n;
+      return result;
+    };
+
     stream.onData((chunk: Uint8Array, fin: boolean) => {
       if (chunk.byteLength > 0) {
-        const next = new Uint8Array(wsBuffer.byteLength + chunk.byteLength);
-        next.set(wsBuffer, 0);
-        next.set(chunk, wsBuffer.byteLength);
-        wsBuffer = next;
+        pendingChunks.push(chunk);
+        totalBuffered += chunk.byteLength;
 
-        while (wsBuffer.byteLength >= 5) {
-          const opcode = wsBuffer[0];
-          const view = new DataView(wsBuffer.buffer, wsBuffer.byteOffset, wsBuffer.byteLength);
-          const length = view.getUint32(1, false);
-
-          if (wsBuffer.byteLength < 5 + length) {
+        let hdr: { opcode: number; length: number } | null;
+        while ((hdr = peekHeader()) !== null) {
+          if (totalBuffered < 5 + hdr.length) {
             // Need more data from next chunk
             break;
           }
 
-          const payload = wsBuffer.subarray(5, 5 + length);
-          if (opcode === 1) {
+          consumeBytes(5);
+          const payload = consumeBytes(hdr.length);
+
+          if (hdr.opcode === 1) {
             const text = new TextDecoder().decode(payload);
             port.postMessage({ type: 'WS_MSG', data: text });
           } else {
-            const payloadBuf = wsBuffer.buffer.slice(wsBuffer.byteOffset + 5, wsBuffer.byteOffset + 5 + length);
+            const canTransfer = payload.byteOffset === 0 && payload.byteLength === payload.buffer.byteLength;
+            const payloadBuf = canTransfer
+              ? payload.buffer
+              : payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
             port.postMessage({ type: 'WS_MSG', data: payloadBuf }, [payloadBuf]);
           }
-          wsBuffer = wsBuffer.subarray(5 + length);
         }
       }
       if (fin) {
+        pendingChunks.length = 0;
+        totalBuffered = 0;
         port.postMessage({ type: 'WS_CLOSED' });
         this.updateStreamsCount(-1);
       }

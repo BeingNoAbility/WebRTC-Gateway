@@ -505,6 +505,14 @@ func (a *Agent) Start(ctx context.Context) error {
 			log.Fatalf("[Agent] Invalid signaling URL: %v", err)
 		}
 
+		// Cloudflare Workers Durable Objects edge sharding optimization (PERF-10):
+		// Bind connection directly to the node's dedicated DO room via query parameter
+		if u.Query().Get("node") == "" && a.NodeID != "" {
+			q := u.Query()
+			q.Set("node", a.NodeID)
+			u.RawQuery = q.Encode()
+		}
+
 		dialer := *websocket.DefaultDialer
 		dialer.HandshakeTimeout = 5 * time.Second
 		tlsConfig := &tls.Config{}
@@ -928,10 +936,25 @@ func (a *Agent) streamAcceptLoop(sessionID, cookieSession string, m *mux.Mux) {
 			}
 
 			var probe struct {
-				Headers   map[string]string `json:"h"`
-				Protocols []string          `json:"protocols"`
+				Method     string            `json:"m"`
+				Path       string            `json:"p"`
+				PathAlt    string            `json:"path"`
+				Headers    map[string]string `json:"h"`
+				HeadersAlt map[string]string `json:"headers"`
+				Protocols  []string          `json:"protocols"`
 			}
-			_ = json.Unmarshal(headersPayload, &probe)
+			if err := json.Unmarshal(headersPayload, &probe); err != nil {
+				log.Printf("[Agent] [Session %s] Stream %d failed to parse probe headers: %v", sessionID, s.ID(), err)
+				_ = s.Reset()
+				return
+			}
+
+			if probe.Path == "" && probe.PathAlt != "" {
+				probe.Path = probe.PathAlt
+			}
+			if probe.Headers == nil && probe.HeadersAlt != nil {
+				probe.Headers = probe.HeadersAlt
+			}
 
 			isWebSocket := false
 			if len(probe.Protocols) > 0 {
@@ -945,25 +968,37 @@ func (a *Agent) streamAcceptLoop(sessionID, cookieSession string, m *mux.Mux) {
 				}
 			}
 
-			// Restore headers for the proxy handler
-			s.PushInternalHeaders(headersPayload)
-
 			if a.fileProxy != nil {
 				if isWebSocket {
 					log.Printf("[Agent] [Session %s] WebSocket not supported in file server mode, resetting stream %d", sessionID, s.ID())
 					_ = s.Reset()
 					return
 				}
-				a.fileProxy.HandleStream(cookieSession, s)
+				reqMeta := &proxy.RequestMetadata{
+					Method:  probe.Method,
+					Path:    probe.Path,
+					Headers: probe.Headers,
+				}
+				a.fileProxy.HandleStreamWithMeta(cookieSession, s, reqMeta)
 				return
 			}
 
 			clientIP := a.getClientIP(sessionID)
 			if isWebSocket {
 				log.Printf("[Agent] [Session %s] Routing Stream %d to WebSocket Proxy", sessionID, s.ID())
-				a.wsProxy.HandleStream(cookieSession, clientIP, s)
+				wsMeta := &proxy.WSConnectMetadata{
+					Path:      probe.Path,
+					Protocols: probe.Protocols,
+					Headers:   probe.Headers,
+				}
+				a.wsProxy.HandleStreamWithMeta(cookieSession, clientIP, s, wsMeta)
 			} else {
-				a.httpProxy.HandleStream(cookieSession, clientIP, s)
+				reqMeta := &proxy.RequestMetadata{
+					Method:  probe.Method,
+					Path:    probe.Path,
+					Headers: probe.Headers,
+				}
+				a.httpProxy.HandleStreamWithMeta(cookieSession, clientIP, s, reqMeta)
 			}
 		}(stream)
 	}

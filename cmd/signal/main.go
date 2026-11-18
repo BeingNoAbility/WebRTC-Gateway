@@ -207,20 +207,31 @@ func (b *SignalBroker) GetClient(sessionID string) *Session {
 
 func (b *SignalBroker) NotifyWaitingClients(nodeID string) {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-
 	reqAuth := b.nodeVisitorAuth[nodeID]
+	var targets []*Session
 	for _, client := range b.clients {
 		if client.NodeID == nodeID {
+			targets = append(targets, client)
+		}
+	}
+	b.mu.RUnlock()
+
+	if len(targets) == 0 {
+		return
+	}
+
+	// Dispatch notifications asynchronously to avoid head-of-line blocking on slow WebSocket writes (PERF-09)
+	go func(clients []*Session, auth bool) {
+		for _, client := range clients {
 			_ = client.Send(&signaling.Message{
 				Type:           signaling.TypePeerStatus,
 				NodeID:         nodeID,
-				SessionID:      client.ID,
+				SessionID:      client.ID, // Preserve each client's unique SessionID (Trap 1)
 				Status:         "online",
-				RequiresSecret: reqAuth,
+				RequiresSecret: auth,
 			})
 		}
-	}
+	}(targets, reqAuth)
 }
 
 func (b *SignalBroker) AgentCount() int {

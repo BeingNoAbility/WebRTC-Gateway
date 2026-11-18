@@ -111,15 +111,13 @@ func (fp *FileProxy) FileSize() int64 {
 
 // HandleStream handles an incoming multiplexed stream and serves files/directories in memory.
 func (fp *FileProxy) HandleStream(sessionID string, stream *mux.Stream) {
-	defer stream.Close()
-
-	// 1. Read request headers with timeout
 	ctx, cancel := context.WithTimeout(stream.Context(), 10*time.Second)
 	headersPayload, err := stream.ReadHeaders(ctx)
 	cancel()
 
 	if err != nil {
 		log.Printf("[FileProxy] Stream %d failed to read headers: %v", stream.ID(), err)
+		_ = stream.Close()
 		return
 	}
 
@@ -127,6 +125,19 @@ func (fp *FileProxy) HandleStream(sessionID string, stream *mux.Stream) {
 	if err := json.Unmarshal(headersPayload, &reqMeta); err != nil {
 		log.Printf("[FileProxy] Stream %d failed to parse request headers: %v", stream.ID(), err)
 		fp.sendError(stream, http.StatusBadRequest, "Invalid request metadata")
+		_ = stream.Close()
+		return
+	}
+
+	fp.HandleStreamWithMeta(sessionID, stream, &reqMeta)
+}
+
+// HandleStreamWithMeta serves files/directories in memory using pre-parsed request metadata.
+func (fp *FileProxy) HandleStreamWithMeta(sessionID string, stream *mux.Stream, reqMeta *RequestMetadata) {
+	defer stream.Close()
+
+	if reqMeta == nil {
+		fp.sendError(stream, http.StatusBadRequest, "Missing request metadata")
 		return
 	}
 

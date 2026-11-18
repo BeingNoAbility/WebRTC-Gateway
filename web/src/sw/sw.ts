@@ -30,6 +30,7 @@ interface PortalSession {
   backendRootDomain?: string;
   allowedDomains?: string[];
   lastActive: number;
+  lastVerified?: number;
 }
 
 const sessions = new Map<string, PortalSession>();
@@ -71,12 +72,14 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
           port: port || null,
           nodeId: peerId,
           lastActive: Date.now(),
+          lastVerified: Date.now(),
         };
         sessions.set(clientId, session);
       } else {
         if (port) session.port = port;
         if (peerId) session.nodeId = peerId;
         session.lastActive = Date.now();
+        session.lastVerified = Date.now();
       }
       lastActiveSession = session;
     } else if (port) {
@@ -86,6 +89,7 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
         port,
         nodeId: peerId,
         lastActive: Date.now(),
+        lastVerified: Date.now(),
       };
       sessions.set(anonId, session);
       lastActiveSession = session;
@@ -245,20 +249,25 @@ sw.addEventListener('fetch', (event: FetchEvent) => {
 async function handleTunneledRequest(request: Request, initialSession: PortalSession | null): Promise<Response> {
   let session = initialSession;
 
-  // Lazy GC: Verify that the selected session's client is still alive
+  // Lazy GC: Verify that the selected session's client is still alive (throttled to 5s window to avoid IPC storms)
+  const now = Date.now();
   if (session && session.clientId && !session.clientId.startsWith('anon_')) {
-    try {
-      const isAlive = await sw.clients.get(session.clientId);
-      if (!isAlive) {
-        sessions.delete(session.clientId);
-        for (const [childId, parentId] of iframeToPortalMap.entries()) {
-          if (parentId === session.clientId) {
-            iframeToPortalMap.delete(childId);
+    if (!session.lastVerified || now - session.lastVerified > 5000) {
+      try {
+        const isAlive = await sw.clients.get(session.clientId);
+        if (!isAlive) {
+          sessions.delete(session.clientId);
+          for (const [childId, parentId] of iframeToPortalMap.entries()) {
+            if (parentId === session.clientId) {
+              iframeToPortalMap.delete(childId);
+            }
           }
+          session = null; // Stale session purged!
+        } else {
+          session.lastVerified = now;
         }
-        session = null; // Stale session purged!
-      }
-    } catch {}
+      } catch {}
+    }
   }
 
   // If session was invalid, purged, or missing, discover living portal client
@@ -548,13 +557,18 @@ function findAsciiTagEnd(bytes: Uint8Array, tagName: string): number {
   return -1;
 }
 
-function concatByteArrays(a: Uint8Array, b: Uint8Array, c?: Uint8Array): Uint8Array {
-  const totalLen = a.length + b.length + (c ? c.length : 0);
+function concatByteArrays(...arrays: (Uint8Array | undefined)[]): Uint8Array {
+  let totalLen = 0;
+  for (const arr of arrays) {
+    if (arr) totalLen += arr.length;
+  }
   const out = new Uint8Array(totalLen);
-  out.set(a, 0);
-  out.set(b, a.length);
-  if (c) {
-    out.set(c, a.length + b.length);
+  let offset = 0;
+  for (const arr of arrays) {
+    if (arr) {
+      out.set(arr, offset);
+      offset += arr.length;
+    }
   }
   return out;
 }
@@ -582,50 +596,78 @@ function injectScriptIntoHtmlStream(
   const patchScript = `${metaReferrer}${contextTag}${originTag}<script src="/patch.js"></script>`;
   let injected = false;
   const encoder = new TextEncoder();
+  const initChunks: Uint8Array[] = [];
+  let initBytes = 0;
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
+      if (!injected) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (value && value.byteLength > 0) {
+            initChunks.push(value);
+            initBytes += value.byteLength;
+          }
+
+          const combined = initChunks.length === 1 ? initChunks[0] : concatByteArrays(...initChunks);
+
+          // 1. Check if <head> is present in accumulated bytes
+          const headPos = findAsciiTagEnd(combined, 'head');
+          if (headPos !== -1) {
+            injected = true;
+            const patchBytes = encoder.encode(patchScript);
+            const before = combined.subarray(0, headPos);
+            const after = combined.subarray(headPos);
+            controller.enqueue(concatByteArrays(before, patchBytes, after));
+            if (done) controller.close();
+            return;
+          }
+
+          // 2. If accumulated bytes >= 2048 or stream ended, evaluate fallback injection
+          if (initBytes >= 2048 || done) {
+            injected = true;
+            const patchBytes = encoder.encode(patchScript);
+
+            const htmlPos = findAsciiTagEnd(combined, 'html');
+            if (htmlPos !== -1) {
+              const headWrapper = encoder.encode(`<head>${patchScript}</head>`);
+              const before = combined.subarray(0, htmlPos);
+              const after = combined.subarray(htmlPos);
+              controller.enqueue(concatByteArrays(before, headWrapper, after));
+            } else {
+              const doctypePos = findAsciiTagEnd(combined, '!doctype');
+              if (doctypePos !== -1) {
+                const headWrapper = encoder.encode(`<head>${patchScript}</head>`);
+                const before = combined.subarray(0, doctypePos);
+                const after = combined.subarray(doctypePos);
+                controller.enqueue(concatByteArrays(before, headWrapper, after));
+              } else {
+                controller.enqueue(concatByteArrays(patchBytes, combined));
+              }
+            }
+
+            if (done) controller.close();
+            return;
+          }
+
+          if (done) {
+            injected = true;
+            if (combined.byteLength > 0) {
+              controller.enqueue(combined);
+            }
+            controller.close();
+            return;
+          }
+        }
+      }
+
+      // Subsequent chunks pass through directly without string conversion or UTF-8 slicing corruption
       const { done, value } = await reader.read();
       if (done) {
         controller.close();
         return;
       }
-
-      if (!injected && value) {
-        injected = true;
-        const patchBytes = encoder.encode(patchScript);
-
-        const headPos = findAsciiTagEnd(value, 'head');
-        if (headPos !== -1) {
-          const before = value.subarray(0, headPos);
-          const after = value.subarray(headPos);
-          controller.enqueue(concatByteArrays(before, patchBytes, after));
-          return;
-        }
-
-        const htmlPos = findAsciiTagEnd(value, 'html');
-        if (htmlPos !== -1) {
-          const headWrapper = encoder.encode(`<head>${patchScript}</head>`);
-          const before = value.subarray(0, htmlPos);
-          const after = value.subarray(htmlPos);
-          controller.enqueue(concatByteArrays(before, headWrapper, after));
-          return;
-        }
-
-        // F-10: If <head> and <html> are absent, check for <!DOCTYPE ...> to avoid Quirks Mode
-        const doctypePos = findAsciiTagEnd(value, '!doctype');
-        if (doctypePos !== -1) {
-          const headWrapper = encoder.encode(`<head>${patchScript}</head>`);
-          const before = value.subarray(0, doctypePos);
-          const after = value.subarray(doctypePos);
-          controller.enqueue(concatByteArrays(before, headWrapper, after));
-          return;
-        }
-
-        // Neither <head>, <html>, nor <!DOCTYPE> tag matched in the first chunk, prepend patch bytes
-        controller.enqueue(concatByteArrays(patchBytes, value));
-      } else if (value) {
-        // Subsequent chunks pass through directly without string conversion or UTF-8 slicing corruption
+      if (value && value.byteLength > 0) {
         controller.enqueue(value);
       }
     },
