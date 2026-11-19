@@ -75,66 +75,53 @@
 
 ## 2. Frequently Asked Questions (FAQ)
 
-### Q: What is the network throughput in direct P2P mode?
-**A:** Once WebRTC punching establishes a direct P2P connection, data flows peer-to-peer over user-space UDP (DTLS 1.2 / SRTP, RFC 8831), bypassing all public cloud relay bandwidth bottlenecks. Actual throughput is bounded by physical link bandwidth, round-trip time (RTT), SCTP congestion control mechanics, and single-core DTLS crypto compute limits. In gigabit LAN and high-speed broadband environments, it fully utilizes available physical uplink. Official benchmark suites (1000 concurrent streams) demonstrate scheduling throughput reaching 2,307.9 streams/s with bounded linear memory overhead.
+### Q: Do visitors need to install any software or plugins on their phones or computers?
+**A:** Not at all. Visitors only need a standard modern web browser (such as Chrome, Edge, Safari, or Firefox). Simply open the generated Web portal address or shared link to access intranet services directly. No client application, no VPN configuration, and no browser extensions are required on the visitor side, providing true zero-client access.
 
-### Q: How does the v2.3 Native Dual-Channel Architecture (`p2pcontrol` + `p2pdata`) eliminate Head-of-Line (HoL) blocking during bulk transfers?
-**A:** Under a single-channel design, transmitting multi-gigabyte files or handling high-volume chunked streams saturates the underlying SCTP buffer, triggering transport-level backpressure. Consequently, crucial control frames like `HEADERS` (initiating requests), `PING`/`PONG` (keepalive), and `RST_STREAM` (cancellation) are queued behind bulk data, creating severe Head-of-Line (HoL) latency spikes.
-Starting in **v2.3**, the system establishes two decoupled WebRTC DataChannels during handshake:
-- **`p2pcontrol`**: Dedicated exclusively to `HEADERS`, `PING`, `PONG`, `RST_STREAM`, and `WINDOW_UPDATE`, physically bypassing data backpressure queues to maintain sub-10ms latency even during link saturation;
-- **`p2pdata`**: Exclusively carries `DATA` and `WS_DATA` payloads under strict governance (128MB global memory ceiling, 96MB/64MB dual-watermark backpressure);
-- **Orphan Frame Reconciliation**: To handle out-of-order parallel SCTP stream arrivals (`DATA` arriving before `HEADERS`), the multiplexer provisions an orphan buffer pool (64KB per stream, 256KB global cap, 500ms TTL) that flushes frames in order upon `HEADERS` arrival or reclaims stalled streams via `RST_STREAM`, achieving zero data loss and lock-free concurrency.
+### Q: Do I need a public IP address or router port forwarding (DDNS) on the host machine?
+**A:** Not at all. The system leverages the standard WebRTC peer-to-peer (P2P) protocol to automatically perform NAT traversal and establish direct communication channels between devices. Even if your home broadband operates behind multi-layer carrier-grade NAT (CGNAT) without a public IPv4 address, or if you cannot modify router settings in a rental apartment, devices can punch through and connect directly as long as a lightweight signaling service brokers initial handshake coordinates.
 
-### Q: Will downloading multi-gigabyte files in the Web portal cause browser Out-Of-Memory (OOM) or tab crashes?
-**A:** Not at all. Legacy web applications often trigger downloads via simulated `<a download="file" href="blob:...">` tags, forcing the browser to buffer the entire binary payload in the JavaScript V8 heap and triggering fatal tab crashes (Chromium Bug 40410035).
-The gateway's built-in **P2P File Vault** solves this with an adaptive dual-mode persistence architecture:
-1. **Stream-to-Disk (showSaveFilePicker)**: In modern browsers (Chromium 86+), files exceeding 500MB automatically trigger the native File System Access API `showSaveFilePicker`, piping chunks directly into the local filesystem via a `WritableStream`. Data frames unpacked by the Service Worker are flushed directly to disk, keeping JavaScript heap memory usage at a constant $O(1)$;
-2. **Streaming Fetch Interception**: For smaller files or browsers without the File System API, streaming `fetch(viewUrl)` mediated by the Service Worker provides real-time speed calculation, progress tracking, and `AbortController` cancellation cleanup, eliminating memory buildup.
+### Q: Is data transmission secure? Can cloud servers or third parties spy on my private data?
+**A:** It provides high-grade security through layered cryptographic mechanisms:
+1. **Mandatory Transport Layer Encryption**: All data transmitted over WebRTC is end-to-end encrypted by default using DTLS 1.2 and SRTP, preventing any third-party eavesdropping;
+2. **Direct P2P Routing**: After the initial handshake, data flows directly between the two peer devices. The public signaling server neither inspects nor routes business traffic; even in rare cases where TURN relay fallback is active, the relay server merely forwards encrypted packets and cannot decrypt the payload;
+3. **Strict Authentication & Anti-Replay**: The platform supports visitor password gates and temporary signed links bound to HMAC-SHA256 signatures and visitor device certificates, preventing unauthorized cross-device link misuse.
 
-### Q: How does mandatory DTLS certificate fingerprint binding (F-04) fundamentally improve signed link (`-sign-link`) security in v2.3+?
-**A:** Conventional tunneling tools rely on static tokens or bearer query parameters that remain vulnerable to cross-device replay if copied, intercepted in transit, or leaked in server logs.
-Starting in **v2.3**, the gateway establishes a strict **cryptographic generational boundary**:
-- During the WebRTC handshake, the visitor browser generates an ephemeral DTLS certificate and derives its SHA-256 fingerprint (`sdpFingerprint`);
-- The authorization mechanism binds this `sdpFingerprint` into the HMAC-SHA256 signature computation alongside timestamp expiration;
-- Even if an adversary intercepts the full signed URL, handshake attempts from any distinct device or untrusted DTLS certificate fail signature verification, defeating cross-device replay attacks.
+### Q: If I download large files or movies from my NAS, will it consume my cloud server bandwidth or data traffic?
+**A:** In the vast majority of network environments, it consumes zero server bandwidth:
+- Once a direct P2P connection is established, traffic travels entirely across the physical broadband connection between the two devices. Transmission speed is determined solely by your local upload and download capabilities, **consuming 0 bytes of relay server traffic**;
+- Only when both peers are restricted by strict enterprise firewalls or symmetric NATs that prevent direct punching will traffic route through a TURN relay, in which case relay server bandwidth is used.
 
-### Q: How is network traffic routed between LAN peers versus WAN peers? Does it inadvertently consume public server bandwidth?
-**A:** WebRTC strictly implements IETF RFC 8445 Interactive Connectivity Establishment (ICE) for candidate harvesting and connectivity verification (STUN Binding Requests):
-1. **Candidate Gathering**: Both peers simultaneously gather `host` (physical LAN network card IP), `srflx` (STUN-discovered server-reflexive public IP), and `relay` (TURN relay IP) candidates;
-2. **Local Peer Direct Routing (Zero Cloud Bandwidth)**: When the visitor and Agent reside on the same Wi-Fi network or LAN switch, ICE connectivity checks prioritize the `host <-> host` pair. Data frames travel directly across local network adapters with sub-millisecond latency (< 1ms), consuming zero public cloud relay bandwidth. The signaling server merely brokers a few kilobytes of SDP handshake text;
-3. **WAN P2P Traversal**: Across the public Internet, ICE negotiates direct `srflx <-> srflx` peer-to-peer punching whenever either side is not behind a symmetric NAT. Relay traversal via TURN is activated only when both sides are restricted by strict symmetric NAT topologies.
+### Q: Does it work reliably on Apple devices (iPhone / iPad / Mac Safari) and Android phones?
+**A:** Yes, it is fully compatible. As long as the device runs a modern browser meeting standard specifications (such as Safari on iOS 14.3+ or mainstream browsers on Android 8.0+), it opens seamlessly. Mobile devices support complete touch interactions, smooth audio/video streaming, context menus, and direct local file saving.
 
-### Q: Why does Smart Pill avoid keystroke conflicts or accidental triggers in web terminals (e.g. Web SSH, Vim, Code-Server, NoVNC)?
-**A:** Smart Pill 2.1 incorporates dedicated interaction hygiene engineering for high-density terminal environments:
-1. **Zero Keyboard Interception**: The Smart Pill DOM component registers zero global `keydown`, `keyup`, or `keypress` listeners and never steals input focus. Keystrokes such as `Ctrl+C`, `Esc`, Vim combinations, and terminal shortcuts pass through 100% untouched to the underlying container;
-2. **Euclidean Distance Gesture Disambiguation**: PointerCapture state mechanics differentiate taps from drags: displacements exceeding 5 pixels are treated as intentional drags, while motions $\le 5\text{px}$ trigger console modal activation, eliminating jitter false positives;
-3. **Breathing Dot Collapse & Magnetic Edge Snapping**: The UI easily collapses into an unobtrusive 28px breathing dot with automatic screen edge snapping, injecting `pointer-events: none` into background iframes during drag motions to prevent event swallowing.
+### Q: Will the connection disconnect when my phone switches between home Wi-Fi and 5G cellular on the go?
+**A:** No, it will not disconnect. The gateway includes an automatic network self-healing mechanism (ICE Restart). When the phone detects an underlying network handover from Wi-Fi to cellular (or between different Wi-Fi access points), it automatically renegotiates the connection path within a few seconds without reloading the page or tearing down active video playback, allowing you to continue uninterrupted.
 
-### Q: Does my intranet application need code modifications? How is real visitor IP preserved?
-**A:** No backend code modifications are required.
-- **Transparent Interception**: In the browser, the Service Worker intercepts standard HTTP/HTTPS requests and WebSockets transparently. On the Agent side, demultiplexed binary frames are forwarded to the local target application as standard HTTP/1.1 and RFC 6455 connections;
-- **Authoritative IP Injection**: To satisfy enterprise WAFs, SafeLine, and security audit logs, the signaling server authoritatively extracts the visitor's public transport IP during handshake, and the Agent overwrites standard `X-Forwarded-For` and `X-Real-IP` request headers. Upstream services (Nginx, Go, Node.js, Python) perform single-IP rate limiting and geographical audit tracking exactly as if exposed directly to the public Internet.
+### Q: Can I connect to multiple computers or distinct services (such as NAS, Jellyfin, photo library) at home simultaneously?
+**A:** Yes, management is flexible:
+- **Multiple Independent Nodes**: You can run multiple Agents on different machines or the same host with unique node names (such as `nas`, `jellyfin`, or `photos`);
+- **Subdomain Origin Isolation (Recommended)**: Using wildcard domain routing (such as `nas.p2p.yourdomain.com` and `jellyfin.p2p.yourdomain.com`), the browser assigns distinct physical origins to each service, keeping login cookies and local storage completely isolated without credential collisions;
+- **Single-Domain Access**: You can also use the unified portal with node identifiers (such as `https://p2p.yourdomain.com/#nas`) for instant setup.
 
-### Q: Can I share large files directly without hosting a cloud drive?
-**A:** Yes. Using the Agent's built-in single file mode (`-file`), any large file (e.g. 20GB ISO or archive) can be served directly without third-party web servers:
-```bash
-./agent -file ./large-game.zip -access-secret pass123 -sign-link 24h
-```
-The generated time-limited signed link allows recipient browsers to download directly over P2P streaming with HTTP 206 Range resumption, consuming zero relay bandwidth and expiring automatically.
+### Q: How do I safely share a large file from my home computer with a friend temporarily?
+**A:** It is quick and straightforward, eliminating the need to pre-upload files to third-party cloud drives:
+1. Start the Agent in single-file mode on your computer, specifying the desired validity window (e.g. 24 hours):
+   ```bash
+   ./agent -file ./family-video.mp4 -access-secret mypass -sign-link 24h
+   ```
+2. The terminal immediately outputs a time-limited signed URL;
+3. Send the link to your friend. Opening it in any desktop or mobile browser downloads the file directly from your computer over P2P streaming at maximum available speed (with resume support). The link expires automatically after 24 hours without manual cleanup.
 
-### Q: Why do some intranet dashboards fail to load inside iframe tabs? How do I choose between Subdomain and Hash routing?
-**A:** Many administrative dashboards include `Anti-Frame-Busting` scripts (such as checking `window.top !== window.self` to break out or abort rendering).
-- The gateway's `patch.js` virtualizes window hierarchy references (`window.top`, `window.parent`) to neutralize nested sandbox restrictions transparently;
-- **Recommended Routing Topology**:
-  - **Subdomain Routing (Recommended for Production)**: Configure wildcard DNS (`*.p2p.yourdomain.com`) so distinct services map to distinct subdomains (e.g. `jellyfin.p2p.yourdomain.com` and `vaultwarden.p2p.yourdomain.com`). The browser allocates an independent physical Origin to each application, establishing strict isolation for LocalStorage, IndexedDB, and Cookie jars with zero credential pollution;
-  - **Single-Domain Hash Mode**: Access via `https://p2p.yourdomain.com/#nodeId`, which requires no wildcard DNS or SSL certificates and uses Service Worker virtualization for sandboxed multiplexing.
+### Q: What is the floating pill on the bottom-right of the screen, and how can I move or hide it?
+**A:** The Smart Pill is a lightweight companion widget showing link quality, latency, and reconnection controls. If it covers page content:
+- **One-Click Collapse**: Tap the collapse button to shrink it into an unobtrusive 28px semi-transparent breathing dot;
+- **Free Dragging & Magnetic Edge Snapping**: Drag it anywhere using touch or mouse; releasing it snaps it naturally to the nearest screen edge;
+- **Zero Keyboard Interception**: The pill does not register global keyboard listeners. When typing in web terminals (such as Web SSH), code editors, or complex forms, all key shortcuts pass through directly to your application.
 
-### Q: Why do external media or third-party CDN assets fail to load when proxying rich-media websites?
-**A:** Modern rich-media web applications frequently reference third-party CDNs and cross-origin static assets (e.g. external image hosts or video slice CDNs):
-- To prevent misuse as an unrestricted public open proxy (Open Proxy Abuse), the gateway establishes a defensive boundary on `/--p2p-proxy/` requests, proxying only same-origin or explicitly whitelisted targets;
-- **Resolution**: In the Agent CLI parameters or configuration file, declare an `-allowed-proxy-domains` wildcard whitelist (for example, allowing Bilibili media CDNs):
-  ```bash
-  ./agent -node-id mybili -target http://127.0.0.1:8080 \
-          -allowed-proxy-domains "*.hdslb.com,*.bilivideo.com,*.akamaized.net"
-  ```
-  Authorized external media requests will proxy seamlessly without opening the gateway to unrestricted proxy abuse.
+### Q: Why is the page stuck on "Connecting" or failing to connect? How should an everyday user troubleshoot?
+**A:** If you experience connection issues, follow this simple checklist:
+1. **Verify Host Status**: Ensure the target computer or NAS is powered on, awake (not in sleep mode), connected to the network, and the Agent process is active;
+2. **Check Password & Expiration**: If the node is password-protected, verify the password entered in the prompt. If using a shared link, check whether the expiration window has passed;
+3. **Verify Restrictive Network Environments**: If accessing from a locked-down corporate network, direct peer-to-peer punching may be blocked by strict firewalls. Configuring a free TURN relay server on the Agent or server resolves this;
+4. **Trigger Manual Reconnect**: Click the floating Smart Pill in the bottom-right corner and tap "Reconnect" or "Trigger ICE Restart" to re-establish the connection.
