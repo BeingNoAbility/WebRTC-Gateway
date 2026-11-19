@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -240,25 +241,27 @@ func TestAgent_TeardownGraceWindow(t *testing.T) {
 	defer ag.Close()
 
 	sessionID := "test-session-123"
+	sess := ag.getOrCreateSession(sessionID, sessionID, "")
+
 	// Schedule grace teardown
-	ag.schedulePendingTeardown(sessionID, sessionID, nil)
+	ag.schedulePendingTeardown(sessionID, sess.Generation, nil)
 
-	ag.pendingMu.Lock()
-	timer, exists := ag.pendingTeardowns[sessionID]
-	ag.pendingMu.Unlock()
+	sess.mu.Lock()
+	timer := sess.teardownTimer
+	sess.mu.Unlock()
 
-	if !exists || timer == nil {
+	if timer == nil {
 		t.Fatalf("Expected pending teardown timer to exist")
 	}
 
 	// Cancel grace teardown (e.g. ICE Restart Offer arrived)
 	ag.cancelPendingTeardown(sessionID)
 
-	ag.pendingMu.Lock()
-	_, existsAfterCancel := ag.pendingTeardowns[sessionID]
-	ag.pendingMu.Unlock()
+	sess.mu.Lock()
+	timerAfterCancel := sess.teardownTimer
+	sess.mu.Unlock()
 
-	if existsAfterCancel {
+	if timerAfterCancel != nil {
 		t.Fatalf("Expected pending teardown timer to be removed after cancel")
 	}
 }
@@ -422,7 +425,8 @@ func TestAgent_SessionClientIP_LifecycleAndCleanup(t *testing.T) {
 	}
 
 	// 3. Process offer with client IP
-	ag.handleOffer("sess-test-1", "198.51.100.99", &offer, "", false)
+	sess1 := ag.getOrCreateSession("sess-test-1", "sess-test-1", "198.51.100.99")
+	ag.handleOffer(sess1, &offer, "", false)
 
 	if ip := ag.getClientIP("sess-test-1"); ip != "198.51.100.99" {
 		t.Fatalf("Expected clientIP 198.51.100.99, got: %q", ip)
@@ -433,20 +437,24 @@ func TestAgent_SessionClientIP_LifecycleAndCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create ICE restart offer: %v", err)
 	}
-	ag.handleOffer("sess-test-1", "198.51.100.150", &restartOffer, "", true)
+	sess1.mu.Lock()
+	sess1.ClientIP = "198.51.100.150"
+	sess1.mu.Unlock()
+	ag.handleOffer(sess1, &restartOffer, "", true)
 	if ip := ag.getClientIP("sess-test-1"); ip != "198.51.100.150" {
 		t.Fatalf("Expected updated clientIP 198.51.100.150 after ICE Restart, got: %q", ip)
 	}
 
 	// 4. Teardown session and verify IP is cleaned up (anti-leak)
-	ag.teardownSession("sess-test-1", "sess-test-1", nil)
+	ag.teardownSession("sess-test-1", sess1.Generation, sess1.PC)
 
 	if ip := ag.getClientIP("sess-test-1"); ip != "" {
 		t.Fatalf("Expected clientIP to be deleted after teardown, got: %q", ip)
 	}
 
 	// 5. Add another session and verify Close() cleans everything up
-	ag.handleOffer("sess-test-2", "203.0.113.88", &offer, "", false)
+	sess2 := ag.getOrCreateSession("sess-test-2", "sess-test-2", "203.0.113.88")
+	ag.handleOffer(sess2, &offer, "", false)
 	if ip := ag.getClientIP("sess-test-2"); ip != "203.0.113.88" {
 		t.Fatalf("Expected clientIP 203.0.113.88, got: %q", ip)
 	}
@@ -542,11 +550,15 @@ func TestAgent_PendingICECandidates_BufferedAndFlushed(t *testing.T) {
 	// 1. Candidate arrives before Offer
 	ag.handleRemoteCandidate(sessionID, earlyCandidate)
 
-	ag.connMu.Lock()
-	bufferedCount := len(ag.pendingCandidates[sessionID])
-	ag.connMu.Unlock()
+	ag.sessionMu.RLock()
+	sess, exists := ag.sessions[sessionID]
+	ag.sessionMu.RUnlock()
 
-	if bufferedCount != 1 {
+	if !exists || sess == nil {
+		t.Fatalf("Expected session %s to be created for early candidate", sessionID)
+	}
+
+	if bufferedCount := sess.CandidateCount(); bufferedCount != 1 {
 		t.Fatalf("Expected 1 candidate to be buffered in pendingCandidates, got %d", bufferedCount)
 	}
 
@@ -569,17 +581,176 @@ func TestAgent_PendingICECandidates_BufferedAndFlushed(t *testing.T) {
 	_ = clientPC.SetLocalDescription(offer)
 
 	// 3. Process Offer: SetRemoteDescription executes, and buffered candidate must be flushed
-	ag.handleOffer(sessionID, "", &offer, "", false)
+	ag.handleOffer(sess, &offer, "", false)
 
-	ag.connMu.Lock()
-	bufferedAfter := len(ag.pendingCandidates[sessionID])
-	pc := ag.activeConns[sessionID]
-	ag.connMu.Unlock()
-
-	if bufferedAfter != 0 {
+	if bufferedAfter := sess.CandidateCount(); bufferedAfter != 0 {
 		t.Errorf("Expected pendingCandidates to be flushed (length 0), got %d", bufferedAfter)
 	}
+	sess.mu.Lock()
+	pc := sess.PC
+	sess.mu.Unlock()
 	if pc == nil {
 		t.Errorf("Expected active PeerConnection to be registered for session %s", sessionID)
+	}
+}
+
+func TestSession_GenerationTeardownRace(t *testing.T) {
+	ag := New("agent-race-test", "ws://127.0.0.1:8888/ws", "", "", "http://127.0.0.1:8080")
+	defer ag.Close()
+
+	sessionID := "sess-gen-race-1"
+	sess := ag.getOrCreateSession(sessionID, sessionID, "127.0.0.1")
+	sess.mu.Lock()
+	initialGen := sess.Generation // Gen 1
+	sess.mu.Unlock()
+
+	// Simulate session having active cookie in CookieJar
+	targetURL, _ := url.Parse("http://127.0.0.1:8080")
+	jar := ag.cookieManager.GetJar(sessionID)
+	jar.SetCookies(targetURL, []*http.Cookie{
+		{
+			Name:  "auth_token",
+			Value: "secret_visitor_token",
+		},
+	})
+
+	// Advance generation to 2 (simulating reconnect / replacement)
+	sess.mu.Lock()
+	sess.Generation = 2
+	sess.mu.Unlock()
+
+	// Stale teardown from Gen 1 triggers (e.g. from a delayed 5s timer or asynchronous Pion PC close callback)
+	ag.teardownSession(sessionID, initialGen, nil)
+
+	// Assert: Session must NOT be torn down!
+	ag.sessionMu.RLock()
+	_, stillExists := ag.sessions[sessionID]
+	ag.sessionMu.RUnlock()
+	if !stillExists {
+		t.Fatalf("Stale teardown from gen=%d destroyed session at gen=2!", initialGen)
+	}
+
+	// Assert: CookieJar must NOT be cleared by stale teardown!
+	req1, _ := http.NewRequest("GET", "http://127.0.0.1:8080/test", nil)
+	ag.cookieManager.InjectCookies(sessionID, req1)
+	cookie1, err := req1.Cookie("auth_token")
+	if err != nil || cookie1.Value != "secret_visitor_token" {
+		t.Fatalf("Stale teardown wiped active session cookies! err=%v", err)
+	}
+
+	// Now trigger matching teardown for Gen 2
+	ag.teardownSession(sessionID, 2, nil)
+
+	// Assert: Session is now properly destroyed
+	ag.sessionMu.RLock()
+	_, existsAfterMatching := ag.sessions[sessionID]
+	ag.sessionMu.RUnlock()
+	if existsAfterMatching {
+		t.Fatalf("Session should have been removed after matching gen=2 teardown")
+	}
+
+	// Assert: CookieJar is cleaned up after legitimate teardown
+	req2, _ := http.NewRequest("GET", "http://127.0.0.1:8080/test", nil)
+	ag.cookieManager.InjectCookies(sessionID, req2)
+	if cookie2, err := req2.Cookie("auth_token"); err == nil && cookie2 != nil {
+		t.Fatalf("CookieJar should be cleared after legitimate teardown")
+	}
+}
+
+func TestAgent_ConcurrentStreamAdmissionCAS(t *testing.T) {
+	ag := New("agent-cas-test", "ws://127.0.0.1:8888/ws", "", "", "http://127.0.0.1:8080")
+	defer ag.Close()
+
+	const limit = 50
+	const totalRoutines = 100
+	ag.SetMaxConcurrentStreams(limit)
+
+	var acquiredCount int64
+	var rejectedCount int64
+	var releases []func()
+	var relMu sync.Mutex
+
+	var wg sync.WaitGroup
+	wg.Add(totalRoutines)
+
+	startGate := make(chan struct{})
+
+	for i := 0; i < totalRoutines; i++ {
+		go func() {
+			defer wg.Done()
+			<-startGate // Align goroutines to hit tryAcquireStream simultaneously
+			release, ok := ag.tryAcquireStream()
+			if ok {
+				atomic.AddInt64(&acquiredCount, 1)
+				relMu.Lock()
+				releases = append(releases, release)
+				relMu.Unlock()
+			} else {
+				atomic.AddInt64(&rejectedCount, 1)
+			}
+		}()
+	}
+
+	close(startGate)
+	wg.Wait()
+
+	if acquiredCount != limit {
+		t.Fatalf("Expected exactly %d streams acquired, got %d", limit, acquiredCount)
+	}
+	if rejectedCount != totalRoutines-limit {
+		t.Fatalf("Expected exactly %d streams rejected, got %d", totalRoutines-limit, rejectedCount)
+	}
+	if active := ag.ActiveStreams(); active != limit {
+		t.Fatalf("Expected ActiveStreams to be %d, got %d", limit, active)
+	}
+
+	// Verify RAII sync.Once release idempotency
+	for _, rel := range releases {
+		rel()
+		rel() // duplicate call to test sync.Once
+	}
+
+	if active := ag.ActiveStreams(); active != 0 {
+		t.Fatalf("Expected ActiveStreams to be 0 after all releases, got %d", active)
+	}
+}
+
+func TestAgent_PendingCandidatesQuotaAndTTL(t *testing.T) {
+	ag := New("agent-quota-test", "ws://127.0.0.1:8888/ws", "", "", "http://127.0.0.1:8080")
+	defer ag.Close()
+
+	// 1. Test per-session candidate buffer quota (MaxCandidatesPerSession = 32)
+	sessID := "sess-candidate-quota"
+	for i := 0; i < 40; i++ {
+		ag.handleRemoteCandidate(sessID, &webrtc.ICECandidateInit{
+			Candidate: fmt.Sprintf("candidate:%d 1 UDP 2130706431 192.168.1.%d 50000 typ host", i, i),
+		})
+	}
+
+	ag.sessionMu.RLock()
+	sess := ag.sessions[sessID]
+	ag.sessionMu.RUnlock()
+
+	if sess == nil {
+		t.Fatalf("Expected session to be created")
+	}
+	if count := sess.CandidateCount(); count != MaxCandidatesPerSession {
+		t.Fatalf("Expected candidate buffer capped at %d, got %d", MaxCandidatesPerSession, count)
+	}
+
+	// 2. Test global pending sessions quota (MaxPendingSessions = 128)
+	for i := 0; i < 200; i++ {
+		floodID := fmt.Sprintf("flood-session-%d", i)
+		ag.handleRemoteCandidate(floodID, &webrtc.ICECandidateInit{
+			Candidate: "candidate:1 1 UDP 2130706431 192.168.1.1 50000 typ host",
+		})
+	}
+
+	ag.sessionMu.RLock()
+	totalSessions := len(ag.sessions)
+	ag.sessionMu.RUnlock()
+
+	if totalSessions > MaxPendingSessions+1 { // +1 for the first sessID
+		t.Fatalf("Pending sessions exceeded quota %d: got %d", MaxPendingSessions, totalSessions)
 	}
 }

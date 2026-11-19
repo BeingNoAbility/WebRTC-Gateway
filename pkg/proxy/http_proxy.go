@@ -275,6 +275,11 @@ func (p *HTTPProxy) resolveTargetURL(reqPath string, headers map[string]string) 
 			}
 		}
 
+		port := parsedURL.Port()
+		if !IsTargetHost(hostOnly, port, p.targetURL) && !IsPermittedProxyPort(port, p.targetURL) {
+			return nil, "", fmt.Errorf("SSRF blocked: port %s is forbidden for cross-origin proxy", port)
+		}
+
 		isAllowed := p.isDomainAllowed(hostOnly)
 
 		if isAllowed {
@@ -455,13 +460,13 @@ func (p *HTTPProxy) HandleStreamWithMeta(sessionID, clientIP string, stream *mux
 
 	// Normalize Origin to target application to satisfy backend CORS/CSRF validation
 	origOrigin := req.Header.Get("Origin")
-	if origOrigin != "" && !strings.Contains(origOrigin, p.rootDomain) {
+	if origOrigin != "" && !ValidateTrustedOrigin(origOrigin, p.rootDomain, p.targetURL) {
 		req.Header.Set("Origin", p.targetURL.Scheme+"://"+p.targetURL.Host)
 	}
 
 	// Ensure Referer points to target origin if absent or from portal domain to satisfy backend CSRF checks
 	origRef := req.Header.Get("Referer")
-	if origRef == "" || (p.rootDomain != "" && !strings.Contains(origRef, p.rootDomain)) {
+	if origRef == "" || !ValidateTrustedOrigin(origRef, p.rootDomain, p.targetURL) {
 		refPath := "/"
 		if origRef != "" {
 			if u, err := url.Parse(origRef); err == nil && u.Path != "" && u.Path != "/" {

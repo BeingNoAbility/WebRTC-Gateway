@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Reliability & Concurrency (Sprint 1)
+- **AgentSession Aggregate Root & Generation Lifecycle (G, E, F 项)**:
+  - Replaced disparate session maps in `pkg/agent/agent.go` with unified `AgentSession` aggregate root in `pkg/agent/session.go`.
+  - Added monotonic `Generation` counter and PC binding to prevent stale 5-second teardown timers or asynchronous Pion PC closure callbacks from closing new connections' Mux instances or evicting active CookieJars.
+  - Added session-scoped `offerMu` serializing concurrent Offers and ICE Restarts without cross-session head-of-line blocking.
+  - Implemented bounded early candidate queues (32 per session) and pending sessions quota (128 max) to prevent memory exhaustion DoS.
+- **Atomic CAS Stream Limit Admission (A 项)**:
+  - Replaced TOCTOU `atomic.LoadInt64 >= limit` check in `pkg/agent/agent.go` with atomic CAS loop `tryAcquireStream()` and RAII `sync.Once` release handle, guaranteeing active streams strictly adhere to concurrency limits under heavy load.
+- **Ping/Pong Sequence ID Multiplexing (D 项)**:
+  - Added 8-byte big-endian sequence ID payload to Mux Ping/Pong frames in `pkg/mux/mux.go` with sequence tracking, eliminating RTT measurement crosstalk and stale pong false positives while preserving 100% backward compatibility with Web Portal clients.
+- **Stream.Close Error Propagation (C 项)**:
+  - Ensured `Stream.Close()` in `pkg/mux/stream.go` returns underlying `writeFrame` errors instead of masking write failures.
+
+### Security & Defense (Sprint 1)
+- **TargetPolicy Strict Origin & Proxy Port Whitelist (J, H 项)**:
+  - Replaced substring matching in `pkg/proxy/ssrf.go` with strict URL origin parsing `ValidateTrustedOrigin()` against target hostnames and subdomains, preventing origin spoofing and subdomain escape.
+  - Enforced strict proxy port whitelisting `IsPermittedProxyPort()` across HTTP and WebSocket proxies to prevent outbound SSRF scans on internal network infrastructure.
+
 ## [v2.1.0] - 2026-11-19
 
 ### Security & Sandboxing

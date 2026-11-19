@@ -212,10 +212,10 @@ func (s *Stream) Close() error {
 	s.mu.Unlock()
 
 	frame := protocol.NewFrame(s.id, protocol.TypeData, protocol.FlagFin, nil)
-	_ = s.mux.writeFrame(frame)
+	err := s.mux.writeFrame(frame)
 
 	s.checkFullClose()
-	return nil
+	return err
 }
 
 // markResetNoRemove marks stream as reset without calling removeStream (used during Mux.Close).

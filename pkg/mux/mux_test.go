@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -675,5 +676,51 @@ func TestMux_BackpressureUnblocksOnRemoteReset(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatalf("Deadlock! Server write hung forever on remote Reset()")
+	}
+}
+
+// 11. Test concurrent Ping/Pong with 8-byte sequence ID (zero crosstalk, zero stale pollution)
+func TestMux_ConcurrentPingPong_NoCrosstalk(t *testing.T) {
+	t1, t2 := newMockPair()
+	defer t1.Close()
+	defer t2.Close()
+
+	clientMux := NewMux(t1, true)
+	agentMux := NewMux(t2, false)
+
+	t1.SetMessageHandler(func(data []byte) { _ = clientMux.HandleIncomingMessage(data) })
+	t2.SetMessageHandler(func(data []byte) { _ = agentMux.HandleIncomingMessage(data) })
+
+	defer clientMux.Close()
+	defer agentMux.Close()
+
+	const concurrency = 10
+	var wg sync.WaitGroup
+	errCh := make(chan error, concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			rtt, err := clientMux.Ping(ctx)
+			if err != nil {
+				errCh <- fmt.Errorf("Ping failed: %w", err)
+				return
+			}
+			if rtt < 0 {
+				errCh <- fmt.Errorf("Invalid RTT: %v", rtt)
+				return
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Errorf("Concurrent ping error: %v", err)
 	}
 }

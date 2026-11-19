@@ -2,6 +2,7 @@ package mux
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -49,9 +50,11 @@ type Mux struct {
 	closed   bool
 	closedCh chan struct{}
 
-	pingMu  sync.Mutex
-	pongCh  chan struct{}
-	closeMu sync.Once
+	pingSeq      atomic.Uint64
+	pingsMu      sync.Mutex
+	pendingPings map[uint64]chan struct{}
+	legacyPongCh chan struct{}
+	closeMu      sync.Once
 }
 
 // NewMux creates a new Mux over the given Transport.
@@ -64,7 +67,8 @@ func NewMux(transport Transport, isClient bool) *Mux {
 		closedStreams: make(map[uint32]struct{}),
 		acceptCh:      make(chan *Stream, 64),
 		closedCh:      make(chan struct{}),
-		pongCh:        make(chan struct{}, 1),
+		pendingPings:  make(map[uint64]chan struct{}),
+		legacyPongCh:  make(chan struct{}, 1),
 	}
 
 	if isClient {
@@ -231,22 +235,52 @@ func (m *Mux) HandleIncomingMessage(data []byte) error {
 func (m *Mux) handleControlFrame(frame *protocol.Frame) error {
 	switch frame.Type {
 	case protocol.TypePing:
-		// Reply immediately with Pong
+		// Reply immediately with Pong, echoing the incoming payload (including sequence number)
 		pong := protocol.NewFrame(0, protocol.TypePong, protocol.FlagNone, frame.Payload)
 		return m.writeFrame(pong)
 	case protocol.TypePong:
+		if len(frame.Payload) >= 8 {
+			seq := binary.BigEndian.Uint64(frame.Payload[:8])
+			m.pingsMu.Lock()
+			ch, ok := m.pendingPings[seq]
+			m.pingsMu.Unlock()
+			if ok {
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
+				return nil
+			}
+		}
+		// Legacy fallback if payload < 8 bytes
 		select {
-		case m.pongCh <- struct{}{}:
+		case m.legacyPongCh <- struct{}{}:
 		default:
 		}
 	}
 	return nil
 }
 
-// Ping measures RTT over the DataChannel.
+// Ping measures RTT over the DataChannel with an 8-byte sequence ID to prevent crosstalk.
 func (m *Mux) Ping(ctx context.Context) (time.Duration, error) {
+	seq := m.pingSeq.Add(1)
+	ch := make(chan struct{}, 1)
+
+	m.pingsMu.Lock()
+	m.pendingPings[seq] = ch
+	m.pingsMu.Unlock()
+
+	defer func() {
+		m.pingsMu.Lock()
+		delete(m.pendingPings, seq)
+		m.pingsMu.Unlock()
+	}()
+
+	payload := make([]byte, 8)
+	binary.BigEndian.PutUint64(payload, seq)
+
 	start := time.Now()
-	pingFrame := protocol.NewFrame(0, protocol.TypePing, protocol.FlagNone, nil)
+	pingFrame := protocol.NewFrame(0, protocol.TypePing, protocol.FlagNone, payload)
 	if err := m.writeFrame(pingFrame); err != nil {
 		return 0, err
 	}
@@ -256,7 +290,9 @@ func (m *Mux) Ping(ctx context.Context) (time.Duration, error) {
 		return 0, ctx.Err()
 	case <-time.After(5 * time.Second):
 		return 0, ErrPingTimeout
-	case <-m.pongCh:
+	case <-ch:
+		return time.Since(start), nil
+	case <-m.legacyPongCh:
 		return time.Since(start), nil
 	}
 }
@@ -443,6 +479,13 @@ func (m *Mux) Close() error {
 		m.bpMu.Lock()
 		m.bpCond.Broadcast()
 		m.bpMu.Unlock()
+
+		m.pingsMu.Lock()
+		for seq, ch := range m.pendingPings {
+			close(ch)
+			delete(m.pendingPings, seq)
+		}
+		m.pingsMu.Unlock()
 
 		m.writeMu.Lock()
 		m.writeMu.Unlock()

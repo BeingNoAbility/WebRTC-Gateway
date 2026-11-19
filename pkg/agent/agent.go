@@ -49,14 +49,9 @@ type Agent struct {
 	wsProxy       *proxy.WSProxy
 	fileProxy     *proxy.FileProxy
 
-	webrtcConfig      webrtc.Configuration
-	activeConns       map[string]*webrtc.PeerConnection
-	pendingCandidates map[string][]webrtc.ICECandidateInit
-	activeMuxes       map[string]*mux.Mux
-	clientIPs        map[string]string
-	connMu           sync.Mutex
-	pendingTeardowns map[string]*time.Timer
-	pendingMu        sync.Mutex
+	webrtcConfig webrtc.Configuration
+	sessionMu    sync.RWMutex
+	sessions     map[string]*AgentSession
 
 	maxConcurrentStreams int
 	activeStreams        int64
@@ -112,11 +107,7 @@ func New(nodeID, signalURL, signalSecret, accessSecret, target string) *Agent {
 				{URLs: []string{"stun:stun.l.google.com:19302"}},
 			},
 		},
-		activeConns:          make(map[string]*webrtc.PeerConnection),
-		pendingCandidates:    make(map[string][]webrtc.ICECandidateInit),
-		activeMuxes:          make(map[string]*mux.Mux),
-		clientIPs:            make(map[string]string),
-		pendingTeardowns:     make(map[string]*time.Timer),
+		sessions:             make(map[string]*AgentSession),
 		maxConcurrentStreams: 512,
 		pingInterval:         25 * time.Second,
 		readTimeout:          60 * time.Second,
@@ -404,53 +395,65 @@ func (a *Agent) VerifyAuth(nodeID, accessSecret, reqSecret string, exp int64, si
 	return false
 }
 
-func (a *Agent) schedulePendingTeardown(sessionID, cookieSession string, pc *webrtc.PeerConnection) {
-	a.pendingMu.Lock()
-	defer a.pendingMu.Unlock()
-
-	if timer, exists := a.pendingTeardowns[sessionID]; exists {
-		timer.Stop()
+func (a *Agent) schedulePendingTeardown(sessionID string, gen uint64, pc *webrtc.PeerConnection) {
+	a.sessionMu.RLock()
+	sess, exists := a.sessions[sessionID]
+	a.sessionMu.RUnlock()
+	if !exists {
+		return
 	}
 
-	a.pendingTeardowns[sessionID] = time.AfterFunc(5*time.Second, func() {
-		a.pendingMu.Lock()
-		delete(a.pendingTeardowns, sessionID)
-		a.pendingMu.Unlock()
-
-		log.Printf("[Agent] [Session %s] Grace period expired (5s), tearing down connection", sessionID)
-		a.teardownSession(sessionID, cookieSession, pc)
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.closed || sess.Generation != gen || sess.PC != pc {
+		return
+	}
+	if sess.teardownTimer != nil {
+		sess.teardownTimer.Stop()
+	}
+	sess.teardownTimer = time.AfterFunc(5*time.Second, func() {
+		a.teardownSession(sessionID, gen, pc)
 	})
-	log.Printf("[Agent] [Session %s] Connection degraded/disconnected, started 5s grace period for ICE Restart", sessionID)
+	log.Printf("[Agent] [Session %s Gen %d] Connection degraded/disconnected, started 5s grace period for ICE Restart", sessionID, gen)
 }
 
 func (a *Agent) cancelPendingTeardown(sessionID string) {
-	a.pendingMu.Lock()
-	defer a.pendingMu.Unlock()
-	if timer, exists := a.pendingTeardowns[sessionID]; exists {
-		timer.Stop()
-		delete(a.pendingTeardowns, sessionID)
+	a.sessionMu.RLock()
+	sess, exists := a.sessions[sessionID]
+	a.sessionMu.RUnlock()
+	if exists {
+		sess.CancelTeardown()
 		log.Printf("[Agent] [Session %s] Cancelled pending teardown (reconnected or ICE Restart in progress)", sessionID)
 	}
 }
 
-func (a *Agent) teardownSession(sessionID, cookieSession string, pc *webrtc.PeerConnection) {
-	a.connMu.Lock()
-	if oldMux, exists := a.activeMuxes[sessionID]; exists {
-		_ = oldMux.Close()
-		delete(a.activeMuxes, sessionID)
+func (a *Agent) teardownSession(sessionID string, gen uint64, pc *webrtc.PeerConnection) {
+	a.sessionMu.Lock()
+	sess, exists := a.sessions[sessionID]
+	if !exists {
+		a.sessionMu.Unlock()
+		return
 	}
-	currPC, exists := a.activeConns[sessionID]
-	if !exists || currPC == pc || pc == nil {
-		delete(a.activeConns, sessionID)
-		delete(a.clientIPs, sessionID)
-		delete(a.pendingCandidates, sessionID)
+
+	sess.mu.Lock()
+	// Generation & PC Guard: if session generation has advanced or PC doesn't match, this teardown is stale!
+	if sess.closed || sess.Generation != gen || (pc != nil && sess.PC != pc) {
+		sess.mu.Unlock()
+		a.sessionMu.Unlock()
+		log.Printf("[Agent] [Session %s] Ignored stale teardown for gen=%d (current gen=%d)", sessionID, gen, sess.Generation)
+		return
 	}
-	atomic.StoreInt64(&a.activePeers, int64(len(a.activeConns)))
-	a.connMu.Unlock()
-	a.cookieManager.RemoveSession(cookieSession)
-	if pc != nil {
-		_ = pc.Close()
+	cookieID := sess.CookieID
+	delete(a.sessions, sessionID)
+	atomic.StoreInt64(&a.activePeers, int64(len(a.sessions)))
+	sess.mu.Unlock()
+	a.sessionMu.Unlock()
+
+	sess.Destroy()
+	if cookieID != "" {
+		a.cookieManager.RemoveSession(cookieID)
 	}
+	log.Printf("[Agent] [Session %s Gen %d] Grace period expired, session destroyed", sessionID, gen)
 }
 
 // Close shuts down all active network connections and WebRTC peer connections.
@@ -462,32 +465,57 @@ func (a *Agent) Close() {
 	}
 	a.wsMu.Unlock()
 
-	a.pendingMu.Lock()
-	for id, timer := range a.pendingTeardowns {
-		timer.Stop()
-		delete(a.pendingTeardowns, id)
+	a.sessionMu.Lock()
+	for id, sess := range a.sessions {
+		sess.Destroy()
+		delete(a.sessions, id)
 	}
-	a.pendingMu.Unlock()
-
-	a.connMu.Lock()
-	for id, m := range a.activeMuxes {
-		_ = m.Close()
-		delete(a.activeMuxes, id)
-	}
-	for id, pc := range a.activeConns {
-		_ = pc.Close()
-		delete(a.activeConns, id)
-	}
-	a.clientIPs = make(map[string]string)
-	a.pendingCandidates = make(map[string][]webrtc.ICECandidateInit)
 	atomic.StoreInt64(&a.activePeers, 0)
-	a.connMu.Unlock()
+	a.sessionMu.Unlock()
 }
 
 func (a *Agent) getClientIP(sessionID string) string {
-	a.connMu.Lock()
-	defer a.connMu.Unlock()
-	return a.clientIPs[sessionID]
+	a.sessionMu.RLock()
+	defer a.sessionMu.RUnlock()
+	if sess, exists := a.sessions[sessionID]; exists {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		return sess.ClientIP
+	}
+	return ""
+}
+
+func (a *Agent) getOrCreateSession(sessionID, cookieID, clientIP string) *AgentSession {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	sess, exists := a.sessions[sessionID]
+	if !exists {
+		// Cap pending sessions to MaxPendingSessions to mitigate DoS attacks
+		if len(a.sessions) >= MaxPendingSessions {
+			for id, s := range a.sessions {
+				s.mu.Lock()
+				isClosed := s.closed || (s.PC == nil && s.CandidateCount() == 0)
+				s.mu.Unlock()
+				if isClosed {
+					delete(a.sessions, id)
+					break
+				}
+			}
+		}
+		sess = newAgentSession(sessionID, cookieID, clientIP)
+		a.sessions[sessionID] = sess
+		atomic.StoreInt64(&a.activePeers, int64(len(a.sessions)))
+		return sess
+	}
+	sess.mu.Lock()
+	if clientIP != "" {
+		sess.ClientIP = clientIP
+	}
+	if cookieID != "" {
+		sess.CookieID = cookieID
+	}
+	sess.mu.Unlock()
+	return sess
 }
 
 func (a *Agent) Start(ctx context.Context) error {
@@ -666,7 +694,16 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 				})
 				continue
 			}
-			go a.handleOffer(msg.SessionID, msg.ClientIP, msg.SDP, msg.ClientToken, msg.IceRestart)
+			cookieID := msg.SessionID
+			if msg.ClientToken != "" {
+				cookieID = msg.ClientToken
+			}
+			sess := a.getOrCreateSession(msg.SessionID, cookieID, msg.ClientIP)
+			go func(s *AgentSession, sdp *webrtc.SessionDescription, clientToken string, iceRestart bool) {
+				s.offerMu.Lock()
+				defer s.offerMu.Unlock()
+				a.handleOffer(s, sdp, clientToken, iceRestart)
+			}(sess, msg.SDP, msg.ClientToken, msg.IceRestart)
 
 		case signaling.TypeCandidate:
 			a.handleRemoteCandidate(msg.SessionID, msg.Candidate)
@@ -677,28 +714,31 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
-func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescription, clientToken string, iceRestart bool) {
-	cookieSession := sessionID
-	if clientToken != "" {
-		cookieSession = clientToken
+func (a *Agent) handleOffer(sess *AgentSession, sdp *webrtc.SessionDescription, clientToken string, iceRestart bool) {
+	if sess == nil || sdp == nil {
+		return
 	}
 
+	sessionID := sess.ID
 	a.cancelPendingTeardown(sessionID)
 
-	a.connMu.Lock()
-	existingPC, exists := a.activeConns[sessionID]
-	a.connMu.Unlock()
+	sess.mu.Lock()
+	if sess.closed {
+		sess.mu.Unlock()
+		return
+	}
 
+	existingPC := sess.PC
 	// In-place ICE Restart on existing PeerConnection
-	if iceRestart && exists && existingPC != nil && existingPC.ConnectionState() != webrtc.PeerConnectionStateClosed {
+	if iceRestart && existingPC != nil && existingPC.ConnectionState() != webrtc.PeerConnectionStateClosed {
 		log.Printf("[Agent] [Session %s] Processing in-place ICE Restart on existing PeerConnection", sessionID)
+		sess.mu.Unlock()
+
 		if err := existingPC.SetRemoteDescription(*sdp); err != nil {
 			log.Printf("[Agent] [Session %s] ICE Restart SetRemoteDescription error: %v, falling back to new PC", sessionID, err)
+			sess.mu.Lock()
 		} else {
-			a.connMu.Lock()
-			pending := a.pendingCandidates[sessionID]
-			delete(a.pendingCandidates, sessionID)
-			a.connMu.Unlock()
+			pending := sess.DrainCandidates()
 			for _, cand := range pending {
 				if err := existingPC.AddICECandidate(cand); err != nil {
 					log.Printf("[Agent] [Session %s] Buffered ICE Restart AddICECandidate error: %v", sessionID, err)
@@ -711,11 +751,6 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 			} else if err := existingPC.SetLocalDescription(answer); err != nil {
 				log.Printf("[Agent] [Session %s] ICE Restart SetLocalDescription error: %v", sessionID, err)
 			} else {
-				if clientIP != "" {
-					a.connMu.Lock()
-					a.clientIPs[sessionID] = clientIP
-					a.connMu.Unlock()
-				}
 				_ = a.sendSignal(&signaling.Message{
 					Type:      signaling.TypeAnswer,
 					NodeID:    a.NodeID,
@@ -725,18 +760,26 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 				log.Printf("[Agent] [Session %s] Sent in-place ICE Restart Answer to client", sessionID)
 				return
 			}
+			sess.mu.Lock()
 		}
 	}
 
+	// Advance generation for new PeerConnection lifecycle
+	sess.Generation++
+	currentGen := sess.Generation
+
 	// Close old PC and Mux if replacing session
-	a.connMu.Lock()
-	if oldMux, muxExists := a.activeMuxes[sessionID]; muxExists {
+	oldMux := sess.Mux
+	oldPC := sess.PC
+	sess.Mux = nil
+	sess.PC = nil
+	sess.mu.Unlock()
+
+	if oldMux != nil {
 		_ = oldMux.Close()
-		delete(a.activeMuxes, sessionID)
 	}
-	a.connMu.Unlock()
-	if exists && existingPC != nil {
-		_ = existingPC.Close()
+	if oldPC != nil {
+		_ = oldPC.Close()
 	}
 
 	pc, err := webrtc.NewPeerConnection(a.webrtcConfig)
@@ -759,26 +802,26 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 	})
 
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("[Agent] [Session %s] ICE State: %s", sessionID, state.String())
+		log.Printf("[Agent] [Session %s Gen %d] ICE State: %s", sessionID, currentGen, state.String())
 		if state == webrtc.ICEConnectionStateConnected || state == webrtc.ICEConnectionStateCompleted {
 			a.cancelPendingTeardown(sessionID)
 		} else if state == webrtc.ICEConnectionStateDisconnected || state == webrtc.ICEConnectionStateFailed {
-			a.schedulePendingTeardown(sessionID, cookieSession, pc)
+			a.schedulePendingTeardown(sessionID, currentGen, pc)
 		} else if state == webrtc.ICEConnectionStateClosed {
 			a.cancelPendingTeardown(sessionID)
-			a.teardownSession(sessionID, cookieSession, pc)
+			a.teardownSession(sessionID, currentGen, pc)
 		}
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("[Agent] [Session %s] PeerConnection State: %s", sessionID, state.String())
+		log.Printf("[Agent] [Session %s Gen %d] PeerConnection State: %s", sessionID, currentGen, state.String())
 		if state == webrtc.PeerConnectionStateConnected {
 			a.cancelPendingTeardown(sessionID)
 		} else if state == webrtc.PeerConnectionStateDisconnected || state == webrtc.PeerConnectionStateFailed {
-			a.schedulePendingTeardown(sessionID, cookieSession, pc)
+			a.schedulePendingTeardown(sessionID, currentGen, pc)
 		} else if state == webrtc.PeerConnectionStateClosed {
 			a.cancelPendingTeardown(sessionID)
-			a.teardownSession(sessionID, cookieSession, pc)
+			a.teardownSession(sessionID, currentGen, pc)
 		}
 	})
 
@@ -787,17 +830,22 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 		if id := dc.ID(); id != nil {
 			dcID = *id
 		}
-		log.Printf("[Agent] [Session %s] OnDataChannel label=%s id=%d", sessionID, dc.Label(), dcID)
+		log.Printf("[Agent] [Session %s Gen %d] OnDataChannel label=%s id=%d", sessionID, currentGen, dc.Label(), dcID)
 		if dc.Label() != "p2pmux" {
 			return
 		}
 
+		sess.mu.Lock()
+		if sess.closed || sess.Generation != currentGen {
+			sess.mu.Unlock()
+			log.Printf("[Agent] [Session %s] Ignoring DataChannel for stale gen=%d (current gen=%d)", sessionID, currentGen, sess.Generation)
+			return
+		}
+		cookieSession := sess.CookieID
 		transport := &countedTransport{DataChannel: dc, txCounter: &a.txBytesTotal}
 		m := mux.NewMux(transport, false)
-
-		a.connMu.Lock()
-		a.activeMuxes[sessionID] = m
-		a.connMu.Unlock()
+		sess.Mux = m
+		sess.mu.Unlock()
 
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			atomic.AddUint64(&a.rxBytesTotal, uint64(len(msg.Data)))
@@ -807,35 +855,35 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 		})
 
 		dc.OnClose(func() {
-			log.Printf("[Agent] [Session %s] DataChannel closed", sessionID)
+			log.Printf("[Agent] [Session %s Gen %d] DataChannel closed", sessionID, currentGen)
 			_ = m.Close()
 		})
 
 		dc.OnOpen(func() {
-			log.Printf("[Agent] [Session %s] DataChannel p2pmux OPENED! (cookieSession: %s)", sessionID, cookieSession)
+			log.Printf("[Agent] [Session %s Gen %d] DataChannel p2pmux OPENED! (cookieSession: %s)", sessionID, currentGen, cookieSession)
 		})
 
 		// Accept incoming streams and route to Reverse Proxy
 		go a.streamAcceptLoop(sessionID, cookieSession, m)
 	})
 
-	// Set Remote Description (Offer) before registering into activeConns to avoid ICE candidate races
+	sess.mu.Lock()
+	if sess.closed || sess.Generation != currentGen {
+		sess.mu.Unlock()
+		_ = pc.Close()
+		return
+	}
+	sess.PC = pc
+	sess.mu.Unlock()
+
+	// Set Remote Description (Offer) before registering into session to avoid candidate race
 	if err := pc.SetRemoteDescription(*sdp); err != nil {
 		log.Printf("[Agent] SetRemoteDescription error: %v", err)
 		_ = pc.Close()
 		return
 	}
 
-	a.connMu.Lock()
-	a.activeConns[sessionID] = pc
-	if clientIP != "" {
-		a.clientIPs[sessionID] = clientIP
-	}
-	atomic.StoreInt64(&a.activePeers, int64(len(a.activeConns)))
-	pending := a.pendingCandidates[sessionID]
-	delete(a.pendingCandidates, sessionID)
-	a.connMu.Unlock()
-
+	pending := sess.DrainCandidates()
 	for _, cand := range pending {
 		if err := pc.AddICECandidate(cand); err != nil {
 			log.Printf("[Agent] Buffered AddICECandidate error: %v", err)
@@ -861,7 +909,7 @@ func (a *Agent) handleOffer(sessionID, clientIP string, sdp *webrtc.SessionDescr
 		SessionID: sessionID,
 		SDP:       &answer,
 	})
-	log.Printf("[Agent] Sent Answer to client session=%s", sessionID)
+	log.Printf("[Agent] Sent Answer to client session=%s Gen=%d", sessionID, currentGen)
 }
 
 func (a *Agent) handleRemoteCandidate(sessionID string, candidate *webrtc.ICECandidateInit) {
@@ -869,18 +917,66 @@ func (a *Agent) handleRemoteCandidate(sessionID string, candidate *webrtc.ICECan
 		return
 	}
 
-	a.connMu.Lock()
-	pc, exists := a.activeConns[sessionID]
-	if !exists || pc == nil || pc.RemoteDescription() == nil {
-		// Buffered retry: store candidate in pendingCandidates until SetRemoteDescription completes
-		a.pendingCandidates[sessionID] = append(a.pendingCandidates[sessionID], *candidate)
-		a.connMu.Unlock()
+	a.sessionMu.RLock()
+	sess, exists := a.sessions[sessionID]
+	a.sessionMu.RUnlock()
+
+	if !exists {
+		a.sessionMu.Lock()
+		if len(a.sessions) >= MaxPendingSessions {
+			a.sessionMu.Unlock()
+			log.Printf("[Agent] Dropped candidate for session %s: pending sessions quota (%d) exceeded", sessionID, MaxPendingSessions)
+			return
+		}
+		sess = newAgentSession(sessionID, sessionID, "")
+		a.sessions[sessionID] = sess
+		atomic.StoreInt64(&a.activePeers, int64(len(a.sessions)))
+		a.sessionMu.Unlock()
+	}
+
+	sess.mu.Lock()
+	if sess.closed {
+		sess.mu.Unlock()
 		return
 	}
-	a.connMu.Unlock()
+	pc := sess.PC
+	if pc == nil || pc.RemoteDescription() == nil {
+		sess.mu.Unlock()
+		if !sess.AddCandidate(*candidate) {
+			log.Printf("[Agent] [Session %s] Dropped candidate: candidate quota (%d) exceeded", sessionID, MaxCandidatesPerSession)
+		}
+		return
+	}
+	sess.mu.Unlock()
 
 	if err := pc.AddICECandidate(*candidate); err != nil {
 		log.Printf("[Agent] AddICECandidate error: %v", err)
+	}
+}
+
+// tryAcquireStream attempts to atomically acquire a stream slot using CAS,
+// eliminating the TOCTOU race window under concurrent stream arrival.
+// It returns a sync.Once release closure and true on success, or nil and false if capacity is exceeded.
+func (a *Agent) tryAcquireStream() (func(), bool) {
+	limit := int64(a.maxConcurrentStreams)
+	if limit <= 0 {
+		limit = 512
+	}
+
+	for {
+		curr := atomic.LoadInt64(&a.activeStreams)
+		if curr >= limit {
+			return nil, false
+		}
+		if atomic.CompareAndSwapInt64(&a.activeStreams, curr, curr+1) {
+			var once sync.Once
+			release := func() {
+				once.Do(func() {
+					atomic.AddInt64(&a.activeStreams, -1)
+				})
+			}
+			return release, true
+		}
 	}
 }
 
@@ -892,13 +988,13 @@ func (a *Agent) streamAcceptLoop(sessionID, cookieSession string, m *mux.Mux) {
 			return
 		}
 
-		limit := a.maxConcurrentStreams
-		if limit <= 0 {
-			limit = 512
-		}
-
-		if atomic.LoadInt64(&a.activeStreams) >= int64(limit) {
+		releaseStream, ok := a.tryAcquireStream()
+		if !ok {
 			atomic.AddUint64(&a.streamRejections, 1)
+			limit := a.maxConcurrentStreams
+			if limit <= 0 {
+				limit = 512
+			}
 			log.Printf("[Agent] [Session %s] Stream %d rejected: max concurrent streams limit (%d) reached", sessionID, stream.ID(), limit)
 			go func(s *mux.Stream) {
 				if s.InitialType() == protocol.TypeHeaders {
@@ -920,9 +1016,8 @@ func (a *Agent) streamAcceptLoop(sessionID, cookieSession string, m *mux.Mux) {
 			continue
 		}
 
-		atomic.AddInt64(&a.activeStreams, 1)
-		go func(s *mux.Stream) {
-			defer atomic.AddInt64(&a.activeStreams, -1)
+		go func(s *mux.Stream, release func()) {
+			defer release()
 
 			if s.InitialType() == protocol.TypeData {
 				// Raw data stream (e.g. echo or direct raw pipe)
@@ -1016,6 +1111,6 @@ func (a *Agent) streamAcceptLoop(sessionID, cookieSession string, m *mux.Mux) {
 				}
 				a.httpProxy.HandleStreamWithMeta(cookieSession, clientIP, s, reqMeta)
 			}
-		}(stream)
+		}(stream, releaseStream)
 	}
 }

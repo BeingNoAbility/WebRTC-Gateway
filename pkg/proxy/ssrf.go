@@ -142,3 +142,43 @@ func CreateSafeDialContext(target *url.URL) func(ctx context.Context, network, a
 		return dialer.DialContext(ctx, network, safeAddr)
 	}
 }
+
+// ValidateTrustedOrigin checks whether rawOrigin strictly belongs to rootDomain or targetURL,
+// avoiding insecure substring matching (e.g. preventing attacker.com?q=rootDomain or rootDomain.evil.com).
+func ValidateTrustedOrigin(rawOrigin, rootDomain string, targetURL *url.URL) bool {
+	if rawOrigin == "" {
+		return false
+	}
+	u, err := url.Parse(rawOrigin)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if targetURL != nil && strings.EqualFold(host, strings.ToLower(targetURL.Hostname())) {
+		return true
+	}
+	if rootDomain != "" {
+		root := strings.ToLower(rootDomain)
+		if host == root || strings.HasSuffix(host, "."+root) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPermittedProxyPort validates whether an explicit port is allowed for cross-origin proxying
+// to prevent SSRF port scanning against non-standard internal services (e.g. SSH 22, Redis 6379, MySQL 3306).
+func IsPermittedProxyPort(port string, targetURL *url.URL) bool {
+	if port == "" {
+		return true // Default scheme ports (80 / 443)
+	}
+	if targetURL != nil && port == targetURL.Port() {
+		return true
+	}
+	switch port {
+	case "80", "443", "8080", "8443":
+		return true
+	default:
+		return false
+	}
+}

@@ -185,3 +185,72 @@ func TestHTTPProxy_InsecureTLS_TargetOnly(t *testing.T) {
 		t.Errorf("insecureTransport InsecureSkipVerify should be true")
 	}
 }
+
+func TestProxy_TargetPolicy_OriginSubdomainSecurity(t *testing.T) {
+	targetURL, _ := url.Parse("https://my-nas.internal:8443")
+	rootDomain := "mygateway.com"
+
+	// 1. Origin validation tests
+	validOrigins := []string{
+		"https://mygateway.com",
+		"http://mygateway.com:8080",
+		"https://app.mygateway.com",
+		"https://deep.sub.mygateway.com:443",
+		"https://my-nas.internal:8443", // matches targetURL
+	}
+	for _, vo := range validOrigins {
+		if !ValidateTrustedOrigin(vo, rootDomain, targetURL) {
+			t.Errorf("Expected origin %q to be trusted, but was rejected", vo)
+		}
+	}
+
+	invalidOrigins := []string{
+		"https://mygateway.com.attacker.com",
+		"http://attacker.com/?q=mygateway.com",
+		"http://evil.org#mygateway.com",
+		"http://fakemygateway.com",
+		"https://notmygateway.com",
+		"javascript:alert(1)",
+		"",
+	}
+	for _, io := range invalidOrigins {
+		if ValidateTrustedOrigin(io, rootDomain, targetURL) {
+			t.Errorf("CRITICAL: Insecure origin %q should have been rejected by ValidateTrustedOrigin!", io)
+		}
+	}
+
+	// 2. Port whitelist tests
+	validPorts := []string{"", "80", "443", "8080", "8443"}
+	for _, vp := range validPorts {
+		if !IsPermittedProxyPort(vp, targetURL) {
+			t.Errorf("Expected port %q to be permitted, but was rejected", vp)
+		}
+	}
+
+	invalidPorts := []string{"22", "23", "25", "3306", "6379", "2375", "9200"}
+	for _, ip := range invalidPorts {
+		if IsPermittedProxyPort(ip, targetURL) {
+			t.Errorf("CRITICAL: Insecure port %q should have been blocked by IsPermittedProxyPort!", ip)
+		}
+	}
+
+	// 3. E2E resolveTargetURL port enforcement
+	cm := NewSessionCookieManager()
+	hp, err := NewHTTPProxy("https://my-nas.internal:8443", cm)
+	if err != nil {
+		t.Fatalf("NewHTTPProxy failed: %v", err)
+	}
+	hp.SetAllowedDomains([]string{"*.example.com"})
+
+	// Allowed domain with standard port (443) -> OK
+	u, _, err := hp.resolveTargetURL("/--p2p-proxy/api.example.com:443/test", nil)
+	if err != nil || u == nil {
+		t.Errorf("Expected /--p2p-proxy/api.example.com:443/test to succeed, got error: %v", err)
+	}
+
+	// Allowed domain with forbidden port (22) -> BLOCKED
+	_, _, err = hp.resolveTargetURL("/--p2p-proxy/api.example.com:22/test", nil)
+	if err == nil {
+		t.Errorf("CRITICAL: resolveTargetURL with port 22 was expected to be blocked, but succeeded!")
+	}
+}

@@ -186,6 +186,11 @@ func (wp *WSProxy) resolveTargetWSURL(reqPath string, headers map[string]string)
 			}
 		}
 
+		port := parsedURL.Port()
+		if !IsTargetHost(hostOnly, port, wp.targetBase) && !IsPermittedProxyPort(port, wp.targetBase) {
+			return nil, "", fmt.Errorf("SSRF blocked: port %s is forbidden for cross-origin proxy", port)
+		}
+
 		isAllowed := wp.isDomainAllowed(hostOnly)
 
 		if isAllowed {
