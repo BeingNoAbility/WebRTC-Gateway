@@ -41,7 +41,7 @@ sequenceDiagram
 
 ## 2. P2PMux v1 Binary Multiplexing Protocol Specification
 
-To concurrently handle hundreds of independent HTTP requests, large file downloads, and full-duplex WebSocket connections across a single WebRTC `RTCDataChannel` without head-of-line blocking, the gateway utilizes the **P2PMux v1** binary multiplexing protocol.
+To concurrently handle hundreds of independent HTTP requests, large file downloads, and full-duplex WebSocket connections across a single WebRTC `RTCDataChannel` while preventing slow streams from starving critical APIs (eliminating application-level write starvation, though single ordered channels remain constrained by SCTP transport-layer retransmission latency under physical packet loss), the gateway utilizes the **P2PMux v1** binary multiplexing protocol.
 
 For the formal mathematical and byte-level specification, consult the [P2PMux Wire Protocol Specification](./protocol-specification).
 
@@ -71,7 +71,7 @@ For the formal mathematical and byte-level specification, consult the [P2PMux Wi
   - `0x00 (FlagNone)`: Standard data frame;
   - `0x01 (FlagFin)`: Marks completion of stream transmission (half-close signal);
   - `0x02 (FlagAck)`: Control frame acknowledgment.
-- **Payload Length (uint32, 4 bytes)**: Payload byte count (Big-Endian). Hard ceiling is **64KB (`MaxPayloadSize = 65536` bytes)**; recommended streaming chunk size is **32KB (`RecommendedChunkSize = 32758` bytes)**. Combining 32758-byte payload with 10-byte header yields exactly **32768 bytes (32KB)**, aligning with Go runtime size-classes and WebRTC SCTP MTU boundaries.
+- **Payload Length (uint32, 4 bytes)**: Payload byte count (Big-Endian). Hard ceiling is **64KB (`MaxPayloadSize = 65536` bytes)**; recommended streaming chunk size is **32KB (`RecommendedChunkSize = 32758` bytes)**. Combining a 32758-byte payload with a 10-byte header yields exactly **32768 bytes (32KB)**, aligning with Go runtime `mcache` allocation size-classes and OS buffer efficiencies, while physical transmission relies on WebRTC SCTP stack fragmentation over the network path MTU (~1500 bytes).
 
 ---
 
@@ -110,3 +110,29 @@ For the formal mathematical and byte-level specification, consult the [P2PMux Wi
 - **Authoritative Signaling Anchor**: When relaying SDP Offers, the signaling server extracts the socket remote IP (or Cloudflare `cf-connecting-ip`) and sets `msg.ClientIP = session.RemoteIP`, discarding forged client headers;
 - **Agent Reverse-Proxy Override**: The Agent forcibly overrides `X-Forwarded-For` and `X-Real-IP` with the authoritative IP before proxying HTTP/WS requests;
 - **WAF Synergy**: Enables SafeLine, Nginx WAF, and ModSecurity to perform per-IP rate limiting, individual IP blocking, and GeoIP logging, while supporting in-place ICE Restart IP updates on mobile network roaming.
+
+---
+
+## 4. Signaling Architecture & Topology Trade-offs
+
+WebRTC Gateway provides dual-track signaling deployment topologies to accommodate diverse operational scales:
+
+| Dimension | Standalone Go Broker (`cmd/signal`) | Cloud-Native Edge Distributed (`edge/cloudflare-worker/`) |
+| :--- | :--- | :--- |
+| **Runtime** | Single static Go executable binary | Cloudflare Workers + SQLite Durable Objects (DO) |
+| **Routing** | Single public IP / VPS direct routing | 300+ city worldwide Anycast edge routing |
+| **State Consistency** | In-memory sync.Map with RWMutex | Edge hash-partitioned per NodeID with singleton DO consistency |
+| **Connection Model** | Long-running Go goroutine per connection | WebSocket Hibernation API (zero CPU billing while idle) |
+| **Target Use Case** | Local LAN, private NAS, homelab, and self-hosted instances | Global high-availability, zero-maintenance serverless production |
+
+---
+
+## 5. Target Web Application Architecture Compatibility Matrix
+
+Because WebRTC Gateway operates on a "Zero-Client / Browser Sandbox Virtualization" model, target web applications perform differently based on their architectural patterns:
+
+| Tier | Category | Examples | Compatibility & Architectural Notes |
+| :---: | :--- | :--- | :--- |
+| **Tier 1 (Native Support)** | • Standard SPAs / MPAs<br/>• Admin dashboards<br/>• Media streaming<br/>• Monitoring & analytics | Portainer, Grafana, Jellyfin, LibreSpeed, Vaultwarden, OpenList, NAS Web UIs, static sites | • Standard HTTP/1.1 and WebSocket APIs;<br/>• Supports 204/304 caching and HTTP 206 range requests;<br/>• CookieJar and anti-frame-busting active automatically. |
+| **Tier 2 (Conditional Support)** | • Dynamic multi-domain redirects<br/>• External 3rd-party OAuth login | Apps relying on external Google / GitHub OAuth | • Requires `--p2p-proxy` or subdomain virtualization to preserve intra-session tunneling;<br/>• External OAuth callbacks must preserve query/hash context. |
+| **Tier 3 (Known Limitations)** | • Applications registering **their own Service Worker**<br/>• Apps with strict `COOP: same-origin` | Heavy offline PWAs, cloud browser IDEs with nested SW interception | • Browser same-origin security restricts each origin to a single active controlling Service Worker; target SW conflicts with gateway SW;<br/>• Strict `Cross-Origin-Opener-Policy` may sever cross-window messaging. Dedicated subdomain or native agent recommended. |

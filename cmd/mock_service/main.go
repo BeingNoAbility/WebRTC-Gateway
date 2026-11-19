@@ -1050,7 +1050,7 @@ const indexHTML = `<!DOCTYPE html>
               const res = JSON.parse(xhr.responseText);
               if (res.bytes === uploadSize) {
                 document.getElementById('uploadProgress').style.width = '100%';
-                recordScenario('upload', true, 'Upload progress reached ' + maxProgress + '% (512KB echoed)');
+                recordScenario('upload', true, 'Upload completed 100% (512KB echoed, progress fired: ' + progressFired + ')');
                 log('[Test 8] PASSED: XHR Upload progress virtualized and byte count matched.');
                 resolve();
                 return;

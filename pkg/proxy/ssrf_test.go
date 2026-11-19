@@ -211,6 +211,7 @@ func TestProxy_TargetPolicy_OriginSubdomainSecurity(t *testing.T) {
 		"http://fakemygateway.com",
 		"https://notmygateway.com",
 		"javascript:alert(1)",
+		"https://my-nas.internal:9999", // Port mismatch with targetURL:8443
 		"",
 	}
 	for _, io := range invalidOrigins {

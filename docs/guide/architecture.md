@@ -41,7 +41,7 @@ sequenceDiagram
 
 ## 2. P2PMux v1 二进制流式多路复用协议规范
 
-为了在单个 WebRTC `RTCDataChannel` 上并发承载成百上千个独立的 HTTP 请求、大文件下载与 WebSocket 连接，且避免单个大文件的慢传输阻塞关键 API（消除队头阻塞 Head-of-Line Blocking），网关设计了轻量级二进制多路复用协议 **P2PMux v1**。
+为了在单个 WebRTC `RTCDataChannel` 上并发承载成百上千个独立的 HTTP 请求、大文件下载与 WebSocket 连接，且避免单个大文件的慢传输饿死关键 API（消除应用层发送队头饥饿 Application-Level Write Starvation，单有序通道在物理网络丢包下仍受 SCTP 传输层重传延迟约束），网关设计了轻量级二进制多路复用协议 **P2PMux v1**。
 
 ### 协议帧结构 (10 字节固定头部)：
 
@@ -69,7 +69,7 @@ sequenceDiagram
   - `0x00 (FlagNone)`：常规数据帧；
   - `0x01 (FlagFin)`：标记该流的数据发送完毕（半关闭/完全关闭信号）；
   - `0x02 (FlagAck)`：控制帧确认应答。
-- **Payload Length (uint32, 4 字节)**：载荷字节长度（大端序）。单帧最大载荷上限为 **64KB (MaxPayloadSize = 65536 字节)**，推荐分块流式传输尺寸为 **32KB (RecommendedChunkSize = 32758 字节)**，配合 10 字节帧头对齐 32KB 内存分块与 WebRTC 底层 SCTP MTU，避免内存跨阶扩张与超大分包丢包。
+- **Payload Length (uint32, 4 字节)**：载荷字节长度（大端序）。单帧最大载荷上限为 **64KB (MaxPayloadSize = 65536 字节)**，推荐分块流式传输尺寸为 **32KB (RecommendedChunkSize = 32758 字节)**。配合 10 字节定长帧头达到 **32768 字节 (32KB)**，精准契合 Go 语言运行时 `mcache` 内存分配阶梯与系统 I/O 缓冲区大小；物理网络层传输则由底层 WebRTC SCTP 协议栈根据以太网 MTU (~1500 字节) 进行透明数据包分片与有序重组。
 
 ---
 
@@ -110,3 +110,29 @@ sequenceDiagram
 - **权威信令锚点注入**：信令服务器在转发 Offer 时，物理提取客户端底层套接字真实 IP 强行覆写 `msg.ClientIP = session.RemoteIP`（Cloudflare Workers 提取 `cf-connecting-ip`），防止恶意客户端篡改信令自报伪造 IP；
 - **强制覆写与防伪防御**：Agent 代理层在转发 HTTP 与 WebSocket 握手时，强制通过 `req.Header.Set` 覆写 `X-Forwarded-For` 与 `X-Real-IP` 为权威客户端公网 IP，防范恶意客户端自报伪造头；
 - **WAF 与后端审计协同**：为雷池 SafeLine、Nginx WAF、ModSecurity 赋予单 IP 精准封禁、单 IP 频率限制与日志 GeoIP 溯源能力；支持移动漫游原地 ICE Restart 动态刷新出口 IP 与旧版信令优雅兜底 `127.0.0.1`。
+
+---
+
+## 4. 信令服务架构形态与部署拓扑权衡
+
+WebRTC Gateway 提供双轨信令部署形态，满足不同规模与场景的可用性需求：
+
+| 维度 | 单机轻量版 (`cmd/signal`) | 云原生边缘分布式 (`edge/cloudflare-worker/`) |
+| :--- | :--- | :--- |
+| **底层运行时** | 纯 Go 原生可执行二进制单文件 | Cloudflare Workers + SQLite Durable Objects (DO) |
+| **网络调度** | 单点公网 IP / VPS 直连 | 遍布全球 300+ 城市的 Anycast 边缘路由 |
+| **状态一致性** | 进程内单机 Map 与读写锁维护房间状态 | 按 NodeID 边缘哈希分片，由 Durable Object 保证强一致单例 |
+| **长连接机制** | Go 原生 WebSocket 持续驻留协程 | WebSocket Hibernation API（休眠节省 CPU 计费，唤醒恢复会话） |
+| **典型适用场景** | 局域网离线私有化、NAS 单机极速部署、开发自测 | 跨国高可用公网分发、免维护 Serverless 生产部署、海量并发穿透 |
+
+---
+
+## 5. 目标 Web 应用架构兼容性支持矩阵 (Target Web Application Compatibility Matrix)
+
+由于 WebRTC Gateway 采用“零客户端 / 纯浏览器沙箱虚拟化”架构，不同目标站点的自身技术栈特性会直接影响沙箱拦截与代理效果：
+
+| 兼容等级 | 典型目标应用类别 | 代表软件示例 | 架构特征与支持说明 |
+| :---: | :--- | :--- | :--- |
+| **Tier 1 (原生完美支持)** | • 标准 SPA / MPA 应用<br/>• 后台管理控制面板<br/>• 媒体流播放器<br/>• 监控与可视化系统 | Portainer, Grafana, Jellyfin, LibreSpeed, Vaultwarden, OpenList, 常用 NAS WebUI, 静态博客 | • 遵循标准 HTTP/1.1 与 WebSocket 通信；<br/>• 支持 204/304 缓存协商与 HTTP 206 范围断点续传；<br/>• CookieJar 与 防盗链/防顶层框架劫持自动生效。 |
+| **Tier 2 (条件受限支持)** | • 涉及动态跨域跳转的应用<br/>• 强依赖外部 3P OAuth 登录站点 | 依赖 Google / GitHub 第三方外部 OAuth 鉴权的站点 | • 需配合 `--p2p-proxy` 或统一子域名代理以维持内部会话；<br/>• 外部第三方登录完成回调时需保留 Hash/Query 上下文。 |
+| **Tier 3 (当前已知限制)** | • 目标站点**自身注册了 Service Worker** (PWA)<br/>• 严格声明 `COOP: same-origin` 的隔离站点 | 离线缓存型重度 PWA、依赖多级 Worker 且自带 SW 拦截的复杂云 IDE | • 浏览器的同源沙箱限制单个 Origin 仅能激活一个主导 Service Worker，目标站点的 SW 会与网关 SW 产生注册竞争；<br/>• 严格的 `Cross-Origin-Opener-Policy` 可能会阻断沙箱内弹窗的数据通信。推荐使用原生客户端或独立子域部署。 |

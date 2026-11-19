@@ -819,3 +819,80 @@ func TestMux_GlobalInboundMemoryBudget_Backpressure(t *testing.T) {
 		t.Fatalf("Expected 0 remaining inboundBytes after all streams reset, got %d (memory counter leak!)", remaining)
 	}
 }
+
+func TestMux_InboundBackpressure_TimeoutBetweenWatermarkAndMax(t *testing.T) {
+	t1, t2 := newMockPair()
+	defer t1.Close()
+	defer t2.Close()
+
+	clientMux := NewMux(t1, true)
+	agentMux := NewMux(t2, false)
+
+	// Low: 2000, High: 4000, Max: 10000, Timeout: 50ms
+	agentMux.SetInboundLimits(10000, 4000, 2000, 50*time.Millisecond)
+
+	t1.SetMessageHandler(func(data []byte) { _ = clientMux.HandleIncomingMessage(data) })
+	t2.SetMessageHandler(func(data []byte) { _ = agentMux.HandleIncomingMessage(data) })
+
+	defer clientMux.Close()
+	defer agentMux.Close()
+
+	// 1. Open stream 1 and write 3000 bytes (puts load > low of 2000)
+	s1, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream 1 failed: %v", err)
+	}
+	defer s1.Reset()
+
+	data3k := make([]byte, 3000)
+	_, _ = rand.Read(data3k)
+	if _, err := s1.Write(data3k); err != nil {
+		t.Fatalf("Write 3k failed: %v", err)
+	}
+
+	serverS1, err := agentMux.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatalf("AcceptStream 1 failed: %v", err)
+	}
+	defer serverS1.Reset()
+
+	deadline := time.Now().Add(time.Second)
+	for agentMux.InboundBytes() < 3000 && time.Now().Before(deadline) {
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	// 2. Open stream 2 and write 4000 bytes. Total inbound = 7000 bytes (between high 4000 and max 10000)
+	// Server does not read stream 1, so load remains > low(2000).
+	// Backpressure wait will block for 50ms and then timeout, triggering stream 2 reset!
+	s2, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream 2 failed: %v", err)
+	}
+	defer s2.Reset()
+
+	data4k := make([]byte, 4000)
+	_, _ = rand.Read(data4k)
+	_, _ = s2.Write(data4k)
+
+	serverS2, err := agentMux.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatalf("AcceptStream 2 failed: %v", err)
+	}
+	defer serverS2.Reset()
+
+	select {
+	case <-serverS2.Context().Done():
+		// PASS: stream 2 was properly reset due to backpressure timeout
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Expected stream 2 to be reset by backpressure timeout when backlog remained between high and max")
+	}
+
+	// Verify quota rollback: delta (4000) was rolled back, so inboundBytes is back to stream 1's 3000
+	deadline = time.Now().Add(time.Second)
+	for agentMux.InboundBytes() != 3000 && time.Now().Before(deadline) {
+		time.Sleep(1 * time.Millisecond)
+	}
+	if inBytes := agentMux.InboundBytes(); inBytes != 3000 {
+		t.Fatalf("Expected inboundBytes to rollback to 3000 after stream 2 timed out, got %d", inBytes)
+	}
+}

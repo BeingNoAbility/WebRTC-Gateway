@@ -604,6 +604,14 @@ func (m *Mux) acquireInbound(streamID uint32, n int) bool {
 			m.inboundBpCond.Wait()
 		}
 		timer.Stop()
+
+		// Backpressure timeout: if backlog is still above low watermark after timeout expires,
+		// slow client / stalled consumer failed to drain -> fuse and return false to trigger stream reset
+		if m.inboundBytes.Load() > low {
+			m.inboundBytes.Add(-delta)
+			m.inboundBpMu.Unlock()
+			return false
+		}
 	}
 
 	if m.inboundBytes.Load() > max {

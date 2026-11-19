@@ -144,7 +144,7 @@ func CreateSafeDialContext(target *url.URL) func(ctx context.Context, network, a
 }
 
 // ValidateTrustedOrigin checks whether rawOrigin strictly belongs to rootDomain or targetURL,
-// avoiding insecure substring matching (e.g. preventing attacker.com?q=rootDomain or rootDomain.evil.com).
+// enforcing strict (Scheme, Host, Port) tuple verification to avoid cross-port and substring attacks.
 func ValidateTrustedOrigin(rawOrigin, rootDomain string, targetURL *url.URL) bool {
 	if rawOrigin == "" {
 		return false
@@ -153,10 +153,37 @@ func ValidateTrustedOrigin(rawOrigin, rootDomain string, targetURL *url.URL) boo
 	if err != nil || u.Hostname() == "" {
 		return false
 	}
-	host := strings.ToLower(u.Hostname())
-	if targetURL != nil && strings.EqualFold(host, strings.ToLower(targetURL.Hostname())) {
-		return true
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false
 	}
+
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+
+	// 1. Strict tuple comparison with targetURL (Scheme, Host, Port)
+	if targetURL != nil && strings.EqualFold(host, strings.ToLower(targetURL.Hostname())) {
+		targetPort := targetURL.Port()
+		if targetPort == "" {
+			if strings.EqualFold(targetURL.Scheme, "https") {
+				targetPort = "443"
+			} else {
+				targetPort = "80"
+			}
+		}
+		if port == targetPort {
+			return true
+		}
+	}
+
+	// 2. Suffix / Subdomain matching with rootDomain
 	if rootDomain != "" {
 		root := strings.ToLower(rootDomain)
 		if host == root || strings.HasSuffix(host, "."+root) {
