@@ -119,12 +119,12 @@ const sensitivePatterns = [
   { name: 'Private domain', pattern: new RegExp(decodeB64('bG9saVwuZm8='), 'i') },
   { name: 'Private IP prefix', pattern: new RegExp(decodeB64('MjdcLjQwXC4='), 'i') },
   { name: 'Private node identifier', pattern: new RegExp(decodeB64('c3lubzE2OA=='), 'i') },
-  { name: 'Private IP 192.168.1.100', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjY1'), 'i') },
-  { name: 'Private IP 192.168.1.100', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjlcLjQw'), 'i') },
-  { name: 'Private IP 192.168.1.100', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjIyMg=='), 'i') },
-  { name: 'Private IP 192.168.1.100', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjM0'), 'i') },
-  { name: 'Private IP 192.168.1.100', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjk5'), 'i') },
-  { name: 'Private port 8443', pattern: new RegExp(decodeB64('MjIzNTU='), 'i') },
+  { name: 'Private instance IP pattern 1', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjY1'), 'i') },
+  { name: 'Private instance IP pattern 2', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjlcLjQw'), 'i') },
+  { name: 'Private instance IP pattern 3', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjIyMg=='), 'i') },
+  { name: 'Private instance IP pattern 4', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjM0'), 'i') },
+  { name: 'Private instance IP pattern 5', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjk5'), 'i') },
+  { name: 'Private custom port pattern', pattern: new RegExp(decodeB64('MjIzNTU='), 'i') },
 ];
 
 let leakCount = 0;
