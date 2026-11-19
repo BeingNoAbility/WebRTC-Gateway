@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v2.3.2] - 2026-11-19
+
+### Security & Hardening
+- **Mozilla Public Suffix List (PSL) Root Domain Extraction & Multi-Tenant Isolation**:
+  - Replaced heuristic ccTLD truncation in `pkg/proxy/http_proxy.go` with RFC/PSL-compliant `golang.org/x/net/publicsuffix` (`EffectiveTLDPlusOne`).
+  - Resolved security boundary flaw where academic second-level ccTLDs (e.g. `oxford.ac.uk`, `tokyo.ac.jp`) collapsed into bare TLDs (`ac.uk`), preventing cross-institution unauthorized proxying.
+  - Hardened multi-tenant shared hosting platforms (`*.github.io`, `*.pages.dev`, `*.workers.dev`) by treating each tenant subdomain as an isolated eTLD+1 boundary, defeating cross-tenant traversal attacks.
+  - Added defensive fuse ensuring bare public suffixes (`github.io`, `co.uk`, `com.cn`) return empty root domains, strictly disallowing wildcard traversal across all tenants.
+  - Refactored host:port parsing using `net.SplitHostPort` with bracket stripping, cleanly supporting full-format IPv6 addresses with ports (`[::1]:8080`, `::1`).
+
+### Testing & Documentation
+- **Targeted Adversarial Test Matrix**:
+  - Added targeted test suites covering PSL domain isolation, CSWSH wildcard origin decoupling, and session reconnection backoff.
+- **Troubleshooting & FAQ Guide Refresh**:
+  - Rewrote and enriched user-facing troubleshooting and FAQ documentation in both Chinese and English.
+
 ## [v2.3.1] - 2026-11-19
 
 ### Hotfix & Security

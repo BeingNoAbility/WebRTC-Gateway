@@ -10,13 +10,13 @@ import (
 )
 
 type GoldenVectorFile struct {
-	Description          string               `json:"description"`
-	Version              string               `json:"version"`
-	HeaderSize           int                  `json:"header_size"`
-	RecommendedChunkSize int                  `json:"recommended_chunk_size"`
-	MaxPayloadSize       int                  `json:"max_payload_size"`
-	ValidVectors         []GoldenValidVector  `json:"valid_vectors"`
-	ErrorVectors         []GoldenErrorVector  `json:"error_vectors"`
+	Description          string              `json:"description"`
+	Version              string              `json:"version"`
+	HeaderSize           int                 `json:"header_size"`
+	RecommendedChunkSize int                 `json:"recommended_chunk_size"`
+	MaxPayloadSize       int                 `json:"max_payload_size"`
+	ValidVectors         []GoldenValidVector `json:"valid_vectors"`
+	ErrorVectors         []GoldenErrorVector `json:"error_vectors"`
 }
 
 type GoldenValidVector struct {
