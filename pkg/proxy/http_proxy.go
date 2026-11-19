@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/publicsuffix"
 	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/protocol"
 )
@@ -70,32 +71,47 @@ type ResponseMetadata struct {
 	Cookies []string          `json:"c,omitempty"` // Client-syncable non-HttpOnly Set-Cookie list
 }
 
-// ExtractRootDomain extracts the effective root domain from a hostname.
-// For example:
+// ExtractRootDomain extracts the effective top-level domain plus one (eTLD+1)
+// using the authoritative Mozilla Public Suffix List (PSL).
 //
-//	"www.example.com" -> "example.com"
-//	"api.example.com" -> "example.com"
-//	"sub.example.com:8443" -> "example.com"
-//	"192.168.1.100:8080" -> "192.168.1.100"
-//	"localhost:8080" -> "localhost"
+// Rules:
+//  1. IPv4, IPv6 (with or without brackets/ports), localhost -> return host without port/brackets.
+//  2. Single-label intranet hostnames without dots (e.g. "nas:5000", "homeserver") -> return host.
+//  3. Multi-label domains (e.g. "cs.oxford.ac.uk", "sub.example.com:8443") -> return eTLD+1 ("oxford.ac.uk", "example.com").
+//  4. Multi-tenant public suffixes (e.g. "my-app.github.io") -> return "my-app.github.io" (isolated from other tenants).
+//  5. Bare public suffixes (e.g. "github.io", "co.uk", "com.cn") -> return "" (disallows wildcard traversal to tenants).
 func ExtractRootDomain(hostname string) string {
-	host := strings.ToLower(strings.Split(hostname, ":")[0])
+	host := hostname
+	if h, _, err := net.SplitHostPort(hostname); err == nil {
+		host = h
+	} else {
+		host = strings.Trim(hostname, "[]")
+	}
+	host = strings.ToLower(host)
+
+	// 1. IPs and localhost have no domain hierarchy
 	if net.ParseIP(host) != nil || host == "localhost" {
 		return host
 	}
-	parts := strings.Split(host, ".")
-	if len(parts) <= 2 {
+
+	// 2. Single-label local hostnames without dots (e.g. "nas", "homeserver")
+	if !strings.Contains(host, ".") {
 		return host
 	}
-	last := parts[len(parts)-1]
-	secondLast := parts[len(parts)-2]
-	if len(last) == 2 && (secondLast == "co" || secondLast == "com" || secondLast == "net" || secondLast == "org" || secondLast == "edu" || secondLast == "gov") {
-		if len(parts) >= 3 {
-			return strings.Join(parts[len(parts)-3:], ".")
-		}
-		return host
+
+	// 3. Derive eTLD+1 via Mozilla Public Suffix List
+	etld1, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err == nil {
+		return etld1
 	}
-	return strings.Join(parts[len(parts)-2:], ".")
+
+	// 4. Defensive check: If host is itself a public suffix (e.g. "github.io", "ac.uk"),
+	// return empty string to prohibit wildcard matching against all third-party tenants.
+	if suffix, _ := publicsuffix.PublicSuffix(host); suffix == host {
+		return ""
+	}
+
+	return host
 }
 
 // HTTPProxy bridges multiplexed P2P streams with local HTTP backend services.

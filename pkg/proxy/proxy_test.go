@@ -126,6 +126,31 @@ func TestExtractRootDomain_ComprehensiveBoundaries(t *testing.T) {
 		// Domains with custom ports
 		{"www.bilibili.com:8443", "bilibili.com"},
 		{"sub.domain.org:9000", "domain.org"},
+
+		// Academic and complex ccTLDs (RFC/PSL eTLD+1)
+		{"oxford.ac.uk", "oxford.ac.uk"},
+		{"cs.oxford.ac.uk", "oxford.ac.uk"},
+		{"cs.oxford.ac.uk:8443", "oxford.ac.uk"},
+		{"tokyo.ac.jp", "tokyo.ac.jp"},
+
+		// Multi-tenant public suffix isolation (PSL Private Domains)
+		{"my-app.github.io", "my-app.github.io"},
+		{"sub.my-app.github.io", "my-app.github.io"},
+		{"test.pages.dev", "test.pages.dev"},
+
+		// Bare public suffixes return empty string to prevent wildcard expansion
+		{"github.io", ""},
+		{"co.uk", ""},
+		{"com.cn", ""},
+		{"ac.uk", ""},
+
+		// IPv6 addresses with brackets, ports, and bare
+		{"[::1]:8080", "::1"},
+		{"[::1]", "::1"},
+		{"::1", "::1"},
+		{"[2001:db8::1]:443", "2001:db8::1"},
+		{"[2001:db8::1]", "2001:db8::1"},
+		{"2001:db8::1", "2001:db8::1"},
 	}
 
 	for _, tc := range testCases {
@@ -133,6 +158,67 @@ func TestExtractRootDomain_ComprehensiveBoundaries(t *testing.T) {
 		if actual != tc.expected {
 			t.Errorf("ExtractRootDomain(%q) = %q; expected %q", tc.input, actual, tc.expected)
 		}
+	}
+}
+
+// 1b. Isolation tests for PSL eTLD+1 in isDomainAllowed
+func TestIsDomainAllowed_PSLIsolation(t *testing.T) {
+	cm := NewSessionCookieManager()
+
+	// Case 1: Target is oxford.ac.uk
+	hpOxford, err := NewHTTPProxy("https://oxford.ac.uk", cm)
+	if err != nil {
+		t.Fatalf("NewHTTPProxy failed: %v", err)
+	}
+	if hpOxford.rootDomain != "oxford.ac.uk" {
+		t.Fatalf("expected rootDomain oxford.ac.uk, got %q", hpOxford.rootDomain)
+	}
+	// Subdomain under oxford.ac.uk is allowed
+	if !hpOxford.isDomainAllowed("cs.oxford.ac.uk") {
+		t.Errorf("expected cs.oxford.ac.uk to be allowed under oxford.ac.uk")
+	}
+	// Sibling institution cambridge.ac.uk MUST BE FORBIDDEN
+	if hpOxford.isDomainAllowed("cambridge.ac.uk") {
+		t.Errorf("CRITICAL: cambridge.ac.uk should NOT be allowed under oxford.ac.uk target!")
+	}
+	if hpOxford.isDomainAllowed("evil.ac.uk") {
+		t.Errorf("CRITICAL: evil.ac.uk should NOT be allowed under oxford.ac.uk target!")
+	}
+
+	// Case 2: Target is my-app.github.io
+	hpGithub, err := NewHTTPProxy("https://my-app.github.io", cm)
+	if err != nil {
+		t.Fatalf("NewHTTPProxy failed: %v", err)
+	}
+	if hpGithub.rootDomain != "my-app.github.io" {
+		t.Fatalf("expected rootDomain my-app.github.io, got %q", hpGithub.rootDomain)
+	}
+	if !hpGithub.isDomainAllowed("my-app.github.io") {
+		t.Errorf("expected my-app.github.io to be allowed")
+	}
+	if !hpGithub.isDomainAllowed("sub.my-app.github.io") {
+		t.Errorf("expected sub.my-app.github.io to be allowed")
+	}
+	// Sibling tenant attacker.github.io MUST BE FORBIDDEN
+	if hpGithub.isDomainAllowed("attacker.github.io") {
+		t.Errorf("CRITICAL: attacker.github.io should NOT be allowed under my-app.github.io target!")
+	}
+
+	// Case 3: Target is bare public suffix https://github.io
+	hpBare, err := NewHTTPProxy("https://github.io", cm)
+	if err != nil {
+		t.Fatalf("NewHTTPProxy failed: %v", err)
+	}
+	if hpBare.rootDomain != "" {
+		t.Fatalf("expected empty rootDomain for bare public suffix github.io, got %q", hpBare.rootDomain)
+	}
+	// Exact target host allowed
+	if !hpBare.isDomainAllowed("github.io") {
+		t.Errorf("expected exact host github.io to be allowed")
+	}
+	// Wildcard tenants NOT allowed
+	if hpBare.isDomainAllowed("tenant.github.io") {
+		t.Errorf("CRITICAL: tenant.github.io should NOT be allowed under bare github.io target!")
 	}
 }
 
