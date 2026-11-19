@@ -724,3 +724,98 @@ func TestMux_ConcurrentPingPong_NoCrosstalk(t *testing.T) {
 		t.Errorf("Concurrent ping error: %v", err)
 	}
 }
+
+// 12. Test global inbound memory budget, backpressure waiting/resume, and zero-leak on stream reset (Task 7 / B 项)
+func TestMux_GlobalInboundMemoryBudget_Backpressure(t *testing.T) {
+	t1, t2 := newMockPair()
+	defer t1.Close()
+	defer t2.Close()
+
+	clientMux := NewMux(t1, true)
+	agentMux := NewMux(t2, false)
+
+	// Configure tight inbound limits on agent: max 10KB, high 7KB, low 3KB, backpressure timeout 100ms
+	agentMux.SetInboundLimits(10000, 7000, 3000, 100*time.Millisecond)
+
+	t1.SetMessageHandler(func(data []byte) { _ = clientMux.HandleIncomingMessage(data) })
+	t2.SetMessageHandler(func(data []byte) { _ = agentMux.HandleIncomingMessage(data) })
+
+	defer clientMux.Close()
+	defer agentMux.Close()
+
+	// 1. Open stream 1 and write 5000 bytes (below high watermark of 7000)
+	s1, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+
+	data5k := make([]byte, 5000)
+	_, _ = rand.Read(data5k)
+	if _, err := s1.Write(data5k); err != nil {
+		t.Fatalf("Write 5k failed: %v", err)
+	}
+
+	serverS1, err := agentMux.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatalf("AcceptStream failed: %v", err)
+	}
+
+	// Verify agent inboundBytes is tracked deterministically
+	deadline := time.Now().Add(time.Second)
+	for agentMux.InboundBytes() < 5000 && time.Now().Before(deadline) {
+		time.Sleep(1 * time.Millisecond)
+	}
+	if inBytes := agentMux.InboundBytes(); inBytes < 5000 {
+		t.Fatalf("Expected inboundBytes >= 5000, got %d", inBytes)
+	}
+
+	// 2. Read 3000 bytes on server side -> drops below 3000 threshold
+	buf := make([]byte, 3000)
+	if _, err := io.ReadFull(serverS1, buf); err != nil {
+		t.Fatalf("ReadFull failed: %v", err)
+	}
+
+	deadline = time.Now().Add(time.Second)
+	for agentMux.InboundBytes() > 2000 && time.Now().Before(deadline) {
+		time.Sleep(1 * time.Millisecond)
+	}
+	if inBytes := agentMux.InboundBytes(); inBytes > 2000 {
+		t.Fatalf("Expected inboundBytes <= 2000 after read, got %d", inBytes)
+	}
+
+	// 3. Open stream 2 and write data exceeding hard maximum (12000 bytes) without reading
+	s2, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream 2 failed: %v", err)
+	}
+
+	data12k := make([]byte, 12000)
+	_, _ = rand.Read(data12k)
+	_, _ = s2.Write(data12k)
+
+	serverS2, err := agentMux.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatalf("AcceptStream 2 failed: %v", err)
+	}
+
+	// Wait for backpressure timeout / hard breach to trigger stream reset
+	select {
+	case <-serverS2.Context().Done():
+		// Stream was properly reset due to budget breach
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Expected server stream 2 to be reset due to inbound budget breach")
+	}
+
+	// 4. Close/Reset stream 1 and verify complete cleanup (zero ghost memory leak)
+	_ = s1.Reset()
+	_ = serverS1.Reset()
+	_ = s2.Reset()
+
+	deadline = time.Now().Add(time.Second)
+	for agentMux.InboundBytes() != 0 && time.Now().Before(deadline) {
+		time.Sleep(1 * time.Millisecond)
+	}
+	if remaining := agentMux.InboundBytes(); remaining != 0 {
+		t.Fatalf("Expected 0 remaining inboundBytes after all streams reset, got %d (memory counter leak!)", remaining)
+	}
+}

@@ -130,7 +130,11 @@ func TestLinuxTestbed_HMACShareLink_ExpirationsAndTampering(t *testing.T) {
 	t.Log("PASS: Expired share link detected and rejected")
 
 	// 3. Tampered signature (altered by 1 char)
-	tamperedSig := validSig[:len(validSig)-1] + "a"
+	replacement := "a"
+	if validSig[len(validSig)-1] == 'a' {
+		replacement = "b"
+	}
+	tamperedSig := validSig[:len(validSig)-1] + replacement
 	if hmac.Equal([]byte(tamperedSig), []byte(expectedSig)) {
 		t.Fatalf("Tampered HMAC signature should be rejected")
 	}

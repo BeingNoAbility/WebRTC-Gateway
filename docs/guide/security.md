@@ -128,6 +128,32 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 
 ---
 
+## 8. 控制面与数据面纵深防御治理 (v2.2 Resource Governance & Defenses)
+
+自 **v2.2.0** 起，网关对控制面信令与数据面传输实施更严格的配额治理与防 DoS 加固：
+
+### ① 跨站 WebSocket 劫持防御与分流准入 (CSWSH & Origin Whitelisting)
+- **浏览器环境强制校验**：针对携带 `Origin` 请求头的浏览器客户端（Web Portal / 访客），信令服务端通过 `-allowed-origins` / `SIGNAL_ALLOWED_ORIGINS` 配置严格白名单。支持通配符子域（如 `https://*.pages.dev`）与端口通配（如 `http://localhost:*`），非法来源立即返回 `HTTP 403 Forbidden`；
+- **同源自动信任**：默认信任当前信令服务主机同源（`Origin` 主机与 `Host` 一致），避免合法部署产生误报；
+- **Native / CLI 链路独立放行**：Go CLI Agent、curl 或原生非浏览器客户端不携带 `Origin` 请求头，系统智能识别并放行 WebSocket Upgrade，随后在信令消息层通过 `SIGNAL_SECRET` / HMAC 防重放机制进行强鉴权，绝不因跨域策略阻断命令行守护进程；
+- **向下兼容安全阀**：未显式配置白名单时，保持放行并输出安全提示，防止存量无配置环境升级后服务中断。
+
+### ② 控制面会话配额与频控防 DoS (Control Plane Quotas & Janitor)
+- **单会话 Candidate 转发限额**：单 Session ICE Candidate 转发上限限制为 **32 条**，与 Agent 端 `MaxCandidatesPerSession = 32` 形成端到端双重拦截闭环，超出限制立即丢弃并记录限频日志；
+- **离线等待队列容量硬顶**：当目标 Agent 处于离线状态时，单节点等待队列上限限制为 **128 个**，超出上限直接拒绝新访客排队，防止恶意堆积半开会话耗尽信令服务端内存；
+- **半开 SDP 握手主动超时回收**：访客下发 Offer 后若 30 秒内未收到对应 Answer，后台 Janitor Loop 自动主动关闭连接并回收会话，彻底消除僵尸半开握手。
+
+### ③ Mux 全局 Inbound 内存预算与背压流控 (Global Inbound Budget & Backpressure)
+- **128MB 全局内存配额**：在多路复用层引入全局 Inbound 内存上限（默认 128MB），防止慢速消费者通过并发多流恶意压爆 Agent 内存（消除 $512 \times 32\text{MB} = 16\text{GB}$ 理论风险）；
+- **双水位背压与 SCTP 滑动窗口联动**：积压达到 96MB 高水位时，数据帧消费挂起进入背压，暂停从底层套接字读取，自然促使物理传输层 SCTP 接收通告窗口（a_rwnd）收缩；回落至 64MB 低水位时广播唤醒；
+- **超时精准熔断与零泄漏记账**：背压等待超过 3 秒仍未缓解的慢速流被单点发送 `RST_STREAM` 熔断，绝不影响同连接其他流；流被重置或关闭时未读残留缓冲原子扣减并严格归零，彻底杜绝内存计数器幽灵虚高。
+
+### ④ 生产安全模式加固与 TTY 友好型告警 (Security Warning Banner)
+- **未配置密钥醒目告警**：当 Signal 或 Agent 在未配置 `SIGNAL_SECRET` 与 `ACCESS_SECRET` 的情况下启动时，控制台输出高对比度安全警告，提示当前运行于“公开/匿名模式”及潜在暴露风险；
+- **智能 TTY 探测**：自动识别字符终端与重定向环境，终端环境启用高对比度 ANSI 黄色高亮，非终端（日志重定向、Docker、Kubernetes）自动剥离 ANSI 转义字符，保障运维日志检索无乱码。
+
+---
+
 ## 7. 设计哲学与安全边界声明 (Design Philosophy & Security Boundaries)
 
 为了守住产品的核心护城河与轻量极致体验，本项目坚定恪守以下两条设计纪律：

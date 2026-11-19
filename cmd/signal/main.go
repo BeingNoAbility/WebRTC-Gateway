@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -31,20 +32,195 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"webrtc-gateway/pkg/banner"
 	"webrtc-gateway/pkg/signaling"
 	"webrtc-gateway/web"
 )
 
+// OriginChecker handles WebSocket Origin verification against allowed origins and same-host rules.
+type OriginChecker struct {
+	allowedPatterns []string
+	warnOnce        sync.Once
+}
+
+func NewOriginChecker(patterns string) *OriginChecker {
+	var list []string
+	for _, p := range strings.Split(patterns, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			list = append(list, p)
+		}
+	}
+	return &OriginChecker{allowedPatterns: list}
+}
+
+func (oc *OriginChecker) CheckOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	// Native / CLI clients (Go CLI Agent, curl) do not send Origin header.
+	// Pass through to TypeRegister secret verification.
+	if origin == "" {
+		return true
+	}
+
+	// Downward compatibility safe-valve: if no allowed origins configured, allow all but warn once
+	if len(oc.allowedPatterns) == 0 {
+		oc.warnOnce.Do(func() {
+			log.Printf("[Security Warning] SIGNAL_ALLOWED_ORIGINS is not configured. Allowing cross-origin WebSocket from Origin: %s (Consider setting SIGNAL_ALLOWED_ORIGINS for CSWSH protection)", origin)
+		})
+		return true
+	}
+
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		log.Printf("[Security] Blocked malformed Origin header: %q", origin)
+		return false
+	}
+
+	// Default trust same-origin (origin host == request Host)
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+
+	// Check against configured allowed patterns
+	for _, pattern := range oc.allowedPatterns {
+		if matchOriginPattern(pattern, origin, u) {
+			return true
+		}
+	}
+
+	log.Printf("[Security] Blocked unauthorized Origin %q from %s (not in allowed-origins whitelist or same-host)", origin, r.RemoteAddr)
+	return false
+}
+
+func matchOriginPattern(pattern, origin string, parsedOrigin *url.URL) bool {
+	if pattern == "*" {
+		return true
+	}
+
+	patternScheme := ""
+	patternHost := pattern
+
+	if strings.HasPrefix(pattern, "http://") {
+		patternScheme = "http"
+		patternHost = strings.TrimPrefix(pattern, "http://")
+	} else if strings.HasPrefix(pattern, "https://") {
+		patternScheme = "https"
+		patternHost = strings.TrimPrefix(pattern, "https://")
+	}
+
+	if patternScheme != "" && !strings.EqualFold(patternScheme, parsedOrigin.Scheme) {
+		return false
+	}
+
+	patternHost = strings.TrimRight(patternHost, "/")
+
+	return matchHostPattern(patternHost, parsedOrigin.Host) || matchHostPattern(patternHost, parsedOrigin.Hostname())
+}
+
+func matchHostPattern(pattern, host string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if strings.EqualFold(pattern, host) {
+		return true
+	}
+	// Check port wildcard, e.g. "localhost:*"
+	if strings.Contains(pattern, ":*") {
+		patHost := strings.TrimSuffix(pattern, ":*")
+		h, _, err := net.SplitHostPort(host)
+		if err == nil && strings.EqualFold(patHost, h) {
+			return true
+		}
+		if strings.EqualFold(patHost, host) {
+			return true
+		}
+	}
+	// Check wildcard subdomain, e.g. "*.pages.dev" or "https://*.pages.dev"
+	if strings.HasPrefix(pattern, "*.") {
+		suffix := strings.ToLower(strings.TrimPrefix(pattern, "*."))
+		h := strings.ToLower(host)
+		if hHost, _, err := net.SplitHostPort(h); err == nil {
+			h = hHost
+		}
+		if h == suffix || strings.HasSuffix(h, "."+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+var globalOriginChecker atomic.Pointer[OriginChecker]
+
+func init() {
+	SetOriginChecker(NewOriginChecker(""))
+}
+
+// GetOriginChecker returns the active OriginChecker instance.
+func GetOriginChecker() *OriginChecker {
+	return globalOriginChecker.Load()
+}
+
+// SetOriginChecker sets the active OriginChecker instance.
+func SetOriginChecker(oc *OriginChecker) {
+	globalOriginChecker.Store(oc)
+}
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow cross-origin signaling from Cloudflare Pages / Portal
+		oc := GetOriginChecker()
+		if oc == nil {
+			return true
+		}
+		return oc.CheckOrigin(r)
 	},
 }
 
-var (
-	defaultPingPeriodNs  int64 = int64(25 * time.Second)
-	defaultReadTimeoutNs int64 = int64(60 * time.Second)
+const (
+	// DefaultMaxCandidatesPerSession is the maximum allowed ICE candidate forwarding per session.
+	DefaultMaxCandidatesPerSession int32 = 32
+	// DefaultMaxWaitingVisitorsPerNode is the maximum allowed queued visitors waiting for an offline agent.
+	DefaultMaxWaitingVisitorsPerNode int32 = 128
+	// DefaultHalfOpenTimeout is the expiration threshold for unclosed SDP offers.
+	DefaultHalfOpenTimeout time.Duration = 30 * time.Second
 )
+
+var (
+	defaultPingPeriodNs              int64 = int64(25 * time.Second)
+	defaultReadTimeoutNs             int64 = int64(60 * time.Second)
+	defaultMaxCandidatesPerSession   atomic.Int32
+	defaultMaxWaitingVisitorsPerNode atomic.Int32
+	defaultHalfOpenTimeoutNs         atomic.Int64
+)
+
+func init() {
+	defaultMaxCandidatesPerSession.Store(DefaultMaxCandidatesPerSession)
+	defaultMaxWaitingVisitorsPerNode.Store(DefaultMaxWaitingVisitorsPerNode)
+	defaultHalfOpenTimeoutNs.Store(int64(DefaultHalfOpenTimeout))
+}
+
+func getMaxCandidatesPerSession() int32 {
+	return defaultMaxCandidatesPerSession.Load()
+}
+
+func SetMaxCandidatesPerSessionForTest(n int32) {
+	defaultMaxCandidatesPerSession.Store(n)
+}
+
+func getMaxWaitingVisitorsPerNode() int32 {
+	return defaultMaxWaitingVisitorsPerNode.Load()
+}
+
+func SetMaxWaitingVisitorsForTest(n int32) {
+	defaultMaxWaitingVisitorsPerNode.Store(n)
+}
+
+func getHalfOpenTimeout() time.Duration {
+	return time.Duration(defaultHalfOpenTimeoutNs.Load())
+}
+
+func SetHalfOpenTimeoutForTest(d time.Duration) {
+	defaultHalfOpenTimeoutNs.Store(int64(d))
+}
 
 func getPingPeriod() time.Duration {
 	return time.Duration(atomic.LoadInt64(&defaultPingPeriodNs))
@@ -67,6 +243,32 @@ type Session struct {
 	RemoteIP string
 	Conn     *websocket.Conn
 	mu       sync.Mutex
+
+	clientCandidates atomic.Int32
+	agentCandidates  atomic.Int32
+
+	offerMu      sync.Mutex
+	offerPending bool
+	offerTime    time.Time
+}
+
+func (s *Session) MarkOfferPending() {
+	s.offerMu.Lock()
+	defer s.offerMu.Unlock()
+	s.offerPending = true
+	s.offerTime = time.Now()
+}
+
+func (s *Session) ClearOfferPending() {
+	s.offerMu.Lock()
+	defer s.offerMu.Unlock()
+	s.offerPending = false
+}
+
+func (s *Session) IsOfferPending(timeout time.Duration) bool {
+	s.offerMu.Lock()
+	defer s.offerMu.Unlock()
+	return s.offerPending && time.Since(s.offerTime) > timeout
 }
 
 func (s *Session) Send(msg *signaling.Message) error {
@@ -96,16 +298,84 @@ type SignalBroker struct {
 	nodeSecrets     map[string]string   // node_id -> registered secret (anti-hijack)
 	nodeVisitorAuth map[string]bool     // node_id -> whether visitors require authentication
 	clients         map[string]*Session // session_id -> Session
+	stopJanitor     chan struct{}
 }
 
 func NewSignalBroker(serverSecret string) *SignalBroker {
-	return &SignalBroker{
+	b := &SignalBroker{
 		serverSecret:    serverSecret,
 		agents:          make(map[string]*Session),
 		nodeSecrets:     make(map[string]string),
 		nodeVisitorAuth: make(map[string]bool),
 		clients:         make(map[string]*Session),
+		stopJanitor:     make(chan struct{}),
 	}
+	b.startJanitorLoop()
+	return b
+}
+
+func (b *SignalBroker) Close() {
+	b.mu.Lock()
+	select {
+	case <-b.stopJanitor:
+	default:
+		close(b.stopJanitor)
+	}
+	b.mu.Unlock()
+}
+
+func (b *SignalBroker) startJanitorLoop() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-b.stopJanitor:
+				return
+			case <-ticker.C:
+				b.reapHalfOpenSessions(getHalfOpenTimeout())
+			}
+		}
+	}()
+}
+
+func (b *SignalBroker) reapHalfOpenSessions(timeout time.Duration) {
+	b.mu.RLock()
+	var timedOut []*Session
+	for _, c := range b.clients {
+		if c.IsOfferPending(timeout) {
+			timedOut = append(timedOut, c)
+		}
+	}
+	b.mu.RUnlock()
+
+	for _, c := range timedOut {
+		c.ClearOfferPending()
+		log.Printf("[Broker] Half-open SDP handshake timed out (%v) for session %s, closing session", timeout, c.ID)
+		_ = c.Send(&signaling.Message{
+			Type:      signaling.TypeError,
+			NodeID:    c.NodeID,
+			SessionID: c.ID,
+			Error:     "SDP negotiation timed out, session closed",
+		})
+		c.mu.Lock()
+		if c.Conn != nil {
+			_ = c.Conn.Close()
+		}
+		c.mu.Unlock()
+	}
+}
+
+func (b *SignalBroker) WaitingClientCount(nodeID string) int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	count := 0
+	for _, client := range b.clients {
+		if client.NodeID == nodeID {
+			count++
+		}
+	}
+	return count
 }
 
 func (b *SignalBroker) RegisterAgent(nodeID, secret string, requireVisitorAuth *bool, s *Session) error {
@@ -760,6 +1030,9 @@ func printSignalUsage(out io.Writer) {
 	fmt.Fprintf(out, "  -tls-key string\n")
 	fmt.Fprintf(out, "        Path to TLS private key PEM file (e.g. key.pem or privkey.pem, env: TLS_KEY)\n\n")
 	fmt.Fprintf(out, "Security & Access Control Options:\n")
+	fmt.Fprintf(out, "  -allowed-origins string\n")
+	fmt.Fprintf(out, "        Comma-separated allowed origins for browser WebSocket signaling (env: SIGNAL_ALLOWED_ORIGINS)\n")
+	fmt.Fprintf(out, "        Supports wildcards (e.g. https://*.pages.dev,http://localhost:*)\n")
 	fmt.Fprintf(out, "  -signal-secret string\n")
 	fmt.Fprintf(out, "        Server-wide pre-shared secret required for agent registration and anti-hijacking (env: SIGNAL_SECRET)\n")
 	fmt.Fprintf(out, "  -trusted-proxies string\n")
@@ -821,6 +1094,7 @@ func main() {
 
 	// 1. Defaults (Tier 1: Defaults)
 	cfgAddr := ":8888"
+	cfgAllowedOrigins := ""
 	cfgStatic := "./web/dist"
 	cfgTLSCert := ""
 	cfgTLSKey := ""
@@ -844,6 +1118,9 @@ func main() {
 		log.Printf("[Config] Loaded configuration from %s", configPath)
 		if fileCfg.Addr != "" {
 			cfgAddr = fileCfg.Addr
+		}
+		if fileCfg.AllowedOrigins != "" {
+			cfgAllowedOrigins = fileCfg.AllowedOrigins
 		}
 		if fileCfg.SignalSecret != "" {
 			cfgSignalSecret = fileCfg.SignalSecret
@@ -892,6 +1169,11 @@ func main() {
 	if env := os.Getenv("SIGNAL_SECRET"); env != "" {
 		cfgSignalSecret = env
 	}
+	if env := os.Getenv("SIGNAL_ALLOWED_ORIGINS"); env != "" {
+		cfgAllowedOrigins = env
+	} else if env := os.Getenv("ALLOWED_ORIGINS"); env != "" {
+		cfgAllowedOrigins = env
+	}
 	if env := os.Getenv("MAX_IP_CONNS"); env != "" {
 		if v, err := strconv.Atoi(env); err == nil && v > 0 {
 			cfgMaxIPConns = v
@@ -911,6 +1193,7 @@ func main() {
 	tlsKey := flag.String("tls-key", cfgTLSKey, "Path to TLS private key PEM file (e.g. key.pem or privkey.pem, env: TLS_KEY)")
 	tlsAuto := flag.Bool("tls-auto", cfgTLSAuto, "Automatically generate in-memory self-signed ECDSA certificate for local/LAN HTTPS Secure Context (env: TLS_AUTO)")
 	signalSecret := flag.String("signal-secret", cfgSignalSecret, "Server-wide pre-shared secret for agent registration & anti-hijacking (env: SIGNAL_SECRET)")
+	allowedOrigins := flag.String("allowed-origins", cfgAllowedOrigins, "Comma-separated allowed origins for browser WebSocket signaling (supports wildcards, env: SIGNAL_ALLOWED_ORIGINS)")
 	configFlag := flag.String("config", "", "Path to configuration file (.yaml, .yml, or .json, env: CONFIG_FILE)")
 	maxIPConns := flag.Int("max-ip-conns", cfgMaxIPConns, "Maximum concurrent WebSocket connections per client IP (env: MAX_IP_CONNS)")
 	trustedProxies := flag.String("trusted-proxies", cfgTrustedProxies, "Comma-separated trusted proxy CIDRs/IPs for real client IP extraction (env: TRUSTED_PROXIES)")
@@ -941,9 +1224,26 @@ func main() {
 		log.Printf("[Server] Custom trusted proxies configured (%d prefixes): %s", len(trustedPrefixes), *trustedProxies)
 	}
 
+	SetOriginChecker(NewOriginChecker(*allowedOrigins))
+	if *allowedOrigins != "" {
+		log.Printf("[Server] Allowed WebSocket origins configured: %s", *allowedOrigins)
+	}
+
 	broker := NewSignalBroker(finalSecret)
+	defer broker.Close()
 	limiter := NewIPRateLimiter(*maxIPConns, trustedPrefixes)
 	defer limiter.Close()
+
+	if finalSecret == "" {
+		banner.PrintSecurityBanner(os.Stderr, banner.IsTerminal(os.Stderr),
+			"[SECURITY WARNING] RUNNING IN ANONYMOUS / PUBLIC MODE",
+			[]string{
+				"No SIGNAL_SECRET configured!",
+				"Cluster registration is open: ANY agent can register and claim any Node ID.",
+				"Potential risk of rogue agent registration and cluster traffic hijacking.",
+				"For production environments, configure -signal-secret or SIGNAL_SECRET.",
+			})
+	}
 
 	mux := http.NewServeMux()
 
@@ -1111,10 +1411,26 @@ func main() {
 				// Visitor browser joins with NodeID
 				session.Role = "client"
 				session.NodeID = msg.NodeID
-				broker.RegisterClient(session)
 
 				agent := broker.GetAgent(msg.NodeID)
 				requiresSecret := broker.RequiresVisitorAuth(msg.NodeID)
+
+				if agent == nil {
+					// Check waiting visitor queue capacity when agent is offline
+					if broker.WaitingClientCount(msg.NodeID) >= int(getMaxWaitingVisitorsPerNode()) {
+						log.Printf("[Broker] Waiting queue full for node %s (limit %d), rejecting client %s", msg.NodeID, getMaxWaitingVisitorsPerNode(), session.ID)
+						_ = session.Send(&signaling.Message{
+							Type:      signaling.TypeError,
+							NodeID:    msg.NodeID,
+							SessionID: session.ID,
+							Error:     "waiting queue full for node, please try again later",
+						})
+						return
+					}
+				}
+
+				broker.RegisterClient(session)
+
 				if agent == nil {
 					_ = session.Send(&signaling.Message{
 						Type:           signaling.TypePeerStatus,
@@ -1135,10 +1451,12 @@ func main() {
 
 			case signaling.TypeOffer:
 				// Client sends Offer to Agent
+				session.MarkOfferPending()
 				msg.SessionID = session.ID
 				msg.ClientIP = session.RemoteIP
 				agent := broker.GetAgent(msg.NodeID)
 				if agent == nil {
+					session.ClearOfferPending()
 					_ = session.Send(&signaling.Message{Type: signaling.TypeError, Error: "target agent offline"})
 				} else {
 					_ = agent.Send(&msg)
@@ -1149,6 +1467,7 @@ func main() {
 				if session.Role == "agent" {
 					client := broker.GetClient(msg.SessionID)
 					if client != nil && client.NodeID == session.NodeID {
+						client.ClearOfferPending()
 						_ = client.Send(&msg)
 					}
 				}
@@ -1158,9 +1477,17 @@ func main() {
 				if session.Role == "agent" {
 					client := broker.GetClient(msg.SessionID)
 					if client != nil && client.NodeID == session.NodeID {
+						if client.agentCandidates.Add(1) > getMaxCandidatesPerSession() {
+							log.Printf("[Broker] Dropped candidate from agent for session %s: limit (%d) exceeded", client.ID, getMaxCandidatesPerSession())
+							continue
+						}
 						_ = client.Send(&msg)
 					}
 				} else {
+					if session.clientCandidates.Add(1) > getMaxCandidatesPerSession() {
+						log.Printf("[Broker] Dropped candidate from client for session %s: limit (%d) exceeded", session.ID, getMaxCandidatesPerSession())
+						continue
+					}
 					msg.SessionID = session.ID
 					agent := broker.GetAgent(msg.NodeID)
 					if agent != nil {
@@ -1273,12 +1600,18 @@ func main() {
 		}
 	}
 
+	originsStr := "All (Permissive / Warning)"
+	if *allowedOrigins != "" {
+		originsStr = *allowedOrigins
+	}
+
 	log.Printf("==================================================")
 	log.Printf("  WebRTC Gateway Signal Server %s", Version)
 	log.Printf("  Listening: %s (%s)", *addr, tlsInfo)
 	log.Printf("  Web Portal: %s", portalURL)
 	log.Printf("  Signaling WS: %s", wsURL)
 	log.Printf("  Cluster Registration Auth: %s", clusterAuthStr)
+	log.Printf("  Allowed Origins: %s", originsStr)
 	log.Printf("  Static Assets: %s", staticSource)
 	log.Printf("  Limits: Max %d Conns/IP | Trusted Proxies: %s", *maxIPConns, trustedProxiesStr)
 	log.Printf("==================================================")

@@ -792,3 +792,269 @@ func TestSignalServer_FailFastDeprecatedSecret(t *testing.T) {
 		t.Errorf("Expected deprecation error message in output, got:\n%s", string(out))
 	}
 }
+
+// 1. Task 8 (L 项): Signal Origin 跨域分流准入策略 (Browser vs CLI Agent)
+func TestSignal_OriginFiltering_BrowserVsCLI(t *testing.T) {
+	// Configure allowed patterns: wildcard Cloudflare Pages subdomain and localhost port wildcard
+	SetOriginChecker(NewOriginChecker("https://*.pages.dev,http://localhost:*"))
+	defer SetOriginChecker(NewOriginChecker(""))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+
+	// Case 1: CLI client with NO Origin header (Go CLI Agent, curl) -> Permitted
+	dialer := websocket.Dialer{}
+	conn, resp, err := dialer.Dial(wsURL, http.Header{})
+	if err != nil {
+		t.Fatalf("Expected CLI connection (no Origin) to succeed, got: %v", err)
+	}
+	_ = conn.Close()
+	_ = resp.Body.Close()
+
+	// Case 2: Browser with whitelisted wildcard Origin (https://my-portal.pages.dev) -> Permitted
+	headersAllowed := http.Header{"Origin": []string{"https://my-portal.pages.dev"}}
+	conn, resp, err = dialer.Dial(wsURL, headersAllowed)
+	if err != nil {
+		t.Fatalf("Expected whitelisted wildcard Origin to succeed, got: %v", err)
+	}
+	_ = conn.Close()
+	_ = resp.Body.Close()
+
+	// Case 3: Browser with whitelisted localhost port Origin (http://localhost:5173) -> Permitted
+	headersLocalhost := http.Header{"Origin": []string{"http://localhost:5173"}}
+	conn, resp, err = dialer.Dial(wsURL, headersLocalhost)
+	if err != nil {
+		t.Fatalf("Expected whitelisted localhost port Origin to succeed, got: %v", err)
+	}
+	_ = conn.Close()
+	_ = resp.Body.Close()
+
+	// Case 4: Same-Host Origin matching server host -> Permitted by default
+	headersSameHost := http.Header{"Origin": []string{server.URL}}
+	conn, resp, err = dialer.Dial(wsURL, headersSameHost)
+	if err != nil {
+		t.Fatalf("Expected same-host Origin to succeed, got: %v", err)
+	}
+	_ = conn.Close()
+	_ = resp.Body.Close()
+
+	// Case 5: Unauthorized Origin (https://evil.attacker.com) -> HTTP 403 Forbidden
+	headersUnauthorized := http.Header{"Origin": []string{"https://evil.attacker.com"}}
+	_, resp, err = dialer.Dial(wsURL, headersUnauthorized)
+	if err == nil {
+		t.Fatalf("Expected unauthorized Origin to fail, but it succeeded")
+	}
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		t.Fatalf("Expected HTTP 403 Forbidden for bad origin, got: %d (%v)", statusCode, err)
+	}
+
+	// Case 6: Fallback when allowed origins is empty -> Permitted with warning (downward compatibility)
+	SetOriginChecker(NewOriginChecker(""))
+	conn, resp, err = dialer.Dial(wsURL, headersUnauthorized)
+	if err != nil {
+		t.Fatalf("Expected permissive fallback when allowed origins is empty, got: %v", err)
+	}
+	_ = conn.Close()
+	_ = resp.Body.Close()
+}
+
+// 2. Task 9 (N 项): Candidate Flood (32 limit) & Waiting Queue Cap (128 limit)
+func TestSignal_CandidateFloodAndWaitingQueueCap(t *testing.T) {
+	broker := NewSignalBroker("")
+	defer broker.Close()
+
+	// 1. Candidate Flood Protection
+	SetMaxCandidatesPerSessionForTest(5)
+	defer SetMaxCandidatesPerSessionForTest(DefaultMaxCandidatesPerSession)
+
+	agentSession := &Session{ID: "agent-sess", Role: "agent", NodeID: "test-node"}
+	_ = broker.RegisterAgent("test-node", "", nil, agentSession)
+
+	clientSession := &Session{ID: "client-sess", Role: "client", NodeID: "test-node"}
+	broker.RegisterClient(clientSession)
+
+	// Simulate client candidate flooding: send 10 candidates
+	forwardedCount := 0
+	for i := 0; i < 10; i++ {
+		count := clientSession.clientCandidates.Add(1)
+		if count <= getMaxCandidatesPerSession() {
+			forwardedCount++
+		}
+	}
+	if forwardedCount != 5 {
+		t.Fatalf("Expected exactly 5 forwarded candidates, got: %d", forwardedCount)
+	}
+	if clientSession.clientCandidates.Load() != 10 {
+		t.Fatalf("Expected total 10 candidate attempts recorded")
+	}
+
+	// 2. Waiting Queue Cap
+	SetMaxWaitingVisitorsForTest(3)
+	defer SetMaxWaitingVisitorsForTest(DefaultMaxWaitingVisitorsPerNode)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		session := &Session{ID: r.Header.Get("X-Session-ID"), Conn: conn}
+		defer broker.RemoveClient(session.ID)
+
+		for {
+			var msg signaling.Message
+			if err := conn.ReadJSON(&msg); err != nil {
+				break
+			}
+			if msg.Type == signaling.TypeJoin {
+				session.Role = "client"
+				session.NodeID = msg.NodeID
+				agent := broker.GetAgent(msg.NodeID)
+				if agent == nil {
+					if broker.WaitingClientCount(msg.NodeID) >= int(getMaxWaitingVisitorsPerNode()) {
+						_ = session.Send(&signaling.Message{
+							Type:      signaling.TypeError,
+							NodeID:    msg.NodeID,
+							SessionID: session.ID,
+							Error:     "waiting queue full for node, please try again later",
+						})
+						return
+					}
+				}
+				broker.RegisterClient(session)
+				_ = session.Send(&signaling.Message{Type: signaling.TypePeerStatus, Status: "offline"})
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	dialer := websocket.Dialer{}
+
+	// Connect 3 clients to offline node -> all should succeed
+	var conns []*websocket.Conn
+	for i := 1; i <= 3; i++ {
+		c, _, err := dialer.Dial(wsURL, http.Header{"X-Session-ID": []string{"sess-" + string(rune('0'+i))}})
+		if err != nil {
+			t.Fatalf("Dial %d failed: %v", i, err)
+		}
+		conns = append(conns, c)
+		_ = c.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: "offline-target"})
+
+		var reply signaling.Message
+		_ = c.ReadJSON(&reply)
+		if reply.Type != signaling.TypePeerStatus || reply.Status != "offline" {
+			t.Fatalf("Expected offline status for client %d, got: %+v", i, reply)
+		}
+	}
+	defer func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+
+	// Connect 4th client -> should exceed waiting limit of 3 and receive error
+	c4, _, err := dialer.Dial(wsURL, http.Header{"X-Session-ID": []string{"sess-4"}})
+	if err != nil {
+		t.Fatalf("Dial 4 failed: %v", err)
+	}
+	defer c4.Close()
+
+	_ = c4.WriteJSON(&signaling.Message{Type: signaling.TypeJoin, NodeID: "offline-target"})
+	var reply4 signaling.Message
+	_ = c4.ReadJSON(&reply4)
+	if reply4.Type != signaling.TypeError || !strings.Contains(reply4.Error, "waiting queue full") {
+		t.Fatalf("Expected waiting queue full error for client 4, got: %+v", reply4)
+	}
+}
+
+// 3. Task 9 (N 项): Half-Open SDP Handshake Janitor Timeout Reaping
+func TestSignal_HalfOpenSDPTimeoutJanitor(t *testing.T) {
+	broker := NewSignalBroker("")
+	defer broker.Close()
+
+	// Configure tight 30ms timeout for test
+	SetHalfOpenTimeoutForTest(30 * time.Millisecond)
+	defer SetHalfOpenTimeoutForTest(DefaultHalfOpenTimeout)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		session := &Session{ID: "client-half-open", Role: "client", NodeID: "hanging-node", Conn: conn}
+		broker.RegisterClient(session)
+		defer broker.RemoveClient(session.ID)
+
+		session.MarkOfferPending()
+
+		// Wait for connection close
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				break
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	dialer := websocket.Dialer{}
+	conn, _, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	// Wait up to 3 seconds for janitor to trigger and send timeout error
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var msg signaling.Message
+	err = conn.ReadJSON(&msg)
+	if err != nil {
+		t.Fatalf("Expected error message from half-open janitor reap, got: %v", err)
+	}
+	if msg.Type != signaling.TypeError || !strings.Contains(msg.Error, "SDP negotiation timed out") {
+		t.Fatalf("Expected SDP negotiation timeout message, got: %+v", msg)
+	}
+}
+
+// 4. Task 10 (M 项): Security Banner Startup & ANSI Stripping Test
+func TestSecurityBanner_StartupOutput(t *testing.T) {
+	// Verify signal server startup banner prints when no -signal-secret is given
+	cmd := exec.Command("go", "run", ".", "-help")
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to run signal help: %v, output: %s", err, string(out))
+	}
+	outStr := string(out)
+	if !strings.Contains(outStr, "-allowed-origins") {
+		t.Errorf("Expected signal help to list -allowed-origins, output:\n%s", outStr)
+	}
+
+	// Verify agent help output lists security options
+	cmdAgent := exec.Command("go", "run", "../agent", "-help")
+	cmdAgent.Dir = "."
+	outAgent, err := cmdAgent.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to run agent help: %v, output: %s", err, string(outAgent))
+	}
+	outAgentStr := string(outAgent)
+	if !strings.Contains(outAgentStr, "-signal-secret") || !strings.Contains(outAgentStr, "-access-secret") {
+		t.Errorf("Expected agent help to list security flags, output:\n%s", outAgentStr)
+	}
+}

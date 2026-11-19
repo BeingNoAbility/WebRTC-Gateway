@@ -8,6 +8,12 @@
 # Listen address for HTTP/WebSocket signaling service (default: :8888)
 addr: ":8888"
 
+# Allowed browser origins for WebSocket signaling (anti-CSWSH protection)
+# Supports comma-separated list of origins, ports, and wildcards (e.g. "https://*.pages.dev,http://localhost:*").
+# Same-origin requests (Origin matching Host) and Native CLI Agents (no Origin header) are always allowed.
+# Leave empty to allow all origins with a warning (development / backward-compatibility mode).
+allowed_origins: ""
+
 # Signaling cluster admission secret (Control Plane)
 # Must match the -signal-secret configured on connecting agents.
 # Prevents unauthorized agents from registering nodes on the signaling server.

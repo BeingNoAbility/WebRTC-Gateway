@@ -137,6 +137,7 @@ webrtc-gateway/
 │   ├── signaling/                  # Signaling broker & peer session routing
 │   ├── mux/                        # P2PMux binary multiplexing protocol in Go
 │   ├── proxy/                      # HTTP / WebSocket / File reverse proxy engine
+│   ├── banner/                     # Terminal TTY detection and clean security warning banners
 │   └── protocol/                   # Binary frame serialization & decoding
 ├── web/                            # Frontend Web Portal & in-browser sandbox
 │   ├── src/portal/                 # Minimalist Web Console & Settings Modal

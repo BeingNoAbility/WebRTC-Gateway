@@ -95,6 +95,7 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 			if s.inboundBytes < 0 {
 				s.inboundBytes = 0
 			}
+			s.mux.releaseInbound(n)
 			s.touch()
 			return n, nil
 		}
@@ -112,6 +113,7 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 			if s.inboundBytes < 0 {
 				s.inboundBytes = 0
 			}
+			s.mux.releaseInbound(n)
 			s.touch()
 			return n, nil
 		}
@@ -218,6 +220,21 @@ func (s *Stream) Close() error {
 	return err
 }
 
+// drainUnreadInboundLocked releases all buffered unread inbound bytes back to the Mux counter.
+// Must be called with s.mu held.
+func (s *Stream) drainUnreadInboundLocked() {
+	unread := s.inboundBytes
+	if unread > 0 {
+		s.inboundBytes = 0
+		s.readBuf = nil
+		for i := range s.inbound {
+			s.inbound[i] = nil
+		}
+		s.inbound = nil
+		s.mux.releaseInbound(unread)
+	}
+}
+
 // markResetNoRemove marks stream as reset without calling removeStream (used during Mux.Close).
 func (s *Stream) markResetNoRemove() {
 	s.mu.Lock()
@@ -228,6 +245,7 @@ func (s *Stream) markResetNoRemove() {
 	s.isReset = true
 	s.readClosed = true
 	s.writeClosed = true
+	s.drainUnreadInboundLocked()
 	s.cond.Broadcast()
 	s.cancel()
 	s.mu.Unlock()
@@ -243,6 +261,7 @@ func (s *Stream) Reset() error {
 	s.isReset = true
 	s.readClosed = true
 	s.writeClosed = true
+	s.drainUnreadInboundLocked()
 	s.cond.Broadcast()
 	s.cancel()
 	s.mu.Unlock()
@@ -260,22 +279,27 @@ func (s *Stream) Reset() error {
 
 // pushInboundData handles received DATA frame payload.
 func (s *Stream) pushInboundData(payload []byte, fin bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.touch()
 
-	if s.readClosed || s.isReset {
-		return
-	}
+	payloadLen := len(payload)
+	if payloadLen > 0 {
+		// Fast check under lock if stream is already reset or closed
+		s.mu.Lock()
+		if s.readClosed || s.isReset {
+			s.mu.Unlock()
+			return
+		}
 
-	if len(payload) > 0 {
-		if s.inboundBytes+len(payload) > maxStreamInboundBytes {
+		// 1. Single-stream buffer quota check (32MB)
+		if s.inboundBytes+payloadLen > maxStreamInboundBytes {
 			s.isReset = true
 			s.readClosed = true
 			s.writeClosed = true
 			s.err = errors.New("stream inbound buffer exceeded limit")
 			s.cancel()
+			s.drainUnreadInboundLocked()
 			s.cond.Broadcast()
+			s.mu.Unlock()
 
 			s.mux.bpMu.Lock()
 			s.mux.bpCond.Broadcast()
@@ -288,20 +312,56 @@ func (s *Stream) pushInboundData(payload []byte, fin bool) {
 			}()
 			return
 		}
-		cp := make([]byte, len(payload))
+		s.mu.Unlock()
+
+		// 2. Global Mux inbound budget check with backpressure (released s.mu so stream can be read)
+		if !s.mux.acquireInbound(s.id, payloadLen) {
+			s.mu.Lock()
+			if !s.isReset {
+				s.isReset = true
+				s.readClosed = true
+				s.writeClosed = true
+				s.err = errors.New("mux global inbound buffer budget exceeded limit (backpressure timeout)")
+				s.cancel()
+				s.drainUnreadInboundLocked()
+				s.cond.Broadcast()
+
+				s.mux.bpMu.Lock()
+				s.mux.bpCond.Broadcast()
+				s.mux.bpMu.Unlock()
+
+				go func() {
+					rstFrame := protocol.NewFrame(s.id, protocol.TypeRstStream, protocol.FlagNone, nil)
+					_ = s.mux.writeFrame(rstFrame)
+					s.mux.removeStream(s.id)
+				}()
+			}
+			s.mu.Unlock()
+			return
+		}
+
+		s.mu.Lock()
+		if s.readClosed || s.isReset {
+			s.mux.releaseInbound(payloadLen)
+			s.mu.Unlock()
+			return
+		}
+
+		cp := make([]byte, payloadLen)
 		copy(cp, payload)
 		s.inbound = append(s.inbound, cp)
-		s.inboundBytes += len(payload)
+		s.inboundBytes += payloadLen
+	} else {
+		s.mu.Lock()
 	}
 
 	if fin {
 		s.readClosed = true
 	}
 	s.cond.Broadcast()
+	s.mu.Unlock()
 
-	if s.readClosed && s.writeClosed {
-		go s.mux.removeStream(s.id)
-	}
+	s.checkFullClose()
 }
 
 // pushInboundHeaders delivers received HEADERS frame payload.
@@ -325,6 +385,7 @@ func (s *Stream) markRemoteReset() {
 	s.isReset = true
 	s.readClosed = true
 	s.writeClosed = true
+	s.drainUnreadInboundLocked()
 	s.err = ErrStreamReset
 	s.cancel()
 	s.cond.Broadcast()

@@ -12,6 +12,7 @@ import (
 // ServerConfigFile represents the deserialized structure of a signaling server configuration file (YAML or JSON).
 type ServerConfigFile struct {
 	Addr           string `json:"addr" yaml:"addr"`
+	AllowedOrigins string `json:"allowed_origins" yaml:"allowed_origins"`
 	SignalSecret   string `json:"signal_secret" yaml:"signal_secret"`
 	StaticDir      string `json:"static" yaml:"static"`
 	TLSCert        string `json:"tls_cert" yaml:"tls_cert"`

@@ -137,6 +137,7 @@ webrtc-gateway/
 │   ├── signaling/                  # 信令 Broker 路由撮合与 Session 调度
 │   ├── mux/                        # P2PMux 多路复用协议 Go 端实现
 │   ├── proxy/                      # HTTP/WebSocket/File 反向代理引擎
+│   ├── banner/                     # 终端 TTY 探测与安全告警 Banner
 │   └── protocol/                   # 二进制帧结构编解码
 ├── web/                            # 前端 Web 门户与浏览器沙箱
 │   ├── src/portal/                 # 现代化极简 Web 控制台与设置弹窗

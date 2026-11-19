@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"webrtc-gateway/pkg/agent"
+	"webrtc-gateway/pkg/banner"
 )
 
 // Version represents the current release version of WebRTC Gateway Agent.
@@ -443,6 +444,30 @@ func main() {
 		log.Printf("  TLS Verify: Disabled (-insecure! dev/testing only)")
 	}
 	log.Printf("==================================================")
+
+	var agentWarnings []string
+	if *signalSecret == "" {
+		agentWarnings = append(agentWarnings,
+			"- Cluster Auth (-signal-secret): DISABLED (Anonymous node registration)",
+		)
+	}
+	if *accessSecret == "" {
+		agentWarnings = append(agentWarnings,
+			"- Visitor Auth (-access-secret): DISABLED (Public access, no password protection)",
+		)
+	}
+	if len(agentWarnings) > 0 {
+		agentWarnings = append(agentWarnings,
+			"",
+			"Potential Risks:",
+			"- Without -signal-secret, unauthorized nodes may register on the signaling cluster.",
+			"- Without -access-secret, ANY visitor can connect to your local target service.",
+			"For production environments, configure -signal-secret and -access-secret.",
+		)
+		banner.PrintSecurityBanner(os.Stderr, banner.IsTerminal(os.Stderr),
+			"[SECURITY WARNING] RUNNING IN UNPROTECTED / ANONYMOUS MODE",
+			agentWarnings)
+	}
 
 	if *metricsAddr != "" {
 		go func() {

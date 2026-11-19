@@ -22,6 +22,15 @@ const (
 	DefaultBufferedHighWaterMark uint64 = 256 * 1024
 	// DefaultBufferedLowWaterMark is the threshold at which blocked writes resume.
 	DefaultBufferedLowWaterMark uint64 = 64 * 1024
+
+	// DefaultMaxInboundBytes is the global inbound buffer budget for a Mux (128MB).
+	DefaultMaxInboundBytes int64 = 128 * 1024 * 1024
+	// DefaultInboundHighWaterMark is the threshold at which incoming DATA frames wait for consumer drainage (96MB).
+	DefaultInboundHighWaterMark int64 = 96 * 1024 * 1024
+	// DefaultInboundLowWaterMark is the threshold at which paused incoming DATA frames resume (64MB).
+	DefaultInboundLowWaterMark int64 = 64 * 1024 * 1024
+	// DefaultInboundBackpressureTimeout is how long an incoming DATA frame waits for buffer drain before resetting the stream.
+	DefaultInboundBackpressureTimeout = 3 * time.Second
 )
 
 // Transport defines the underlying packet transport interface (e.g. *webrtc.DataChannel).
@@ -50,6 +59,15 @@ type Mux struct {
 	closed   bool
 	closedCh chan struct{}
 
+	maxInboundBytes       int64
+	inboundHighWaterMark  int64
+	inboundLowWaterMark   int64
+	inboundBackpressureTo time.Duration
+
+	inboundBytes  atomic.Int64
+	inboundBpMu   sync.Mutex
+	inboundBpCond *sync.Cond
+
 	pingSeq      atomic.Uint64
 	pingsMu      sync.Mutex
 	pendingPings map[uint64]chan struct{}
@@ -61,14 +79,18 @@ type Mux struct {
 // isClient: true if visitor browser (allocates odd stream IDs), false if agent (allocates even stream IDs).
 func NewMux(transport Transport, isClient bool) *Mux {
 	m := &Mux{
-		transport:     transport,
-		isClient:      isClient,
-		streams:       make(map[uint32]*Stream),
-		closedStreams: make(map[uint32]struct{}),
-		acceptCh:      make(chan *Stream, 64),
-		closedCh:      make(chan struct{}),
-		pendingPings:  make(map[uint64]chan struct{}),
-		legacyPongCh:  make(chan struct{}, 1),
+		transport:             transport,
+		isClient:              isClient,
+		streams:               make(map[uint32]*Stream),
+		closedStreams:         make(map[uint32]struct{}),
+		acceptCh:              make(chan *Stream, 64),
+		closedCh:              make(chan struct{}),
+		maxInboundBytes:       DefaultMaxInboundBytes,
+		inboundHighWaterMark:  DefaultInboundHighWaterMark,
+		inboundLowWaterMark:   DefaultInboundLowWaterMark,
+		inboundBackpressureTo: DefaultInboundBackpressureTimeout,
+		pendingPings:          make(map[uint64]chan struct{}),
+		legacyPongCh:          make(chan struct{}, 1),
 	}
 
 	if isClient {
@@ -78,6 +100,7 @@ func NewMux(transport Transport, isClient bool) *Mux {
 	}
 
 	m.bpCond = sync.NewCond(&m.bpMu)
+	m.inboundBpCond = sync.NewCond(&m.inboundBpMu)
 
 	// Configure transport backpressure low threshold
 	transport.SetBufferedAmountLowThreshold(DefaultBufferedLowWaterMark)
@@ -480,6 +503,10 @@ func (m *Mux) Close() error {
 		m.bpCond.Broadcast()
 		m.bpMu.Unlock()
 
+		m.inboundBpMu.Lock()
+		m.inboundBpCond.Broadcast()
+		m.inboundBpMu.Unlock()
+
 		m.pingsMu.Lock()
 		for seq, ch := range m.pendingPings {
 			close(ch)
@@ -491,4 +518,121 @@ func (m *Mux) Close() error {
 		m.writeMu.Unlock()
 	})
 	return nil
+}
+
+// SetInboundLimits configures custom inbound memory budget, high/low watermarks, and backpressure timeout.
+func (m *Mux) SetInboundLimits(max, high, low int64, timeout time.Duration) {
+	m.inboundBpMu.Lock()
+	defer m.inboundBpMu.Unlock()
+	m.maxInboundBytes = max
+	m.inboundHighWaterMark = high
+	m.inboundLowWaterMark = low
+	m.inboundBackpressureTo = timeout
+	m.inboundBpCond.Broadcast()
+}
+
+// InboundBytes returns the current total unread inbound buffered payload bytes across all streams.
+func (m *Mux) InboundBytes() int64 {
+	return m.inboundBytes.Load()
+}
+
+// acquireInbound attempts to account for incoming payload bytes against the Mux global budget.
+// If the buffer is above high-water mark, it waits on inboundBpCond for up to inboundBackpressureTo.
+// If the wait times out or the budget exceeds maxInboundBytes, it returns false.
+func (m *Mux) acquireInbound(streamID uint32, n int) bool {
+	if n <= 0 {
+		return true
+	}
+
+	delta := int64(n)
+	m.inboundBpMu.Lock()
+	high := m.inboundHighWaterMark
+	if high <= 0 {
+		high = DefaultInboundHighWaterMark
+	}
+	max := m.maxInboundBytes
+	if max <= 0 {
+		max = DefaultMaxInboundBytes
+	}
+	timeout := m.inboundBackpressureTo
+	if timeout <= 0 {
+		timeout = DefaultInboundBackpressureTimeout
+	}
+	low := m.inboundLowWaterMark
+	if low <= 0 {
+		low = DefaultInboundLowWaterMark
+	}
+
+	curr := m.inboundBytes.Add(delta)
+	if curr <= high {
+		m.inboundBpMu.Unlock()
+		return true
+	}
+
+	// Immediate hard ceiling breach
+	if curr > max {
+		m.inboundBytes.Add(-delta)
+		m.inboundBpMu.Unlock()
+		return false
+	}
+
+	// Between high watermark and max: pause incoming frame consumption to backpressure SCTP socket
+	if m.inboundBytes.Load() > low {
+		timer := time.AfterFunc(timeout, func() {
+			m.inboundBpMu.Lock()
+			m.inboundBpCond.Broadcast()
+			m.inboundBpMu.Unlock()
+		})
+		deadline := time.Now().Add(timeout)
+		for m.inboundBytes.Load() > low && time.Now().Before(deadline) {
+			m.mu.RLock()
+			closed := m.closed
+			m.mu.RUnlock()
+			if closed {
+				timer.Stop()
+				m.inboundBytes.Add(-delta)
+				m.inboundBpMu.Unlock()
+				return false
+			}
+			s := m.getStream(streamID)
+			if s == nil {
+				timer.Stop()
+				m.inboundBytes.Add(-delta)
+				m.inboundBpMu.Unlock()
+				return false
+			}
+			m.inboundBpCond.Wait()
+		}
+		timer.Stop()
+	}
+
+	if m.inboundBytes.Load() > max {
+		m.inboundBytes.Add(-delta)
+		m.inboundBpMu.Unlock()
+		return false
+	}
+
+	m.inboundBpMu.Unlock()
+	return true
+}
+
+// releaseInbound returns consumed or discarded bytes back to the Mux budget and signals blocked frames.
+func (m *Mux) releaseInbound(n int) {
+	if n <= 0 {
+		return
+	}
+	newVal := m.inboundBytes.Add(-int64(n))
+	if newVal < 0 {
+		m.inboundBytes.Store(0)
+		newVal = 0
+	}
+	m.inboundBpMu.Lock()
+	low := m.inboundLowWaterMark
+	if low <= 0 {
+		low = DefaultInboundLowWaterMark
+	}
+	if newVal <= low {
+		m.inboundBpCond.Broadcast()
+	}
+	m.inboundBpMu.Unlock()
 }
