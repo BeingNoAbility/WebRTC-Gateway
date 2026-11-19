@@ -37,10 +37,10 @@ For MINOR releases, the QA Lead activates targeted real-world dimensions based o
 ```mermaid
 flowchart LR
     subgraph Blast_Radius_Mapping["MINOR Blast-Radius Driven Dimension Mapping"]
-        C1["Proxy & Security Layer<br/>(pkg/proxy, ssrf.go)"] --> R1["Dimension 1 (1.5 HTTPS Reverse Proxy)<br/>Dimension 2 (2.1-2.6 IP/WAF/SSRF)<br/>Dimension 8 (8.3-8.5 Security Boundaries)"]
+        C1["Proxy & Security Layer<br/>(pkg/proxy, ssrf.go)"] --> R1["Dimension 1 (1.5 HTTPS Reverse Proxy)<br/>Dimension 2 (2.1-2.7 IP/WAF/SSRF/CSWSH)<br/>Dimension 8 (8.3-8.5 Security Boundaries)"]
         C2["Browser Sandbox & Frontend<br/>(web/src/sw, patch, portal)"] --> R2["Level 1 CDP Matrix<br/>Dimension 1 (1.1 Portainer, 1.2 Jellyfin)<br/>Dimension 4 (4.1-4.7 DOM/Worker Virtualization)"]
-        C3["Signaling Hub & ICE<br/>(cmd/signal, pkg/signaling)"] --> R3["Dimension 3 (3.1-3.5 NAT Punching & Roaming)<br/>Dimension 6 (6.4 Slow Client Anti-Blocking)<br/>Dimension 7 (7.1-7.2 DO Hibernation & Clean Exit)<br/>Dimension 8 (8.1-8.2 Cross-Version Interop)"]
-        C4["Multiplexing & Flow Control<br/>(pkg/mux, frame.go)"] --> R4["Dimension 5 (5.1-5.5 10GB/Backpressure/Parity)<br/>Dimension 6 (6.1-6.2 Chaos Loss & Reordering)"]
+        C3["Signaling Hub & ICE<br/>(cmd/signal, pkg/signaling)"] --> R3["Dimension 3 (3.1-3.5 NAT Punching & Roaming)<br/>Dimension 6 (6.4 Slow Client Anti-Blocking)<br/>Dimension 7 (7.1-7.4 DO Hibernation/Quotas)<br/>Dimension 8 (8.1-8.2 Cross-Version Interop/Wire Spec)"]
+        C4["Multiplexing & Flow Control<br/>(pkg/mux, frame.go)"] --> R4["Dimension 5 (5.1-5.5 Streaming/Backpressure/128MB SCTP Flow Control)<br/>Dimension 6 (6.1-6.2 Chaos Loss & Reordering)"]
     end
 ```
 
@@ -180,6 +180,15 @@ Verifies that heavy, modern web applications reverse-proxied through the gateway
   - 🔴 **Negative Proof**: Request cloud metadata `http://169.254.169.254/latest/meta-data/`; assert `SafeDialContext` blocks request before TCP handshake; test DNS rebinding domain and assert re-resolution blocks loopback addresses.
   - 📊 **Criteria**: Metadata and loopback rebinding attempts blocked before TCP connection.
 
+- [ ] **2.7 Cross-Site WebSocket Hijacking (CSWSH) & Origin Whitelist Defense**
+  - **Config**: `signal -allowed-origins "https://*.pages.dev,http://localhost:*"` (or `SIGNAL_ALLOWED_ORIGINS`).
+  - 🟢 **Positive Verification**:
+    1. Same-origin requests (Origin host == request Host) trusted by default;
+    2. Whitelisted Cloudflare Pages wildcard domains and local ports pass WebSocket handshake;
+    3. Native Go CLI Agent or curl without Origin headers pass through cleanly to cluster authentication.
+  - 🔴 **Negative Proof**: Unauthorized Origin (`https://evil.attacker.com`) attempting WebSocket handshake is rejected immediately with HTTP 403; unconfigured mode emits yellow security warning.
+  - 📊 **Criteria**: Unauthorized cross-origin signaling handshakes 100% blocked with `Blocked unauthorized Origin` logged.
+
 ---
 
 ### Dimension 3: Complex NAT Topologies, TURN Relays & Mobile Roaming
@@ -247,11 +256,13 @@ Verifies that heavy, modern web applications reverse-proxied through the gateway
 
 ### Dimension 5: High-Capacity Streaming, Backpressure & Hardware Decompression
 
-- [ ] **5.1 10GB Zero-Copy Download**
-  - **Mode**: `./agent -file /data/large.iso` (6GB-10GB).
-  - 🟢 **Positive Verification**: Web File System API (`showSaveFilePicker`) streams directly to disk; SHA256 checksum matches source file.
-  - 🔴 **Negative Proof**: Monitor memory with `htop`; Agent memory stays `< 50MB`, browser memory `< 100MB`; zero OOM crashes.
-  - 📊 **Criteria**: Constant flat memory profile; 100% SHA256 match.
+- [ ] **5.1 High-Capacity Streaming & Mid-Stream Abort Handle Cleanup**
+  - **Mode**: `./agent -file /data/large.iso` (5GB-10GB) or `./agent -dir /data/shares`.
+  - 🟢 **Positive Verification**: Web File System API (`showSaveFilePicker`) streams directly to disk with fair multi-task scheduling; SHA256 checksum matches source file.
+  - 🔴 **Negative Proof**:
+    1. **Memory Ceiling**: Agent memory stays `< 50MB`, browser memory `< 100MB`; zero full-file memory buffering; zero OOM crashes;
+    2. **Mid-Stream Cancellation Cleanup**: Closing tab or triggering `AbortController` causes Agent to detect RST frame in `< 500ms` and invoke `file.Close()`; `lsof` verifies file handles release immediately to zero.
+  - 📊 **Criteria**: Flat memory curve; file handles release in < 500ms; 100% SHA256 match.
 
 - [ ] **5.2 1Gbps vs 5Mbps Extreme Backpressure Throttling**
   - **Scenario**: Fast Agent, slow visitor throttled to 1.5Mbps.
@@ -264,16 +275,18 @@ Verifies that heavy, modern web applications reverse-proxied through the gateway
   - 🔴 **Negative Proof**: Requests with `method: 'HEAD'` or `204 No Content` bypass decompression pipeline; zero `TypeError: Compressed input was truncated`.
   - 📊 **Criteria**: Compressed assets transfer intact; zero decompression errors on empty bodies.
 
-- [ ] **5.4 P2P File Vault Concurrent Tasks & Mid-Stream Abort Cleanup**
-  - **Mode**: `./agent -dir /data/shares`.
-  - 🟢 **Positive Verification**: Download 3 files concurrently; multiplexer schedules slices equitably.
-  - 🔴 **Negative Proof**: Close tab mid-download; `AbortController` emits RST frame; Agent closes file handles in < 500ms; `lsof` verifies zero orphaned handles.
-  - 📊 **Criteria**: File handles release immediately; RSS memory returns to baseline.
-
-- [ ] **5.5 Multiplexing Parity Watermark & Anti-Ghosting Invariant**
+- [ ] **5.4 Multiplexing Parity Watermark & Anti-Ghosting Invariant (Case 4)**
   - 🟢 **Positive Verification**: Client allocates odd streams (1, 3, 5); Agent allocates even streams (2, 4, 6).
   - 🔴 **Negative Proof**: Resetting streams discards delayed packets matching monotonic watermark without terminating legitimate opposing streams.
   - 📊 **Criteria**: 1000 stream allocations and resets complete with 0 active stream leaks.
+
+- [ ] **5.5 P2PMux 128MB Global Memory Budget & Physical SCTP Backpressure**
+  - 🟢 **Positive Verification**: Under normal traffic, `m.InboundBytes()` tracks active payload buffers in the tens of KB to low MB range;
+  - 🔴 **Negative Proof**:
+    1. **High-Watermark Read Pause**: When inbound buffers accumulate past the 96MB high watermark (`DefaultInboundHighWaterMark`), DataChannel reads pause; without application consumption, the underlying SCTP stack stops advancing `a_rwnd`, physically throttling the remote peer at the transport layer;
+    2. **Low-Watermark Read Resume**: When downstream consumers drain buffers below 64MB (`DefaultInboundLowWaterMark`), DataChannel reads resume automatically;
+    3. **RST_STREAM Timeout & Zero Memory Leak**: Stalled streams exceeding 3s (`DefaultInboundBackpressureTimeout`) are aborted with `RST_STREAM`; `drainUnreadInboundLocked()` atomically flushes inbound queues, resetting `InboundBytes()` cleanly with zero drift.
+  - 📊 **Criteria**: `pkg/mux/mux_test.go` (`TestMux_GlobalInboundBudget_DualWatermark` & `TestMux_InboundBackpressure_TimeoutReset`) pass 100%; `InboundBytes()` returns strictly to zero.
 
 ---
 
@@ -329,19 +342,31 @@ tc qdisc del dev eth0 root
   - 🔴 **Negative Proof**: Inspect `Dockerfile.agent` and `Dockerfile.server`; assert containers run under unprivileged user `appuser` (UID: 10001); low ports bound via `cap_net_bind_service`.
   - 📊 **Criteria**: `docker exec` shows `uid=10001(appuser)`.
 
+- [ ] **7.4 Signaling Resource Quotas & Anti-DoS Janitor**
+  - 🟢 **Positive Verification**: Normal signaling handshakes within limits forward smoothly.
+  - 🔴 **Negative Proof**:
+    1. **Candidate Flood Limit**: ICE candidate forwarding exceeding 32 per session is silently dropped, protecting peer memory;
+    2. **Offline Waiting Queue Ceiling**: When target node is offline, waiting visitor queue strictly caps at 128; excess visitors rejected with `waiting queue full`;
+    3. **Half-Open Handshake Reaper**: Offers uncompleted after 30 seconds are reaped by janitor loop, ensuring zero half-open session accumulation.
+  - 📊 **Criteria**: Excess candidates and waiting visitors rejected; long-term handshake heap profile remains stable.
+
 ---
 
 ### Dimension 8: Cross-Version Interoperability & Security Baseline Hardening
 
-- [ ] **8.1 Backward Compatibility (N-1 Agent vs N Signal/Portal)**
-  - **Scenario**: Public Signaling and Portal updated to vN; intranet Agent remains on vN-1.
-  - 🟢 **Positive Verification**: Legacy Agent connects and registers on new Signal hub; visitor connects via new Web Portal and browses pages normally.
-  - 🔴 **Negative Proof**: Core protocol handshakes negotiate backward compatibility; zero protocol mismatch crashes.
-  - 📊 **Criteria**: Seamless access to legacy Agent; zero handshake exceptions.
+- [ ] **8.1 Automated Backward Compatibility (N-1 Agent vs N Signal/Portal)**
+  - **Automated Test Suite**: `go test -v -run TestCrossVersion ./test/...` ([test/cross_version_e2e_test.go](file:///test/cross_version_e2e_test.go)).
+  - 🟢 **Positive Verification**: Dynamically extracts and compiles legacy vN-1 release (v2.1.0) binary; establishes registration with vN (v2.2.0) Signal server; client establishes `p2pmux` DataChannel;
+  - 🔴 **Negative Proof**:
+    1. **Sequence ID Multiplexing Fallback**: When new client sends 8-byte `seqID` Ping, legacy Agent's zero-payload Pong triggers `legacyPongCh` fallback branch, measuring RTT without timeout;
+    2. **Reverse Proxy Compatibility**: Full HTTP request-response proxies through legacy Agent cleanly.
+  - 📊 **Criteria**: Automated test passes 100%; console confirms successful RTT and HTTP 200.
 
-- [ ] **8.2 Wire Protocol Frame Integrity & Demux Isolation**
-  - 🔴 **Negative Proof**: Enforce `TypeHeaders` first-frame contract; prohibit injecting unnegotiated control frames into stream headers; HTTP and WebSocket streams demux cleanly via `HandleStreamWithMeta`.
-  - 📊 **Criteria**: First frame is standard Wire frame; zero 10-second timeout deadlocks.
+- [ ] **8.2 Wire Protocol Frame Integrity & Cross-Runtime Golden Vectors**
+  - **Test Suites**: `npm test` ([test/test_protocol_vectors.cjs](file:///test/test_protocol_vectors.cjs)) and `go test ./pkg/protocol` ([pkg/protocol/golden_test.go](file:///pkg/protocol/golden_test.go)).
+  - 🟢 **Positive Verification**: Shared golden vectors in [test/fixtures/protocol_golden_vectors.json](file:///test/fixtures/protocol_golden_vectors.json) validated across Go and TypeScript runtimes, verifying 10-byte fixed header and 32KB memory alignment (32758 payload + 10 = 32768 bytes).
+  - 🔴 **Negative Proof**: Truncated headers (< 10 bytes), payload length mismatches, and frames exceeding 65535 bytes are rejected on both platforms.
+  - 📊 **Criteria**: 15/15 cross-runtime golden vectors pass 100%.
 
 - [ ] **8.3 Expiring Share Links (`-sign-link`) Anti-Tamper & Anti-Expiry**
   - **Command**: `agent -node-id vault -access-secret MyPass -sign-link 1m`.
@@ -368,13 +393,13 @@ Before every release, the QA Lead signs off based on release tier (MAJOR full pa
 | :---: | :--- | :--- | :---: | :---: | :---: |
 | **Level 1** | Automated Real-Browser CDP Matrix | 13 full-stack scenarios + page reload 100% PASS | **Mandatory** | 🟢 PASS | 🟢 PASS |
 | **Dimension 1** | Real Linux Host & Heavy Web Apps | Streaming, Range 206, proxy rewrites, PVE HTTPS | Proxy / Frontend | 🟢 PASS | 🟢 PASS |
-| **Dimension 2** | Enterprise WAF & Client IP Propagation | X-Forwarded-For injection, WAF IP ban anti-false-positive | Network / Security | 🟢 PASS | 🟢 PASS |
-| **Dimension 3** | Complex NAT Punching & ICE Traversal | STUN/TURN gathering, in-place ICE Restart | Signaling / ICE | 🟢 PASS | 🟢 PASS |
+| **Dimension 2** | Enterprise WAF & Client IP Propagation | X-Forwarded-For injection, WAF IP ban, CSWSH malicious origin block | Network / Security | 🟢 PASS | 🟢 PASS |
+| **Dimension 3** | Complex NAT Punching & ICE Traversal | STUN/TURN gathering, in-place ICE Restart, generational teardown guard | Signaling / ICE | 🟢 PASS | 🟢 PASS |
 | **Dimension 4** | In-Browser Sandbox & DOM Virtualization | ES Module Worker, Null-Body, CookieJar isolation | Frontend / SW | 🟢 PASS | 🟢 PASS |
-| **Dimension 5** | Streaming & Extreme Backpressure | Chunked streaming, backpressure braking, RST on cancel | Multiplexing | 🟢 PASS | 🟢 PASS |
+| **Dimension 5** | Streaming & Extreme Backpressure | Chunked streaming, 128MB global budget & physical SCTP flow control | Multiplexing | 🟢 PASS | 🟢 PASS |
 | **Dimension 6** | Chaos Network Loss & Stress Testing | 30% loss 150ms delay without deadlocks | Network / Signaling | 🟢 PASS | 🟢 PASS |
-| **Dimension 7** | Serverless Hibernation & Daemon Lifecycle | DO hibernation auth persistence, Cloudflare edge P2P | Edge / Daemons | 🟢 PASS | 🟢 PASS |
-| **Dimension 8** | Cross-Version Interop & Security Baselines | -sign-link anti-tamper, -dir anti-traversal | **Protocol Mandatory** | 🟢 PASS | 🟢 PASS |
+| **Dimension 7** | Serverless Hibernation & Daemon Lifecycle | DO hibernation, Cloudflare edge P2P, anti-DoS quotas & 30s reaper | Edge / Daemons | 🟢 PASS | 🟢 PASS |
+| **Dimension 8** | Cross-Version Interop & Security Baselines | Automated N-1 interop, cross-runtime golden vectors, -sign-link, -dir | **Protocol Mandatory** | 🟢 PASS | 🟢 PASS |
 
 > Archived Reports:
 > - [v2.2.0 Release Holographic Test Report (MAJOR)](file:///docs/en/RELEASE_REPORTS/v2.2.0_TEST_REPORT.md)

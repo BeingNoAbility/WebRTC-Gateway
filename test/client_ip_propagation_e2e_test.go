@@ -166,7 +166,7 @@ func TestClientIP_EndToEnd_PropagationAndAntiSpoofing(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 4. Client connects to signaling server with CF-Connecting-IP header (simulating 203.0.113.195)
-	dialer := websocket.DefaultDialer
+	dialer := *websocket.DefaultDialer
 	clientHeaders := make(http.Header)
 	authoritativeIP := "203.0.113.195"
 	clientHeaders.Set("CF-Connecting-IP", authoritativeIP)

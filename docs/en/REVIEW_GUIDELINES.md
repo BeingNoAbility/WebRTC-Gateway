@@ -223,6 +223,18 @@ flowchart TD
   2. Holding `RLock` during synchronous `client.Send` causes slow or buffer-stalled WebSocket clients to block all subsequent agent registrations on the entire broker.
 - **Dialectical Solution**: Retain `TypeHeaders` wire frames; demultiplex headers once inside `agent.go` and pass pre-parsed metadata via `HandleStreamWithMeta`. Snapshot target clients and release `RUnlock()` immediately, broadcasting asynchronously via goroutine with unique `SessionID: client.ID` preserved per client.
 
+### Case 7: Reconnection Generational Guard — [Disparate Maps vs Aggregate Root Generation Model]
+
+- **Context**: Mobile network drift or ICE restarts initiate a 5-second graceful teardown grace period. When clients reconnect rapidly or initiate ICE Restart, a new PeerConnection and Mux are established, but the delayed 5-second timer fires and unconditionally destroys the new connection and evicts the active CookieJar!
+- **Deep-Water Trap (State Fragmentation & Teardown Race)**: Disparate global session maps (`activeConns`, `pendingTeardowns`, `activeMuxes`, `clientIPs`) lack unified lifecycle governance, causing asynchronous callbacks and stale timers to race against and evict new connections.
+- **Dialectical Solution**: Consolidate session state into an `AgentSession` aggregate root in `pkg/agent/session.go` with a monotonic `Generation` counter. Teardown timers and callbacks strictly bind to `(gen, pc)`. If the current generation has advanced or the PC has been replaced, stale teardown actions are safely ignored; session-scoped `offerMu` serializes offers without head-of-line blocking.
+
+### Case 8: Concurrent Stream Admission Limits — [Load Check vs Atomic CAS Admission & RAII Release]
+
+- **Context**: Bounding maximum concurrent multiplexed streams (`maxConcurrentStreams`, default 512) under high-throughput request bursts.
+- **Deep-Water Trap (TOCTOU Race Window)**: Relying on `atomic.LoadInt64(&a.activeStreams) >= limit` permits concurrent goroutines to pass the condition simultaneously, triggering subsequent parallel increments and severely exceeding concurrency limits.
+- **Dialectical Solution**: Implement `tryAcquireStream()` with an atomic CAS loop (`atomic.CompareAndSwapInt64`) returning a `sync.Once` RAII release closure, guaranteeing active streams strictly adhere to concurrency limits without race condition leakage.
+
 ---
 
 ## 4. Sign-off Matrix

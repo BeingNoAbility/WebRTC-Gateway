@@ -134,7 +134,7 @@ func TestCrossVersion_NMinusOneAgent_Interoperability(t *testing.T) {
 	time.Sleep(1000 * time.Millisecond)
 
 	// 5. Connect v2.2.0 Client to Signal Server
-	dialer := websocket.DefaultDialer
+	dialer := *websocket.DefaultDialer
 	clientWS, _, err := dialer.Dial(signalWSURL, nil)
 	if err != nil {
 		t.Fatalf("Client dial failed: %v", err)

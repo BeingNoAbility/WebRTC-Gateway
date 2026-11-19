@@ -37,10 +37,10 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph Blast_Radius_Mapping["MINOR 特征爆炸半径与必测维度映射"]
-        C1["反代与安全层改动<br/>(pkg/proxy, ssrf.go)"] --> R1["维度一 (1.5 HTTPS 穿透)<br/>维度二 (2.1-2.6 IP/WAF/SSRF)<br/>维度八 (8.3-8.5 安全防线)"]
+        C1["反代与安全层改动<br/>(pkg/proxy, ssrf.go)"] --> R1["维度一 (1.5 HTTPS 穿透)<br/>维度二 (2.1-2.7 IP/WAF/SSRF/CSWSH)<br/>维度八 (8.3-8.5 安全防线)"]
         C2["浏览器沙箱与前端协议<br/>(web/src/sw, patch, portal)"] --> R2["Level 1 CDP 自动化矩阵<br/>维度一 (1.1 Portainer, 1.2 Jellyfin)<br/>维度四 (4.1-4.7 DOM/Worker 虚拟化)"]
-        C3["信令通道与 ICE 协商<br/>(cmd/signal, pkg/signaling)"] --> R3["维度三 (3.1-3.5 NAT 打洞与漫游)<br/>维度六 (6.4 慢速客户端防挂死)<br/>维度七 (7.1-7.2 DO 休眠与优雅关闭)<br/>维度八 (8.1-8.2 跨版本互通)"]
-        C4["多路复用与底层流控<br/>(pkg/mux, frame.go)"] --> R4["维度五 (5.1-5.5 10GB/背压/奇偶流)<br/>维度六 (6.1-6.2 混沌丢包与乱序)"]
+        C3["信令通道与 ICE 协商<br/>(cmd/signal, pkg/signaling)"] --> R3["维度三 (3.1-3.5 NAT 打洞与漫游)<br/>维度六 (6.4 慢速客户端防挂死)<br/>维度七 (7.1-7.4 DO 休眠/优雅关闭/配额)<br/>维度八 (8.1-8.2 跨版本互通/Wire 规范)"]
+        C4["多路复用与底层流控<br/>(pkg/mux, frame.go)"] --> R4["维度五 (5.1-5.5 流式/背压/128MB 物理流控)<br/>维度六 (6.1-6.2 混沌丢包与乱序)"]
     end
 ```
 
@@ -219,6 +219,15 @@ flowchart LR
     2. **DNS 重绑定 (TOCTOU) 对抗**：使用重绑定测试域名（首次解析公网、二次解析为 127.0.0.1），断言拨号器在底层 TCP 握手前强制重解析校验，彻底阻断回环逃逸。
   - 📊 **判定标准与证据**：元数据与重绑定攻击均在 TCP 握手前物理熔断，无敏感信息泄露。
 
+- [ ] **2.7 跨站 WebSocket 信令劫持 (CSWSH) 与 Origin 白名单防御**
+  - **配置参数**：`signal -allowed-origins "https://*.pages.dev,http://localhost:*"` (或 `SIGNAL_ALLOWED_ORIGINS`)。
+  - 🟢 **正向验证**：
+    1. 同源请求（Origin host == request Host）默认直接信任通过；
+    2. 白名单中的 Cloudflare Pages 通配域及本地通配端口平滑通过 WebSocket 握手；
+    3. 原生 Go CLI Agent 或 curl 等无 Origin 头部的客户端平滑放行至密钥校验。
+  - 🔴 **反向对抗与证伪**：未授权 Origin（`https://evil.attacker.com`）发起信令 WebSocket 升级握手时，信令端立即拒绝并返回 HTTP 403 阻断；未配置时输出黄色安全告警并放行兼容。
+  - 📊 **判定标准与证据**：未授权跨域信令握手被 100% 阻断，日志输出 `Blocked unauthorized Origin`。
+
 ---
 
 ### 维度三：复杂拓扑 NAT 穿透、中继与漫游容灾自愈验证
@@ -298,11 +307,13 @@ flowchart LR
 
 本维度验证在物理极限条件下的数据通道抗压与解压管线合规性：
 
-- [ ] **5.1 10GB 超大文件零内存拷贝下载测试**
-  - **模式**：`./agent -file /data/large.iso`（单文件 6GB~10GB）。
-  - 🟢 **正向验证**：浏览器触发 Web File System API (`showSaveFilePicker`) 边下边落盘；校验下载完成的文件 SHA256 哈希与原始文件完全一致。
-  - 🔴 **反向对抗与证伪**：使用 `top`/`htop` 监控，Agent 内存稳定在 **< 50MB**，浏览器渲染进程内存稳定在 **< 100MB**；确认未在内存中全量缓冲文件，传输全程零 OOM 崩溃。
-  - 📊 **判定标准与证据**：内存曲线维持常数水平，SHA256 哈希校验 100% 一致。
+- [ ] **5.1 大容量流式落盘与中断句柄回收 (P2P File Vault & Abort Cleanup)**
+  - **模式**：`./agent -file /data/large.iso`（单文件 5GB~10GB）或 `./agent -dir /data/shares`。
+  - 🟢 **正向验证**：浏览器触发 Web File System API (`showSaveFilePicker`) 边下边落盘，并发多任务公平调度；校验下载完成的文件 SHA256 哈希与原始文件完全一致。
+  - 🔴 **反向对抗与证伪**：
+    1. **内存压制**：传输全程 Agent 内存稳定在 **< 50MB**，浏览器渲染进程 **< 100MB**，绝不在内存全量缓冲，零 OOM 崩溃；
+    2. **中途中断句柄秒级释放**：在下载中途直接关闭标签页或触发 `AbortController` 取消，Agent 在 **< 500ms** 内感知对端 RST 帧并调用 `file.Close()`；执行 `lsof` 检查文件句柄瞬间归零，无孤儿句柄残留。
+  - 📊 **判定标准与证据**：内存曲线维持常数，`lsof` 句柄数秒级归零，哈希 100% 一致。
 
 - [ ] **5.2 生产端 1Gbps 对 5Mbps 弱网的极端背压 (Backpressure) 熔断测试**
   - **场景**：Agent 处于千兆网络，访客 DevTools 限速为 `Regular 3G (1.5Mbps)` 下载大文件。
@@ -317,16 +328,18 @@ flowchart LR
   - 🔴 **反向对抗与证伪**：对标 [REVIEW_GUIDELINES 案例 2](file:///docs/REVIEW_GUIDELINES.md)，在控制台发起 `fetch('/bundle.js', { method: 'HEAD' })` 或请求 `204 No Content` / `Content-Length: 0`，断言解压管线精准旁路并回传 `null` body，**控制台零 `TypeError: Compressed input was truncated` 抛错**。
   - 📊 **判定标准与证据**：HEAD/204 请求控制台零报错，大文件压缩解压无损完成。
 
-- [ ] **5.4 P2P 文件保险库并发多任务与中途 Abort 资源回收**
-  - **模式**：`./agent -dir /data/shares`。
-  - 🟢 **正向验证**：同时启动 3 个 2GB 文件并发下载，底层多路复用器公平调度切片，并发平稳推进。
-  - 🔴 **反向对抗与证伪**：在下载至约 50% 时突然关闭标签页；浏览器 `AbortController` 触发并发送 RST 帧；Linux 宿主机 Agent 在 **< 500ms** 内感知对端中止并调用 `file.Close()`；宿主机执行 `lsof -p $(pidof agent) | grep /data/shares` 检查，**文件句柄计数瞬间归零，无孤儿句柄泄漏**。
-  - 📊 **判定标准与证据**：`lsof` 句柄数秒级归零，RSS 内存恢复基线。
-
-- [ ] **5.5 多路复用奇偶流 ID 水位线与幽灵流消除 (Case 4 注入)**
+- [ ] **5.4 多路复用奇偶流 ID 水位线与幽灵流消除 (Case 4 注入)**
   - 🟢 **正向验证**：客户端发起奇数流（1, 3, 5），服务端发起偶数流（2, 4, 6），全双工通信正常推进。
   - 🔴 **反向对抗与证伪**：对标 [REVIEW_GUIDELINES 案例 4](file:///docs/REVIEW_GUIDELINES.md)，在客户端主动快速重置/取消流后，管道内后续迟到数据包到达时，断言底层状态机只对同向流严格执行单调水位线丢弃，绝不错杀反向合法偶数流，彻底杜绝僵尸流耗尽流 ID 空间。
   - 📊 **判定标准与证据**：高频创建与取消流 1000 次，活动流计数精准归零。
+
+- [ ] **5.5 P2PMux 128MB 全局内存预算与物理 SCTP 背压熔断 (Physical SCTP Backpressure)**
+  - 🟢 **正向验证**：在正常业务流量下，`m.InboundBytes()` 随流的读取与消费平稳维持在数十 KB~数 MB 基线区间；
+  - 🔴 **反向对抗与证伪**：
+    1. **高水位 DataChannel 读挂起**：当未读缓冲累积超过 96MB 高水位线（`DefaultInboundHighWaterMark`）时，网关暂停 DataChannel 读操作，底层 WebRTC SCTP 协议栈由于无应用程序读取而停止向前滑动 `a_rwnd`（接收通告窗口），从传输层物理级制动远端发送方；
+    2. **低水位自动恢复**：当下游消费将缓冲区排空至 64MB 低水位线（`DefaultInboundLowWaterMark`）以下时，自动唤醒读取并恢复通畅；
+    3. **超时流熔断与零内存泄露**：若流卡死超过 3 秒（`DefaultInboundBackpressureTimeout`），Mux 自动向对端发送 `RST_STREAM` 熔断该流；通过 `drainUnreadInboundLocked()` 原子冲刷，未读计数精准回退，活动流计数精准归零。
+  - 📊 **判定标准与证据**：`pkg/mux/mux_test.go` (`TestMux_GlobalInboundBudget_DualWatermark` & `TestMux_InboundBackpressure_TimeoutReset`) 100% PASS，`InboundBytes()` 绝无漂移泄露。
 
 ---
 
@@ -393,21 +406,33 @@ tc qdisc del dev eth0 root
   - 🔴 **反向对抗与证伪**：审查 `Dockerfile.agent` 与 `Dockerfile.server`，断言镜像默认以非特权用户（UID 10001: appuser）运行；80/443 特权端口仅通过 Linux Capabilities（`cap_net_bind_service`）单点赋权，严禁以 root 身份直跑容器。
   - 📊 **判定标准与证据**：容器内 `id` 校验显示 `uid=10001(appuser)`。
 
+- [ ] **7.4 信令资源防耗尽配额与半开 SDP 握手回收 (Signaling Quotas & Anti-DoS Janitor)**
+  - 🟢 **正向验证**：正常信令握手在配额内流畅转发。
+  - 🔴 **反向对抗与证伪**：
+    1. **Candidate 泛洪限制**：单会话候选转发超过 32 个时，信令端自动丢弃超额候选，保护对端内存；
+    2. **离线等待队列上限**：目标 Agent 离线时，等待访客队列严格限制为 128 个，超额连接直接拒绝并返回 `waiting queue full` 错误；
+    3. **半开握手 Janitor 自动清理**：访客发送 Offer 后若由于崩溃或断网未在 30 秒内完成 Answer 握手，信令端 Janitor 循环自动超时关闭并回收该会话，绝不累积孤儿连接。
+  - 📊 **判定标准与证据**：日志输出限额拦截与半开超时清理记录，长期高并发握手堆内存基线平稳。
+
 ---
 
 ### 维度八：跨版本异构互通与安全基线硬隔离验证 (Cross-Version & Security)
 
 本维度专门守护系统演进中最容易破防的“异构版本混部”与“凭据安全边界”：
 
-- [ ] **8.1 异构多版本平滑互通验证 (N-1 Agent vs N Signal/Portal)**
-  - **场景**：生产环境中中心信令与 Web 门户已发布最新版（vN），而内网私有机器上的 Agent 仍为上一代次版本（vN-1）。
-  - 🟢 **正向验证**：vN-1 旧版本 Agent 连接 vN 新版 Signal 并注册成功；访客在 vN 新版 Web 门户中成功直连旧版 Agent 并正常浏览页面。
-  - 🔴 **反向对抗与证伪**：核心通信协议变动必须向下兼容降级，断言握手绝不抛出无法识别的报文错误，连接池与多路复用零协议崩溃。
-  - 📊 **判定标准与证据**：新门户平滑访问旧 Agent，控制台与日志零握手异常。
+- [ ] **8.1 异构多版本平滑互通自动化验证 (N-1 Agent vs N Signal/Portal)**
+  - **自动化测试套件**：`go test -v -run TestCrossVersion ./test/...` ([test/cross_version_e2e_test.go](file:///test/cross_version_e2e_test.go))。
+  - 🟢 **正向验证**：在发版准入时自动从 Git 提取上一代发布版本（vN-1，如 v2.1.0）代码编译并拉起真实 Agent 进程，连接当前开发版（vN，如 v2.2.0）Signal 服务器；由当前版客户端发起握手建立 `p2pmux` DataChannel；
+  - 🔴 **反向对抗与证伪**：
+    1. **序列号多路复用向下兼容**：新版发出的带 8 字节 `seqID` 的 PING 帧在旧版回传空/反射 PONG 时，新版客户端必须精准命中 `legacyPongCh` 降级分支，成功测算 RTT，严禁产生超时或串扰挂死；
+    2. **数据流反代互通**：全流程 HTTP 请求通过旧版 Agent 成功代理并回传正确响应。
+  - 📊 **判定标准与证据**：自动化用例 100% PASS，日志确认 RTT 测算成功与 HTTP 200 响应。
 
-- [ ] **8.2 Wire 协议帧纯正性与解复用隔离 (Case 6 注入)**
-  - 🔴 **反向对抗与证伪**：对标 [REVIEW_GUIDELINES 案例 6](file:///docs/REVIEW_GUIDELINES.md)，在线路上严格维持 `TypeHeaders` 首帧契约，严禁在握手首帧注入未经双端协商的私有控制帧破坏流读取时序；HTTP 与 WebSocket 流通过 `HandleStreamWithMeta` 实现零死锁反序列化解复用。
-  - 📊 **判定标准与证据**：抓包首帧必定为标准 Wire 帧，无 10 秒超时死锁。
+- [ ] **8.2 Wire 协议帧纯正性与跨语言黄金向量验证 (Golden Vectors)**
+  - **测试套件**：`npm test`（[test/test_protocol_vectors.cjs](file:///test/test_protocol_vectors.cjs)）与 `go test ./pkg/protocol`（[pkg/protocol/golden_test.go](file:///pkg/protocol/golden_test.go)）。
+  - 🟢 **正向验证**：Go 与 TypeScript 双端跨运行时严格按 [test/fixtures/protocol_golden_vectors.json](file:///test/fixtures/protocol_golden_vectors.json) 黄金向量进行帧编解码断言，10 字节固定帧头、32KB 内存阶梯对齐（32758 载荷 + 10 = 32768 字节）在两端完全一致。
+  - 🔴 **反向对抗与证伪**：输入不完整的截断帧头（< 10 字节）、声明载荷长度与实际不符的报文、超出单帧上限（> 65535）的报文，两端状态机必须全部精准报错熔断。
+  - 📊 **判定标准与证据**：双端 15/15 黄金向量 100% 绿灯。
 
 - [ ] **8.3 安全分享链接 (`-sign-link`) 时效防伪与防篡改测试**
   - **测试命令**：`agent -node-id vault -access-secret MyPass -sign-link 1m` 生成 1 分钟时效链接。
@@ -442,13 +467,13 @@ tc qdisc del dev eth0 root
 | :---: | :--- | :--- | :---: | :---: | :---: |
 | **Level 1** | 自动化 CDP 真实浏览器矩阵 | 13 大全栈场景 + 页面刷新重连 100% 绿灯 | **必跑** | 🟢 PASS | 🟢 PASS |
 | **维度一** | 真实 Linux 重度 Web 应用 | 流式传输、206 串流、跳转改写、PVE HTTPS 正常 | 涉及反代/前端 | 🟢 PASS | 🟢 PASS |
-| **维度二** | 企业级 WAF 与客户端 IP 透传 | X-Forwarded-For 精准透传，WAF 封禁单 IP 防误杀 | 涉及网络/安全 | 🟢 PASS | 🟢 PASS |
-| **维度三** | 复杂 NAT 打洞与实时 ICE 穿透 | STUN/TURN 候选收集，原位 ICE Restart 自愈不断播 | 涉及信令/ICE | 🟢 PASS | 🟢 PASS |
+| **维度二** | 企业级 WAF 与客户端 IP 透传 | X-Forwarded-For 精准透传，WAF 封禁单 IP 防误杀，CSWSH 恶意 Origin 拦截 | 涉及网络/安全 | 🟢 PASS | 🟢 PASS |
+| **维度三** | 复杂 NAT 打洞与实时 ICE 穿透 | STUN/TURN 候选收集，原位 ICE Restart 自愈不断播，世代防误杀 | 涉及信令/ICE | 🟢 PASS | 🟢 PASS |
 | **维度四** | 浏览器沙箱与 DOM 虚拟化 | ES Module Worker、Null-Body、Cookie 隔离、纯字节注入 | 涉及前端/SW | 🟢 PASS | 🟢 PASS |
-| **维度五** | 流式传输与极端背压控制 | 流式分块无损落盘，弱网背压制动，取消下载立即 RST | 涉及多路复用 | 🟢 PASS | 🟢 PASS |
+| **维度五** | 流式传输与极端背压控制 | 流式分块无损落盘，弱网背压制动，128MB 全局物理 SCTP 流控熔断 | 涉及多路复用 | 🟢 PASS | 🟢 PASS |
 | **维度六** | 混沌网络损耗与抗压排毒 | 30% 丢包 150ms 延迟损耗无死锁，连接优雅维持 | 涉及网络/信令 | 🟢 PASS | 🟢 PASS |
-| **维度七** | 边缘休眠与守护进程生命周期 | DO 休眠唤醒鉴权不丢，真实 Cloudflare 边缘跨网穿透 | 涉及边缘/守护 | 🟢 PASS | 🟢 PASS |
-| **维度八** | 跨版本异构互通与安全基线 | -sign-link 防篡改防过期，-dir 目录防路径逃逸 | **涉及协议必测** | 🟢 PASS | 🟢 PASS |
+| **维度七** | 边缘休眠与守护进程生命周期 | DO 休眠唤醒鉴权不丢，真实 Cloudflare 穿透，Anti-DoS 配额与半开回收 | 涉及边缘/守护 | 🟢 PASS | 🟢 PASS |
+| **维度八** | 跨版本异构互通与安全基线 | N-1 自动化跨版本互通，Wire 黄金向量双端对齐，-sign-link 防篡改，-dir 防逃逸 | **涉及协议必测** | 🟢 PASS | 🟢 PASS |
 
 > 归档详情查阅：
 > - [v2.2.0 发版全息测试签核报告 (MAJOR)](file:///docs/RELEASE_REPORTS/v2.2.0_TEST_REPORT.md)

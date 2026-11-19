@@ -226,6 +226,18 @@ flowchart TD
   2. 信令端在持有 `RLock` 的情况下同步调用 `client.Send`，若单个客户端网络缓慢或 TCP 缓冲区填满，将直接导致整机信令总线写锁死锁、后续 Agent 注册全部卡死。
 - **辩证解法**：严格保持线上 Wire 帧为 `TypeHeaders` 不破防，在 Go 端引入 `HandleStreamWithMeta` 实现单次反序列化零冗余分流；信令端快照目标客户端后立即释放 `RUnlock()`，通过异步 goroutine 分发通知并为每个客户端独立构造保留其专属 `SessionID: client.ID`。
 
+### 案例 7：会话重连世代防误杀之辩 ——【单体散乱状态 vs 聚合根单调世代（Generation）模型】
+
+- **背景**：移动端网络漂移或 ICE 重启触发 5 秒优雅断开定时器。若客户端快速重连或发起 ICE Restart，新 PeerConnection 和 Mux 已建立，但旧定时器到达后触发无条件销毁，误将新建立的连接和 CookieJar 抹除！
+- **深水区陷阱 (时序竞争与状态裂解)**：散乱的全局映射表（`activeConns`、`pendingTeardowns`、`activeMuxes`、`clientIPs`）缺乏统一生命周期聚合，异步回调与滞后定时器产生竞态误杀。
+- **辩证解法**：在 `pkg/agent/session.go` 中引入 `AgentSession` 聚合根与单调递增 `Generation` 计数器。优雅下线定时器和 PC 回调强绑定 `(gen, pc)`，若 `Generation` 已递增或 PC 不匹配，立即判定为陈旧动作并放弃；配套会话级 `offerMu` 串行化单会话重连，彻底消灭头阻塞与竞态误杀。
+
+### 案例 8：并发流准入限额之辩 ——【Load 检查 vs CAS 自旋原子准入与 RAII 释放】
+
+- **背景**：多路复用流突发高并发到达时，限制最大并发流（`maxConcurrentStreams`，默认 512）。
+- **深水区陷阱 (TOCTOU 检查时序越界)**：早期使用 `atomic.LoadInt64(&a.activeStreams) >= limit`，在高并发下多个协程同时通过检查，并发执行 `atomic.AddInt64(&a.activeStreams, 1)`，导致实际并发流数量严重超额击穿配额。
+- **辩证解法**：在 `pkg/agent/agent.go` 中引入 `tryAcquireStream()` CAS 自旋循环（`atomic.CompareAndSwapInt64`），并返回 `sync.Once` RAII 释放句柄，确保无论流正常结束还是异常退出，计数器严格精准回退，绝对零越界。
+
 ---
 
 ## 四、 审查结果定性与签核规范 (Sign-off Matrix)

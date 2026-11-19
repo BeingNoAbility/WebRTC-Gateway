@@ -148,7 +148,7 @@ func TestCloudflareLive_Signaling_DurableObject_Lifecycle(t *testing.T) {
 	testSecret := "secret-" + uuid.NewString()[:8]
 	wsURL := fmt.Sprintf("wss://%s/ws?node=%s", cfg.CFSignalDomainCustom, testNodeID)
 
-	dialer := websocket.DefaultDialer
+	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 10 * time.Second
 
 	// 1. Connect Agent WebSocket
@@ -275,7 +275,7 @@ func TestCloudflareLive_P2P_WebRTC_DataChannel_E2E(t *testing.T) {
 	time.Sleep(800 * time.Millisecond)
 
 	// 3. Connect Visitor Client to Live Cloudflare Worker
-	dialer := websocket.DefaultDialer
+	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 10 * time.Second
 
 	clientWS, _, err := dialer.Dial(signalURL, nil)
@@ -505,7 +505,7 @@ func TestCloudflareLive_CrossNetwork_DebianToWindows_E2E(t *testing.T) {
 	time.Sleep(1000 * time.Millisecond)
 
 	// 3. Connect Visitor Client from Windows to Live Cloudflare Worker
-	dialer := websocket.DefaultDialer
+	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 10 * time.Second
 
 	clientWS, _, err := dialer.Dial(signalURL, nil)
