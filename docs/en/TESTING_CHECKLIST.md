@@ -197,10 +197,13 @@ Verifies that heavy, modern web applications reverse-proxied through the gateway
   - 🟢 **Positive Verification**: WebRTC gathers `srflx` candidates; direct P2P connection establishes within 1-3s; HUD displays **`⚡ P2P Direct`**; signaling bandwidth drops to zero.
   - 📊 **Criteria**: WireShark confirms direct UDP transmission between peers.
 
-- [ ] **3.2 Dual Symmetric NAT (Symmetric NAT 4) TURN Relay Fallback**
-  - **Scenario**: Configure symmetric NAT on Linux host; configure `-turn-url`.
-  - 🟢 **Positive Verification**: ICE fallback automatically routes over TURN; HUD displays **`🛡️ TURN Relay`**; full duplex communication functions normally.
-  - 📊 **Criteria**: Smooth fallback to TURN relay; zero connection drops.
+- [ ] **3.2 Dual Symmetric NAT (Symmetric NAT 4) TURN Relay Fallback & Cloudflare Realtime TURN**
+  - **Scenario**: Configure symmetric NAT on Linux host with `-turn-url`, or run automated forced-relay suite `go test -v -run TestCloudflareLive_TURN_Relay_ForcedSymmetricNAT_E2E ./test/...` with `ICETransportPolicyRelay`.
+  - 🟢 **Positive Verification**:
+    1. Dynamically fetches ephemeral credentials from Cloudflare Realtime TURN API covering Anycast UDP (3478/443), TCP (3478/80), and TURNS TLS (5349/443);
+    2. Gathers and pairs strictly with `typ relay` candidates under restricted network policies;
+    3. HUD displays **`🛡️ TURN Relay`**; P2PMux DataChannel establishes; Ping/Pong RTT measures accurately; full HTTP requests proxy smoothly without packet loss.
+  - 📊 **Criteria**: 100% `typ relay` candidate pair established; automated test passes cleanly.
 
 - [ ] **3.3 Mobile 4G ↔ Wi-Fi Network Drift & ICE Restart Recovery**
   - **Scenario**: Mobile browser streaming video; switch Wi-Fi off to transition to 4G cellular.

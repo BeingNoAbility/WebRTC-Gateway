@@ -238,10 +238,13 @@ flowchart LR
   - 🟢 **正向验证**：打开 HUD 诊断看板，ICE 收集到 `host` 与 `srflx` 候选，1~3 秒内直连打洞成功，状态显示 **`⚡ P2P Direct`**；抓包确认双方直接通过 UDP 传输业务数据，中心信令服务器网卡流量归零。
   - 📊 **判定标准与证据**：抓包显示双端直接 UDP 点对点通信。
 
-- [ ] **3.2 双端对称型 NAT (Symmetric NAT 4) 极端中继降级测试**
-  - **环境构造**：在 Linux 测试机上配置 `iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE --random`，Agent 配置 `-turn-url`。
-  - 🟢 **正向验证**：STUN 反射候选建立配对失败，核心状态机自动平滑回退至 TURN 中继，HUD 自动切换为 **`🛡️ TURN Relay`**，页面交互 100% 连通无阻断。
-  - 📊 **判定标准与证据**：HUD 显示 `TURN Relay`，业务请求顺畅返回。
+- [ ] **3.2 双端对称型 NAT (Symmetric NAT 4) 极端中继降级与 Cloudflare Realtime TURN 验证**
+  - **环境构造**：在 Linux 测试机上配置 `iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE --random`，Agent 配置 `-turn-url`，或在自动化套件中执行 `go test -v -run TestCloudflareLive_TURN_Relay_ForcedSymmetricNAT_E2E ./test/...` 强制全链路 `ICETransportPolicyRelay`。
+  - 🟢 **正向验证**：
+    1. 动态自 Cloudflare Realtime TURN API 换取短期凭据，覆盖 Anycast UDP (3478/443)、TCP (3478/80) 及 TURNS TLS (5349/443) 全球节点；
+    2. STUN 反射候选建立配对失败或策略强制只允许中继候选时，核心状态机自动平滑回退至 TURN 中继，收集并仅协商 `typ relay` 候选；
+    3. HUD 自动切换为 **`🛡️ TURN Relay`**，P2PMux DataChannel 建立，Ping/Pong RTT 正常测算，全流程 HTTP 请求代理响应正常返回。
+  - 📊 **判定标准与证据**：HUD 显示 `TURN Relay`，自动化用例抓取到 100% `typ relay` 候选对并全流程代理通过。
 
 - [ ] **3.3 移动端 4G ↔ Wi-Fi 物理网络漂移与 ICE Restart 自愈测试**
   - **测试设备**：真实 iPhone / Android 移动端。
