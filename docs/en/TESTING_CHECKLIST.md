@@ -37,10 +37,10 @@ For MINOR releases, the QA Lead activates targeted real-world dimensions based o
 ```mermaid
 flowchart LR
     subgraph Blast_Radius_Mapping["MINOR Blast-Radius Driven Dimension Mapping"]
-        C1["Proxy & Security Layer<br/>(pkg/proxy, ssrf.go)"] --> R1["Dimension 1 (1.5 HTTPS Reverse Proxy)<br/>Dimension 2 (2.1-2.7 IP/WAF/SSRF/CSWSH)<br/>Dimension 8 (8.3-8.5 Security Boundaries)"]
+        C1["Proxy & Security Layer<br/>(pkg/proxy, ssrf.go)"] --> R1["Dimension 1 (1.5 HTTPS Reverse Proxy)<br/>Dimension 2 (2.1-2.7 IP/WAF/SSRF/CSWSH)<br/>Dimension 8 (8.1-8.6 Protocol Epoch/Fingerprint Anti-Replay/Security)"]
         C2["Browser Sandbox & Frontend<br/>(web/src/sw, patch, portal)"] --> R2["Level 1 CDP Matrix<br/>Dimension 1 (1.1 Portainer, 1.2 Jellyfin)<br/>Dimension 4 (4.1-4.7 DOM/Worker Virtualization)"]
-        C3["Signaling Hub & ICE<br/>(cmd/signal, pkg/signaling)"] --> R3["Dimension 3 (3.1-3.5 NAT Punching & Roaming)<br/>Dimension 6 (6.4 Slow Client Anti-Blocking)<br/>Dimension 7 (7.1-7.4 DO Hibernation/Quotas)<br/>Dimension 8 (8.1-8.2 Cross-Version Interop/Wire Spec)"]
-        C4["Multiplexing & Flow Control<br/>(pkg/mux, frame.go)"] --> R4["Dimension 5 (5.1-5.5 Streaming/Backpressure/128MB SCTP Flow Control)<br/>Dimension 6 (6.1-6.2 Chaos Loss & Reordering)"]
+        C3["Signaling Hub & ICE<br/>(cmd/signal, pkg/signaling)"] --> R3["Dimension 3 (3.1-3.5 NAT Punching & Roaming)<br/>Dimension 6 (6.4 Slow Client Anti-Blocking)<br/>Dimension 7 (7.1-7.4 DO Hibernation/Quotas)<br/>Dimension 8 (8.1 Protocol Epoch Defense/8.2 Wire Spec)"]
+        C4["Multiplexing & Flow Control<br/>(pkg/mux, frame.go)"] --> R4["Dimension 5 (5.1-5.7 Dual Channel/Orphan Buffer/128MB SCTP Flow Control)<br/>Dimension 6 (6.1-6.2 Chaos Loss & Reordering)"]
     end
 ```
 
@@ -180,14 +180,17 @@ Verifies that heavy, modern web applications reverse-proxied through the gateway
   - 🔴 **Negative Proof**: Request cloud metadata `http://169.254.169.254/latest/meta-data/`; assert `SafeDialContext` blocks request before TCP handshake; test DNS rebinding domain and assert re-resolution blocks loopback addresses.
   - 📊 **Criteria**: Metadata and loopback rebinding attempts blocked before TCP connection.
 
-- [ ] **2.7 Cross-Site WebSocket Hijacking (CSWSH) & Origin Whitelist Defense**
-  - **Config**: `signal -allowed-origins "https://*.pages.dev,http://localhost:*"` (or `SIGNAL_ALLOWED_ORIGINS`).
+- [ ] **2.7 Cross-Site WebSocket Hijacking (CSWSH) & Strict by Default Origin Defense**
+  - **Config**: `signal -allowed-origins "https://*.pages.dev,http://localhost:*"` (or `SIGNAL_ALLOWED_ORIGINS`; test-only bypass flag `--allow-all-origins`).
   - 🟢 **Positive Verification**:
     1. Same-origin requests (Origin host == request Host) trusted by default;
     2. Whitelisted Cloudflare Pages wildcard domains and local ports pass WebSocket handshake;
     3. Native Go CLI Agent or curl without Origin headers pass through cleanly to cluster authentication.
-  - 🔴 **Negative Proof**: Unauthorized Origin (`https://evil.attacker.com`) attempting WebSocket handshake is rejected immediately with HTTP 403; unconfigured mode emits yellow security warning.
-  - 📊 **Criteria**: Unauthorized cross-origin signaling handshakes 100% blocked with `Blocked unauthorized Origin` logged.
+  - 🔴 **Negative Proof**:
+    1. **Strict by Default Policy**: When `-allowed-origins` is unconfigured, Signal server **blocks all cross-origin non-same-origin WebSocket handshakes by default**, returning HTTP 403;
+    2. Unauthorized Origin (`https://evil.attacker.com`) attempting WebSocket handshake is immediately rejected;
+    3. Only when `--allow-all-origins` is explicitly declared does it log a security warning and allow unverified origins.
+  - 📊 **Criteria**: Unauthorized cross-origin signaling handshakes 100% blocked with `Blocked unauthorized Origin` or `Strict CSWSH protection active` logged.
 
 ---
 
@@ -291,6 +294,19 @@ Verifies that heavy, modern web applications reverse-proxied through the gateway
     3. **RST_STREAM Timeout & Zero Memory Leak**: Stalled streams exceeding 3s (`DefaultInboundBackpressureTimeout`) are aborted with `RST_STREAM`; `drainUnreadInboundLocked()` atomically flushes inbound queues, resetting `InboundBytes()` cleanly with zero drift.
   - 📊 **Criteria**: `pkg/mux/mux_test.go` (`TestMux_GlobalInboundBudget_DualWatermark` & `TestMux_InboundBackpressure_TimeoutReset`) pass 100%; `InboundBytes()` returns strictly to zero.
 
+- [ ] **5.6 P2PMux Native Dual Physical Channel Separation & Control Frame HoL Blocking Immunity**
+  - **Core Architecture**: Physical decoupling into `p2pcontrol` (dedicated to control frames: `TypeHeaders`, `TypePing`, `TypePong`, `TypeRstStream`) and `p2pdata` (dedicated to payload frames: `TypeData`, `TypeWSData`).
+  - 🟢 **Positive Verification**:
+    1. Inject continuous high-throughput data streams into `p2pdata` (exceeding `DefaultBufferedHighWaterMark` to trigger backpressure delays), while concurrently transmitting Ping frames and opening new streams via `p2pcontrol`;
+    2. Control frames **physically bypass data backpressure checks**, returning PING RTT in single-digit milliseconds and accepting new streams immediately, eliminating control-plane starvation and deadlocks caused by congested data transfers.
+  - 📊 **Criteria**: `pkg/mux/mux_test.go` (`TestMux_DualChannel_Routing`) 100% PASS, `controlFramesAgent > 0` and control signaling latency < 5ms.
+
+- [ ] **5.7 Cross-Physical-Channel Race Conditions — Orphan Data Frame Buffer & 500ms Reaper Timeout**
+  - **Core Architecture**: Since multiple SCTP DataChannels do not guarantee total cross-channel ordering, `p2pdata` data frames might arrive before `p2pcontrol` header frames. The Mux maintains a bounded orphan frame pool (64KB per stream, 256KB global, 500ms TTL).
+  - 🟢 **Positive Verification**: Simulate orphan data frames arriving on `p2pdata` prior to control frames; Mux temporarily buffers them in `pendingOrphans`. When the delayed `HEADERS` arrives, the stream state machine invokes `takeOrphanFrames` to flush buffered frames in order into the stream queue with zero byte loss.
+  - 🔴 **Negative Proof**: Construct a malformed stream with orphan data frames that never receives a matching `HEADERS` frame, waiting past **500ms (`DefaultOrphanFrameTTL`)**; Mux reaper automatically dispatches `TypeRstStream` to abort the stream, reclaims all orphan buffer memory, and decrements global counters strictly to zero.
+  - 📊 **Criteria**: `pkg/mux/mux_test.go` (`TestMux_DualChannel_OrphanDataBeforeHeaders` & `TestMux_DualChannel_OrphanTimeout`) 100% PASS, `orphanBytesTotal` returns strictly to zero.
+
 ---
 
 ### Dimension 6: Chaos Network Loss, Hostile Channels & Stress Testing
@@ -357,13 +373,14 @@ tc qdisc del dev eth0 root
 
 ### Dimension 8: Cross-Version Interoperability & Security Baseline Hardening
 
-- [ ] **8.1 Automated Backward Compatibility (N-1 Agent vs N Signal/Portal)**
-  - **Automated Test Suite**: `go test -v -run TestCrossVersion ./test/...` ([test/cross_version_e2e_test.go](file:///test/cross_version_e2e_test.go)).
-  - 🟢 **Positive Verification**: Dynamically extracts and compiles legacy vN-1 release (v2.1.0) binary; establishes registration with vN (v2.2.0) Signal server; client establishes `p2pmux` DataChannel;
-  - 🔴 **Negative Proof**:
-    1. **Sequence ID Multiplexing Fallback**: When new client sends 8-byte `seqID` Ping, legacy Agent's zero-payload Pong triggers `legacyPongCh` fallback branch, measuring RTT without timeout;
-    2. **Reverse Proxy Compatibility**: Full HTTP request-response proxies through legacy Agent cleanly.
-  - 📊 **Criteria**: Automated test passes 100%; console confirms successful RTT and HTTP 200.
+- [ ] **8.1 Protocol Epoch Defense & Legacy Insecure Handshake Rejection**
+  - **Test Suite**: `pkg/agent/agent_test.go` (`TestAgentAuthVerification`).
+  - 🟢 **Positive Verification**: Compliant v2.3 visitors (establishing dual `p2pcontrol` + `p2pdata` channels, providing DTLS certificate fingerprint `sdpFingerprint`, and calculating HMAC-SHA256 signatures) complete handshake smoothly.
+  - 🔴 **Negative Proof**: In alignment with v2.3 legacy debt purge standards, reject all legacy insecure handshakes:
+    1. **Direct Plaintext Secret Rejection**: If a request lacks a valid fingerprint and signature and only provides the plaintext password (legacy direct secret), Agent `VerifyAuth` **100% physically rejects** the handshake;
+    2. **Missing Fingerprint Signature Rejection**: Even if signature and non-expired timestamp are provided, if DTLS certificate fingerprint is missing (`sdpFingerprint == ""`), reject immediately;
+    3. **Legacy Single-Channel Blocking**: If legacy clients only request a single `p2pmux` channel, AgentSession strictly waits for dual channels and will not initialize Mux.
+  - 📊 **Criteria**: Legacy plaintext and fingerprint-less handshakes 100% rejected, with `Auth verification failed` logged.
 
 - [ ] **8.2 Wire Protocol Frame Integrity & Cross-Runtime Golden Vectors**
   - **Test Suites**: `npm test` ([test/test_protocol_vectors.cjs](file:///test/test_protocol_vectors.cjs)) and `go test ./pkg/protocol` ([pkg/protocol/golden_test.go](file:///pkg/protocol/golden_test.go)).
@@ -373,8 +390,11 @@ tc qdisc del dev eth0 root
 
 - [ ] **8.3 Expiring Share Links (`-sign-link`) Anti-Tamper & Anti-Expiry**
   - **Command**: `agent -node-id vault -access-secret MyPass -sign-link 1m`.
-  - 🟢 **Positive Verification**: Visitors access tunnel without password prompt within 1-minute validity window.
-  - 🔴 **Negative Proof**: Accessing after 65 seconds returns `403 Forbidden: signature expired`; modifying `exp` or `sig` parameters is rejected by HMAC-SHA256 verification.
+  - 🟢 **Positive Verification**: Within the 1-minute validity window, visitors combine the base share signature with their own DTLS certificate fingerprint to form a combined signature, connecting without password prompt.
+  - 🔴 **Negative Proof**:
+    1. **Time Expiration Defense**: Accessing after 65 seconds returns `403 Forbidden: signature expired`;
+    2. **Parameter Tamper Defense**: Modifying `exp` or `sig` parameters is rejected by HMAC-SHA256 verification;
+    3. **Zero/Negative Expiry Defense**: Constructing signatures with `exp <= 0` is strictly rejected, preventing perpetual backdoor access.
   - 📊 **Criteria**: Expired and tampered links blocked 100%.
 
 - [ ] **8.4 Directory Hosting Mode (`-dir`) Path Traversal Defense**
@@ -386,25 +406,32 @@ tc qdisc del dev eth0 root
   - 🔴 **Negative Proof**: Inspect console, Network tab, DOM source, and URL hash/query after visitor login; assert `SIGNAL_SECRET` never leaks in plaintext or encoded form.
   - 📊 **Criteria**: Zero occurrences of `SIGNAL_SECRET` in frontend environment.
 
+- [ ] **8.6 DTLS Certificate Fingerprint Binding for Ephemeral Share Links (`-sign-link`) Anti-Replay Defense**
+  - **Security Baseline**: In v2.3, the base signature generated by `-sign-link` must be bound by the client with the underlying WebRTC DTLS certificate fingerprint: `expectedBoundShareSign = ComputeHMAC(shareSign, fmt.Sprintf("%s:%d:%s", nodeID, exp, sdpFingerprint))`.
+  - 🟢 **Positive Verification**: Legitimate initiating clients compute signatures strictly matching their PeerConnection DTLS fingerprint and are granted access.
+  - 🔴 **Negative Proof**: An attacker snooping the share link URL on public Wi-Fi initiates a WebRTC connection from another machine/browser (possessing a different DTLS fingerprint); even though the URL is completely unexpired and untampered, the Agent detects the fingerprint mismatch and **100% rejects the connection**.
+  - 📊 **Criteria**: `pkg/agent/agent_test.go` (`TestAgentAuthVerification`) 100% PASS, cross-device replay attacks 100% blocked.
+
 ---
 
 ## 5. Real-World Sign-off Protocol
 
 Before every release, the QA Lead signs off based on release tier (MAJOR full pass / MINOR targeted sampling):
 
-| Verification Dimension | Verification Focus | Mandatory Criteria | MINOR Sampling Rationale | Status (v2.1.0 Sign-off) | Status (v2.2.0 MAJOR Sign-off) |
+| Verification Dimension | Verification Focus | Mandatory Criteria | MINOR Sampling Rationale | Status (v2.2.0 MAJOR Sign-off) | Status (v2.3.0 MAJOR Sign-off) |
 | :---: | :--- | :--- | :---: | :---: | :---: |
 | **Level 1** | Automated Real-Browser CDP Matrix | 13 full-stack scenarios + page reload 100% PASS | **Mandatory** | 🟢 PASS | 🟢 PASS |
 | **Dimension 1** | Real Linux Host & Heavy Web Apps | Streaming, Range 206, proxy rewrites, PVE HTTPS | Proxy / Frontend | 🟢 PASS | 🟢 PASS |
-| **Dimension 2** | Enterprise WAF & Client IP Propagation | X-Forwarded-For injection, WAF IP ban, CSWSH malicious origin block | Network / Security | 🟢 PASS | 🟢 PASS |
+| **Dimension 2** | Enterprise WAF & Client IP Propagation | X-Forwarded-For injection, WAF IP ban, CSWSH strict origin block | Network / Security | 🟢 PASS | 🟢 PASS |
 | **Dimension 3** | Complex NAT Punching & ICE Traversal | STUN/TURN gathering, in-place ICE Restart, generational teardown guard | Signaling / ICE | 🟢 PASS | 🟢 PASS |
 | **Dimension 4** | In-Browser Sandbox & DOM Virtualization | ES Module Worker, Null-Body, CookieJar isolation | Frontend / SW | 🟢 PASS | 🟢 PASS |
-| **Dimension 5** | Streaming & Extreme Backpressure | Chunked streaming, 128MB global budget & physical SCTP flow control | Multiplexing | 🟢 PASS | 🟢 PASS |
+| **Dimension 5** | Streaming & Extreme Backpressure | 128MB flow control, p2pcontrol/p2pdata dual-channel & 500ms orphan reaper | Multiplexing | 🟢 PASS | 🟢 PASS |
 | **Dimension 6** | Chaos Network Loss & Stress Testing | 30% loss 150ms delay without deadlocks | Network / Signaling | 🟢 PASS | 🟢 PASS |
 | **Dimension 7** | Serverless Hibernation & Daemon Lifecycle | DO hibernation, Cloudflare edge P2P, anti-DoS quotas & 30s reaper | Edge / Daemons | 🟢 PASS | 🟢 PASS |
-| **Dimension 8** | Cross-Version Interop & Security Baselines | Automated N-1 interop, cross-runtime golden vectors, -sign-link, -dir | **Protocol Mandatory** | 🟢 PASS | 🟢 PASS |
+| **Dimension 8** | Cross-Version Interop & Security Baselines | Protocol epoch defense, cross-runtime golden vectors, DTLS anti-replay | **Protocol Mandatory** | 🟢 PASS | 🟢 PASS |
 
 > Archived Reports:
+> - [v2.3.0 Release Holographic Test Report (MAJOR)](file:///docs/en/RELEASE_REPORTS/v2.3.0_TEST_REPORT.md)
 > - [v2.2.0 Release Holographic Test Report (MAJOR)](file:///docs/en/RELEASE_REPORTS/v2.2.0_TEST_REPORT.md)
 > - [v2.1.0 Release Holographic Test Report (MINOR)](file:///docs/en/RELEASE_REPORTS/v2.1.0_TEST_REPORT.md)
 

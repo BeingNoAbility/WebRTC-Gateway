@@ -235,6 +235,34 @@ flowchart TD
 - **Deep-Water Trap (TOCTOU Race Window)**: Relying on `atomic.LoadInt64(&a.activeStreams) >= limit` permits concurrent goroutines to pass the condition simultaneously, triggering subsequent parallel increments and severely exceeding concurrency limits.
 - **Dialectical Solution**: Implement `tryAcquireStream()` with an atomic CAS loop (`atomic.CompareAndSwapInt64`) returning a `sync.Once` RAII release closure, guaranteeing active streams strictly adhere to concurrency limits without race condition leakage.
 
+### Case 9: Orthogonal Channel Separation Against HoL Blocking — [Virtual In-Band Tagging vs Physical Dual DataChannels]
+
+- **Context**: Early gateway implementations ran multiplexing over a single DataChannel (`p2pmux`). When users downloaded multi-gigabyte ISO files or streamed high-bitrate video, payload throughput saturated the underlying SCTP congestion window and socket buffers. Control signaling—such as heartbeat Pings, `TypeHeaders` stream handshakes, or `TypeRstStream` frame cancellations—was queued behind bulk payload chunks, spiking perceived RTT into multiple seconds and triggering false timeout disconnects.
+- **Superficial Approach**: Implementing an application-level priority queue scheduler to reorder frames before writing to the DataChannel.
+- **Deep-Water Trap (Transport-Layer Physical Blocking)**: Even with application-level priority reordering, the underlying WebRTC DataChannel SCTP protocol stack enforces ordered delivery or shares the congestion window across the single channel. Once bulk data fills the socket's `bufferedAmount`, lower-priority chunks cannot be preempted, making transport-level head-of-line blocking physically inevitable.
+- **Dialectical Solution**: Establish two orthogonal physical DataChannels natively in WebRTC: `p2pcontrol` (dedicated to control frames: `TypeHeaders`, `TypePing`, `TypePong`, `TypeRstStream`) and `p2pdata` (dedicated to bulk payloads: `TypeData`, `TypeWSData`). Control frame writes completely bypass data backpressure checks (`writeFrameControl`), providing true physical isolation. This eliminates control-plane starvation under heavy traffic, maintaining single-digit millisecond Ping RTT under extreme loads.
+
+### Case 10: Cross-Channel Race Conditions — [Discarding Unordered Chunks vs Bounded Orphan Frame Pool & Reaper Timeout]
+
+- **Context**: Decoupling traffic into physical dual DataChannels (`p2pcontrol` and `p2pdata`) eliminates HoL blocking, but introduces a distributed concurrency race: while SCTP guarantees strict in-order delivery *within* a single DataChannel, **there is no global total ordering across distinct DataChannels in operating system network stacks and multi-core thread scheduling**. Under network jitter or high concurrency, data chunks may arrive before control frames—i.e. `TypeData` arrives before the `TypeHeaders` defining the stream metadata.
+- **Dogmatic Approach**: Immediately discard unknown stream IDs or return an immediate `RST_STREAM` error.
+- **Deep-Water Trap (Silent Data Loss vs OOM Memory Exhaustion)**: Discarding early data frames causes silent truncation of initial payloads or large downloads, breaking decompressed assets and integrity checks. Immediately terminating the stream kills legitimate connections. Conversely, buffering unallocated stream data indefinitely allows malicious clients to flood phantom stream IDs and trigger out-of-memory (OOM DoS) crashes.
+- **Dialectical Solution**: Design a strictly bounded orphan frame reassembly pool (`pendingOrphans`) inside `P2PMux`:
+  1. **Strict Quota Budgets**: Enforce a 64KB per-stream limit (`DefaultMaxOrphanBytesPerStream`) and a 256KB global aggregate ceiling (`DefaultMaxTotalOrphanBytes`), rejecting excess frames;
+  2. **Stream State Machine Claiming**: When the delayed `TypeHeaders` arrives to open the stream, it atomically invokes `takeOrphanFrames(streamID)` to inject buffered orphan frames in sequence into the new stream queue;
+  3. **Reaper Timeout (500ms TTL)**: If an orphan frame is not claimed by a matching `HEADERS` within **500ms (`DefaultOrphanFrameTTL`)**, a background reaper routine aborts the phantom stream via `TypeRstStream` and reclaims all orphan memory back to the global budget, ensuring zero memory leakage.
+
+### Case 11: Ephemeral Share Link Anti-Replay Defense — [Static Shared Signatures vs DTLS Certificate Fingerprint HMAC Binding]
+
+- **Context**: The gateway provides `-sign-link` to allow administrators to issue time-limited, password-free direct access links (e.g. 1 hour guest access to an internal dashboard).
+- **Superficial Approach**: Signing only Node ID and expiration timestamp: `sign = HMAC(Secret, nodeID + exp)`, verified statically at the signaling hub.
+- **Deep-Water Trap (Packet Sniffing & Cross-Device Replay Attacks)**: Share links sent via chat apps, email, or unencrypted networks can be intercepted in transit or extracted from server logs. An attacker possessing the URL within its validity window can replay the link from an unauthorized external machine and breach internal services. Furthermore, IP-binding defenses falsely block legitimate mobile users experiencing Wi-Fi/cellular NAT roaming.
+- **Dialectical Solution**: Leverage underlying WebRTC cryptographic invariants via **DTLS Certificate Fingerprint Binding**:
+  1. The client generates an ephemeral self-signed WebRTC DTLS certificate and derives its SHA-256 certificate fingerprint (`sdpFingerprint`);
+  2. During signaling authentication, the client must not only provide the base URL signature, but must compute a combined HMAC using the base signature as the secret key: `expectedBoundShareSign = ComputeHMAC(shareSign, fmt.Sprintf("%s:%d:%s", nodeID, exp, sdpFingerprint))`;
+  3. The Agent extracts the peer DTLS certificate fingerprint from the local WebRTC session and enforces verification;
+  4. **Adversarial Falsification**: If an attacker intercepts the valid URL and replays it from another machine, their browser's newly generated DTLS certificate fingerprint will physically differ from that of the intended recipient. The computed signature mismatch causes the Agent to **reject the connection 100% of the time**, rendering intercepted URLs useless for replay.
+
 ---
 
 ## 4. Sign-off Matrix

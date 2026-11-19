@@ -37,10 +37,10 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph Blast_Radius_Mapping["MINOR 特征爆炸半径与必测维度映射"]
-        C1["反代与安全层改动<br/>(pkg/proxy, ssrf.go)"] --> R1["维度一 (1.5 HTTPS 穿透)<br/>维度二 (2.1-2.7 IP/WAF/SSRF/CSWSH)<br/>维度八 (8.3-8.5 安全防线)"]
+        C1["反代与安全层改动<br/>(pkg/proxy, ssrf.go)"] --> R1["维度一 (1.5 HTTPS 穿透)<br/>维度二 (2.1-2.7 IP/WAF/SSRF/CSWSH)<br/>维度八 (8.1-8.6 协议断代/指纹防重放/安全防线)"]
         C2["浏览器沙箱与前端协议<br/>(web/src/sw, patch, portal)"] --> R2["Level 1 CDP 自动化矩阵<br/>维度一 (1.1 Portainer, 1.2 Jellyfin)<br/>维度四 (4.1-4.7 DOM/Worker 虚拟化)"]
-        C3["信令通道与 ICE 协商<br/>(cmd/signal, pkg/signaling)"] --> R3["维度三 (3.1-3.5 NAT 打洞与漫游)<br/>维度六 (6.4 慢速客户端防挂死)<br/>维度七 (7.1-7.4 DO 休眠/优雅关闭/配额)<br/>维度八 (8.1-8.2 跨版本互通/Wire 规范)"]
-        C4["多路复用与底层流控<br/>(pkg/mux, frame.go)"] --> R4["维度五 (5.1-5.5 流式/背压/128MB 物理流控)<br/>维度六 (6.1-6.2 混沌丢包与乱序)"]
+        C3["信令通道与 ICE 协商<br/>(cmd/signal, pkg/signaling)"] --> R3["维度三 (3.1-3.5 NAT 打洞与漫游)<br/>维度六 (6.4 慢速客户端防挂死)<br/>维度七 (7.1-7.4 DO 休眠/优雅关闭/配额)<br/>维度八 (8.1 协议断代防线/8.2 Wire 规范)"]
+        C4["多路复用与底层流控<br/>(pkg/mux, frame.go)"] --> R4["维度五 (5.1-5.7 双通道解耦/孤儿缓冲/128MB 物理流控)<br/>维度六 (6.1-6.2 混沌丢包与乱序)"]
     end
 ```
 
@@ -219,14 +219,17 @@ flowchart LR
     2. **DNS 重绑定 (TOCTOU) 对抗**：使用重绑定测试域名（首次解析公网、二次解析为 127.0.0.1），断言拨号器在底层 TCP 握手前强制重解析校验，彻底阻断回环逃逸。
   - 📊 **判定标准与证据**：元数据与重绑定攻击均在 TCP 握手前物理熔断，无敏感信息泄露。
 
-- [ ] **2.7 跨站 WebSocket 信令劫持 (CSWSH) 与 Origin 白名单防御**
-  - **配置参数**：`signal -allowed-origins "https://*.pages.dev,http://localhost:*"` (或 `SIGNAL_ALLOWED_ORIGINS`)。
+- [ ] **2.7 跨站 WebSocket 信令劫持 (CSWSH) 与 Origin 默认强阻断防御**
+  - **配置参数**：`signal -allowed-origins "https://*.pages.dev,http://localhost:*"` (或 `SIGNAL_ALLOWED_ORIGINS`；测试专用放行参数 `--allow-all-origins`)。
   - 🟢 **正向验证**：
     1. 同源请求（Origin host == request Host）默认直接信任通过；
     2. 白名单中的 Cloudflare Pages 通配域及本地通配端口平滑通过 WebSocket 握手；
     3. 原生 Go CLI Agent 或 curl 等无 Origin 头部的客户端平滑放行至密钥校验。
-  - 🔴 **反向对抗与证伪**：未授权 Origin（`https://evil.attacker.com`）发起信令 WebSocket 升级握手时，信令端立即拒绝并返回 HTTP 403 阻断；未配置时输出黄色安全告警并放行兼容。
-  - 📊 **判定标准与证据**：未授权跨域信令握手被 100% 阻断，日志输出 `Blocked unauthorized Origin`。
+  - 🔴 **反向对抗与证伪**：
+    1. **默认严苛策略 (Strict by Default)**：在未配置 `-allowed-origins` 时，信令服务**默认全量拦截非同源跨站 WebSocket 握手**，返回 HTTP 403 阻断；
+    2. 未授权 Origin（`https://evil.attacker.com`）发起信令 WebSocket 握手时立即切断；
+    3. 仅当显式声明 `--allow-all-origins` 时才输出警告并放行。
+  - 📊 **判定标准与证据**：未授权跨域信令握手被 100% 阻断，日志输出 `Blocked unauthorized Origin` 或 `Strict CSWSH protection active`。
 
 ---
 
@@ -344,6 +347,19 @@ flowchart LR
     3. **超时流熔断与零内存泄露**：若流卡死超过 3 秒（`DefaultInboundBackpressureTimeout`），Mux 自动向对端发送 `RST_STREAM` 熔断该流；通过 `drainUnreadInboundLocked()` 原子冲刷，未读计数精准回退，活动流计数精准归零。
   - 📊 **判定标准与证据**：`pkg/mux/mux_test.go` (`TestMux_GlobalInboundBudget_DualWatermark` & `TestMux_InboundBackpressure_TimeoutReset`) 100% PASS，`InboundBytes()` 绝无漂移泄露。
 
+- [ ] **5.6 P2PMux 原生双物理通道分离与控制帧队头阻塞（HoL Blocking）免疫**
+  - **核心机制**：底层拆分为 `p2pcontrol`（专载 `TypeHeaders`、`TypePing`、`TypePong`、`TypeRstStream` 等控制帧）与 `p2pdata`（专载 `TypeData` 与 `TypeWSData` 载荷）。
+  - 🟢 **正向验证**：
+    1. 在 `p2pdata` 注入持续性大吞吐流量（使缓冲区排队超过 `DefaultBufferedHighWaterMark` 进入背压等待），同时通过 `p2pcontrol` 并发发送 Ping 帧与新流首帧；
+    2. 控制帧**物理级绕过数据背压判定**，PING RTT 在毫秒级返回，新流首帧正常接收，彻底消灭控制面因数据面拥塞产生的死锁与延迟。
+  - 📊 **判定标准与证据**：`pkg/mux/mux_test.go` (`TestMux_DualChannel_Routing`) 100% PASS，`controlFramesAgent > 0` 且控制信令耗时 < 5ms。
+
+- [ ] **5.7 跨物理信道乱序竞态——孤儿数据帧（Orphan Frame）缓冲重组与 500ms 熔断测试**
+  - **核心机制**：针对多 DataChannel 底层无全局跨流偏序保证、导致 `p2pdata` 数据帧先于 `p2pcontrol` 首帧到达的竞态风险，引入受限内存池缓冲（单流 64KB、全局 256KB、TTL 500ms）。
+  - 🟢 **正向验证**：模拟在控制帧未达前，先行向 `p2pdata` 注入孤儿数据帧；Mux 将其暂存至 `pendingOrphans`。当延后的 `HEADERS` 首帧到达时，流状态机自动取出（`takeOrphanFrames`）并按序推入流缓冲区，全流程数据零丢失。
+  - 🔴 **反向对抗与证伪**：构造只有孤儿数据帧但永无 `HEADERS` 认领的畸形流，等待超过 **500ms（DefaultOrphanFrameTTL）**；Mux 收割器（Reaper）自动向对端发送 `TypeRstStream` 熔断该流，并彻底回收孤儿内存预算，全局计数器精准归零。
+  - 📊 **判定标准与证据**：`pkg/mux/mux_test.go` (`TestMux_DualChannel_OrphanDataBeforeHeaders` & `TestMux_DualChannel_OrphanTimeout`) 100% PASS，`orphanBytesTotal` 归零。
+
 ---
 
 ### 维度六：极端网络损耗、恶劣信道与高并发抗压破坏性测试
@@ -423,13 +439,14 @@ tc qdisc del dev eth0 root
 
 本维度专门守护系统演进中最容易破防的“异构版本混部”与“凭据安全边界”：
 
-- [ ] **8.1 异构多版本平滑互通自动化验证 (N-1 Agent vs N Signal/Portal)**
-  - **自动化测试套件**：`go test -v -run TestCrossVersion ./test/...` ([test/cross_version_e2e_test.go](file:///test/cross_version_e2e_test.go))。
-  - 🟢 **正向验证**：在发版准入时自动从 Git 提取上一代发布版本（vN-1，如 v2.1.0）代码编译并拉起真实 Agent 进程，连接当前开发版（vN，如 v2.2.0）Signal 服务器；由当前版客户端发起握手建立 `p2pmux` DataChannel；
-  - 🔴 **反向对抗与证伪**：
-    1. **序列号多路复用向下兼容**：新版发出的带 8 字节 `seqID` 的 PING 帧在旧版回传空/反射 PONG 时，新版客户端必须精准命中 `legacyPongCh` 降级分支，成功测算 RTT，严禁产生超时或串扰挂死；
-    2. **数据流反代互通**：全流程 HTTP 请求通过旧版 Agent 成功代理并回传正确响应。
-  - 📊 **判定标准与证据**：自动化用例 100% PASS，日志确认 RTT 测算成功与 HTTP 200 响应。
+- [ ] **8.1 协议断代防线与旧版不安全握手阻断隔离 (Protocol Epoch & Legacy Handshake Rejection)**
+  - **测试套件**：`pkg/agent/agent_test.go` (`TestAgentAuthVerification`)。
+  - 🟢 **正向验证**：合规的 v2.3 访客客户端（建立 `p2pcontrol` + `p2pdata` 双通道、提供 DTLS 证书指纹 `sdpFingerprint` 并生成 HMAC-SHA256 签名）平滑握手准入。
+  - 🔴 **反向对抗与证伪**：对标 v2.3 债务出清（Legacy Debt Purge）规范，全面阻断不安全的旧版握手：
+    1. **直接明文密码匹配拦截**：若请求未携带有效指纹与签名，仅提交明文访问口令（旧版 Direct Secret），Agent `VerifyAuth` **100% 物理拒绝**；
+    2. **无指纹分享签名拦截**：即便提交了签名与未过期时间戳，若缺少 DTLS 证书指纹（`sdpFingerprint == ""`），直接拒绝；
+    3. **遗留单通道请求阻断**：若旧版客户端仅请求单通道 `p2pmux`，AgentSession 严格等待双通道齐备，绝不初始化 Mux。
+  - 📊 **判定标准与证据**：旧版明文和无指纹握手拦截率 100%，日志明确输出 `Auth verification failed`。
 
 - [ ] **8.2 Wire 协议帧纯正性与跨语言黄金向量验证 (Golden Vectors)**
   - **测试套件**：`npm test`（[test/test_protocol_vectors.cjs](file:///test/test_protocol_vectors.cjs)）与 `go test ./pkg/protocol`（[pkg/protocol/golden_test.go](file:///pkg/protocol/golden_test.go)）。
@@ -439,10 +456,11 @@ tc qdisc del dev eth0 root
 
 - [ ] **8.3 安全分享链接 (`-sign-link`) 时效防伪与防篡改测试**
   - **测试命令**：`agent -node-id vault -access-secret MyPass -sign-link 1m` 生成 1 分钟时效链接。
-  - 🟢 **正向验证**：在 1 分钟有效期内，访客通过该签名链接免输入密码直接打洞进入。
+  - 🟢 **正向验证**：在 1 分钟有效期内，访客通过该签名链接配合自身的 DTLS 证书指纹生成联合签名，免输入密码直接打洞进入。
   - 🔴 **反向对抗与证伪**：
     1. **时效过期防御**：等待 65 秒后使用该链接访问，断言网关严格拒绝并抛出 `403 Forbidden: signature expired`；
-    2. **参数防篡改防御**：将 URL Query 中的 `exp` 或 `sig` 随意修改一位字符，断言立即被 HMAC-SHA256 校验拦截阻断。
+    2. **参数防篡改防御**：将 URL Query 中的 `exp` 或 `sign` 随意修改一位字符，断言立即被 HMAC-SHA256 校验拦截阻断；
+    3. **零/负数过期时间防御**：构造 `exp <= 0` 的签名，断言物理拒绝，杜绝永久签名后门。
   - 📊 **判定标准与证据**：过期链接与篡改链接均稳定阻断，拦截率 100%。
 
 - [ ] **8.4 目录托管模式 (`-dir`) 路径穿越与逃逸防御**
@@ -460,25 +478,32 @@ tc qdisc del dev eth0 root
     - **断言判定**：`SIGNAL_SECRET` 绝对不以任何明文或编码形式外露给访客；控制面集群准入密钥与数据面访客密码绝对物理隔离。
   - 📊 **判定标准与证据**：前端环境搜寻 `SIGNAL_SECRET` 字符串命中数为 0。
 
+- [ ] **8.6 基于 DTLS 证书指纹的临时分享链接（`-sign-link`）跨设备窃听重放防御**
+  - **安全基线**：在 v2.3 中，`-sign-link` 生成的基础签名在使用时，必须在客户端二次与该连接底层 WebRTC 的 DTLS 证书指纹进行二次绑定计算：`expectedBoundShareSign = ComputeHMAC(shareSign, fmt.Sprintf("%s:%d:%s", nodeID, exp, sdpFingerprint))`。
+  - 🟢 **正向验证**：合法发起握手的客户端，其计算出的签名与当前 PeerConnection 的证书指纹严格匹配，认证通过。
+  - 🔴 **反向对抗与证伪**：攻击者在公共 Wi-Fi 中抓包嗅探到合法的分享链接 URL，在另一台独立机器/浏览器上发起 WebRTC 握手（拥有不同的 DTLS 证书指纹）；即便 URL 完全未过期且未篡改，Agent 校验其指纹绑定的签名不匹配，**100% 拒绝建立连接**。
+  - 📊 **判定标准与证据**：`pkg/agent/agent_test.go` (`TestAgentAuthVerification`) 100% PASS，异机重放攻击 100% 被阻断。
+
 ---
 
 ## 五、 实战测试合格判定与签字矩阵 (Sign-off Protocol)
 
 每次正式发版时，测试主管必须根据发版定级（MAJOR 全量签核 / MINOR 抽样签核），在 PR 或发版报告中签核：
 
-| 验证维度 | 核心检验焦点 | 必备通过条件 | MINOR 抽样依据 | 状态 (v2.1.0 签核) | 状态 (v2.2.0 MAJOR 签核) |
+| 验证维度 | 核心检验焦点 | 必备通过条件 | MINOR 抽样依据 | 状态 (v2.2.0 MAJOR 签核) | 状态 (v2.3.0 MAJOR 签核) |
 | :---: | :--- | :--- | :---: | :---: | :---: |
 | **Level 1** | 自动化 CDP 真实浏览器矩阵 | 13 大全栈场景 + 页面刷新重连 100% 绿灯 | **必跑** | 🟢 PASS | 🟢 PASS |
 | **维度一** | 真实 Linux 重度 Web 应用 | 流式传输、206 串流、跳转改写、PVE HTTPS 正常 | 涉及反代/前端 | 🟢 PASS | 🟢 PASS |
-| **维度二** | 企业级 WAF 与客户端 IP 透传 | X-Forwarded-For 精准透传，WAF 封禁单 IP 防误杀，CSWSH 恶意 Origin 拦截 | 涉及网络/安全 | 🟢 PASS | 🟢 PASS |
+| **维度二** | 企业级 WAF 与客户端 IP 透传 | X-Forwarded-For 精准透传，WAF 封禁单 IP 防误杀，CSWSH 默认强阻断 | 涉及网络/安全 | 🟢 PASS | 🟢 PASS |
 | **维度三** | 复杂 NAT 打洞与实时 ICE 穿透 | STUN/TURN 候选收集，原位 ICE Restart 自愈不断播，世代防误杀 | 涉及信令/ICE | 🟢 PASS | 🟢 PASS |
 | **维度四** | 浏览器沙箱与 DOM 虚拟化 | ES Module Worker、Null-Body、Cookie 隔离、纯字节注入 | 涉及前端/SW | 🟢 PASS | 🟢 PASS |
-| **维度五** | 流式传输与极端背压控制 | 流式分块无损落盘，弱网背压制动，128MB 全局物理 SCTP 流控熔断 | 涉及多路复用 | 🟢 PASS | 🟢 PASS |
+| **维度五** | 流式传输与极端背压控制 | 128MB 物理流控、p2pcontrol/p2pdata 原生双通道隔离与 500ms 孤儿帧熔断 | 涉及多路复用 | 🟢 PASS | 🟢 PASS |
 | **维度六** | 混沌网络损耗与抗压排毒 | 30% 丢包 150ms 延迟损耗无死锁，连接优雅维持 | 涉及网络/信令 | 🟢 PASS | 🟢 PASS |
 | **维度七** | 边缘休眠与守护进程生命周期 | DO 休眠唤醒鉴权不丢，真实 Cloudflare 穿透，Anti-DoS 配额与半开回收 | 涉及边缘/守护 | 🟢 PASS | 🟢 PASS |
-| **维度八** | 跨版本异构互通与安全基线 | N-1 自动化跨版本互通，Wire 黄金向量双端对齐，-sign-link 防篡改，-dir 防逃逸 | **涉及协议必测** | 🟢 PASS | 🟢 PASS |
+| **维度八** | 跨版本异构互通与安全基线 | 协议断代防线旧版握手全拒，Wire 黄金向量双端对齐，DTLS 指纹防重放 | **涉及协议必测** | 🟢 PASS | 🟢 PASS |
 
 > 归档详情查阅：
+> - [v2.3.0 发版全息测试签核报告 (MAJOR)](file:///docs/RELEASE_REPORTS/v2.3.0_TEST_REPORT.md)
 > - [v2.2.0 发版全息测试签核报告 (MAJOR)](file:///docs/RELEASE_REPORTS/v2.2.0_TEST_REPORT.md)
 > - [v2.1.0 发版全息测试签核报告 (MINOR)](file:///docs/RELEASE_REPORTS/v2.1.0_TEST_REPORT.md)
 

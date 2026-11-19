@@ -239,7 +239,7 @@ func TestCloudflareLive_Signaling_DurableObject_Lifecycle(t *testing.T) {
 	// 4. Verify Disconnect: Close Agent and observe offline status on Client
 	agentConn.Close()
 
-	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = clientConn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	var offlineStatus signaling.Message
 	if err := clientConn.ReadJSON(&offlineStatus); err != nil {
 		t.Fatalf("Failed to read offline peer_status: %v", err)
@@ -285,9 +285,17 @@ func TestCloudflareLive_P2P_WebRTC_DataChannel_E2E(t *testing.T) {
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 10 * time.Second
 
-	clientWS, _, err := dialer.Dial(signalURL, nil)
-	if err != nil {
-		t.Fatalf("Client failed to dial Cloudflare signaling server: %v", err)
+	var clientWS *websocket.Conn
+	var dialErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		clientWS, _, dialErr = dialer.Dial(signalURL, nil)
+		if dialErr == nil {
+			break
+		}
+		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+	}
+	if dialErr != nil {
+		t.Fatalf("Client failed to dial Cloudflare signaling server: %v", dialErr)
 	}
 	defer clientWS.Close()
 
@@ -363,6 +371,7 @@ func TestCloudflareLive_P2P_WebRTC_DataChannel_E2E(t *testing.T) {
 	}
 
 	// 5. Exchange SDP & ICE Candidates via Cloudflare DO
+	_ = clientWS.SetReadDeadline(time.Time{})
 	answerReceived := make(chan struct{})
 	go func() {
 		for {
@@ -505,9 +514,17 @@ func TestCloudflareLive_CrossNetwork_DebianToWindows_E2E(t *testing.T) {
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 10 * time.Second
 
-	clientWS, _, err := dialer.Dial(signalURL, nil)
-	if err != nil {
-		t.Fatalf("Client failed to dial Cloudflare signaling server: %v", err)
+	var clientWS *websocket.Conn
+	var dialErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		clientWS, _, dialErr = dialer.Dial(signalURL, nil)
+		if dialErr == nil {
+			break
+		}
+		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+	}
+	if dialErr != nil {
+		t.Fatalf("Client failed to dial Cloudflare signaling server: %v", dialErr)
 	}
 	defer clientWS.Close()
 
@@ -583,6 +600,7 @@ func TestCloudflareLive_CrossNetwork_DebianToWindows_E2E(t *testing.T) {
 	}
 
 	// 5. Exchange SDP & ICE Candidates via Cloudflare DO
+	_ = clientWS.SetReadDeadline(time.Time{})
 	answerReceived := make(chan struct{})
 	go func() {
 		for {
@@ -840,9 +858,17 @@ func TestCloudflareLive_TURN_Relay_ForcedSymmetricNAT_E2E(t *testing.T) {
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 10 * time.Second
 
-	clientWS, _, err := dialer.Dial(signalURL, nil)
-	if err != nil {
-		t.Fatalf("Client failed to dial Cloudflare signaling server: %v", err)
+	var clientWS *websocket.Conn
+	var dialErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		clientWS, _, dialErr = dialer.Dial(signalURL, nil)
+		if dialErr == nil {
+			break
+		}
+		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+	}
+	if dialErr != nil {
+		t.Fatalf("Client failed to dial Cloudflare signaling server: %v", dialErr)
 	}
 	defer clientWS.Close()
 
@@ -932,6 +958,7 @@ func TestCloudflareLive_TURN_Relay_ForcedSymmetricNAT_E2E(t *testing.T) {
 	}
 
 	// 5. Exchange SDP & ICE Candidates via Cloudflare DO
+	_ = clientWS.SetReadDeadline(time.Time{})
 	answerReceived := make(chan struct{})
 	go func() {
 		for {
