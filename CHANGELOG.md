@@ -24,6 +24,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Replaced substring matching in `pkg/proxy/ssrf.go` with strict URL origin parsing `ValidateTrustedOrigin()` against target hostnames and subdomains, preventing origin spoofing and subdomain escape.
   - Enforced strict proxy port whitelisting `IsPermittedProxyPort()` across HTTP and WebSocket proxies to prevent outbound SSRF scans on internal network infrastructure.
 
+### Resource Governance & Defenses (Sprint 2)
+- **Cross-Site WebSocket Hijacking (CSWSH) Defense & Origin Whitelisting**:
+  - Added `-allowed-origins` / `SIGNAL_ALLOWED_ORIGINS` flag and config setting to the signaling server, enforcing strict origin checks for browser WebSocket handshakes with support for wildcard subdomains (`https://*.pages.dev`) and ports (`http://localhost:*`).
+  - Preserved native CLI Agent authentication via `SIGNAL_SECRET` and HMAC verification without Origin requirements; defaulted to permissive warning for backward compatibility.
+- **Signaling Quotas & Anti-DoS Janitor**:
+  - Implemented 32 ICE candidate forwarding limit per session to prevent signaling flood DoS.
+  - Added 128-entry waiting visitor queue ceiling per offline node to prevent memory exhaustion from half-open sessions.
+  - Added 30-second pending Offer janitor reaper loop in `cmd/signal/main.go` to cleanly terminate and reclaim dead handshakes.
+- **P2PMux Global Inbound Memory Budget & Physical SCTP Backpressure**:
+  - Introduced 128MB global inbound memory budget (`DefaultMaxInboundBytes`) across all streams in `pkg/mux/mux.go`.
+  - Added dual-watermark backpressure: at 96MB high watermark, DataChannel reads pause, naturally exhausting the transport-layer SCTP receive window (`a_rwnd`) and throttling remote senders; resumes when buffers drain below 64MB low watermark.
+  - Added 3-second reset timeout terminating backpressured streams with `RST_STREAM`, with atomic zero-leak accounting via `drainUnreadInboundLocked()`.
+- **Production Security Warning Banners**:
+  - Added TTY-aware security warning banners in `pkg/banner/banner.go` displayed when Signal or Agent runs without `SIGNAL_SECRET` or `ACCESS_SECRET`.
+
+### Protocol Formalization & Cross-Runtime Verification (Sprint 3)
+- **Formal P2PMux Wire Protocol Specification**:
+  - Authored comprehensive protocol specification in `docs/guide/protocol-specification.md` and `docs/en/guide/protocol-specification.md` defining 10-byte fixed headers, odd/even stream parity invariants, bidirectional state machines, and physical backpressure.
+- **32KB Runtime Memory Alignment**:
+  - Aligned recommended single-chunk payload size to 32758 bytes ($32758 + 10 = 32768$ bytes), mapping directly to Go runtime size-classes and WebRTC SCTP MTU boundaries.
+- **Cross-Runtime Golden Test Vectors**:
+  - Added shared test fixtures in `test/fixtures/protocol_golden_vectors.json`.
+  - Added Go test assertions in `pkg/protocol/golden_test.go` and TypeScript test assertions in `test/test_protocol_vectors.cjs` (integrated into `npm test`).
+
 ## [v2.1.0] - 2026-11-19
 
 ### Security & Sandboxing

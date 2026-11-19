@@ -59,6 +59,7 @@ The Agent client daemon supports three mutually exclusive operational modes:
 | :--- | :--- | :---: | :--- |
 | `-addr` | `ADDR` / `PORT` | `:8888` | Address and port to bind HTTP/HTTPS and WebSocket listener on. |
 | `-config` | `CONFIG_FILE` / `CONFIG` | `""` | Path to YAML/JSON config file (auto-detects `./server.yaml`, `./server.yml`, `./server.json`). |
+| `-allowed-origins` | `SIGNAL_ALLOWED_ORIGINS` / `ALLOWED_ORIGINS` | `""` (allow same-origin / warning) | Whitelist of allowed browser Origins for WebSocket handshakes (comma-separated, wildcard subdomains `*.pages.dev`, port wildcards `localhost:*`). |
 | `-signal-secret` | `SIGNAL_SECRET` | `""` | Cluster signaling authorization secret (-secret is fully deprecated and blocked). |
 | `-tls-cert` | `TLS_CERT` | `""` | Path to TLS certificate PEM file (e.g. fullchain.pem for native HTTPS). |
 | `-tls-key` | `TLS_KEY` | `""` | Path to TLS private key PEM file (e.g. privkey.pem for native HTTPS). |
@@ -106,6 +107,7 @@ metrics_addr: ":9090"
 ### ② Server Configuration (`server.yaml`)
 ```yaml
 addr: ":443"
+allowed_origins: "https://*.pages.dev,http://localhost:*"
 signal_secret: "cluster_secret_abc123"
 
 # TLS Configuration

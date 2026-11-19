@@ -128,7 +128,7 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 
 ---
 
-## 8. 控制面与数据面纵深防御治理 (v2.2 Resource Governance & Defenses)
+## 7. 控制面与数据面纵深防御治理 (v2.2 Resource Governance & Defenses)
 
 自 **v2.2.0** 起，网关对控制面信令与数据面传输实施更严格的配额治理与防 DoS 加固：
 
@@ -154,7 +154,7 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 
 ---
 
-## 7. 设计哲学与安全边界声明 (Design Philosophy & Security Boundaries)
+## 8. 设计哲学与安全边界声明 (Design Philosophy & Security Boundaries)
 
 为了守住产品的核心护城河与轻量极致体验，本项目坚定恪守以下两条设计纪律：
 

@@ -241,3 +241,34 @@ flowchart LR
     docker run --rm --user 1000:1000 ghcr.io/beingnoability/webrtc-p2p-server:latest -v
     docker run --rm --user 1000:1000 ghcr.io/beingnoability/webrtc-p2p-agent:latest -v
     ```
+
+---
+
+## Emergency Rollback Playbook
+
+If a critical P0 flaw or CI/CD blockage occurs immediately after pushing a release tag:
+
+1. **Delete the Git Tag**:
+   ```bash
+   # Delete local tag
+   git tag -d vX.Y.Z
+   # Delete remote repository tag (blocks release pipeline)
+   git push origin :refs/tags/vX.Y.Z
+   ```
+2. **Delete or Cancel Unready Release Drafts in the GitHub Web UI**;
+3. **Investigate, Patch, and Supplement Tests on the `dev` Branch**;
+4. **Re-execute the checklist from Phase 1, merge to `main`, and retag for release**.
+
+---
+
+## Appendix: Template for Adding Verification Items
+
+When subsequent project iterations introduce new components (e.g. mobile SDKs, automated ACME, or new protocol integrations), append entries under the corresponding phase following this format:
+
+```markdown
+- [ ] **X.Y [Component/Module Name] Verification Item**
+  - **Location**: [path/to/file](file:///path/to/file)
+  - **Action**: Describe specific inspection or modification requirements.
+  - **Verification Command**: `run verification script or test command`
+  - **Criteria**: Explicitly state pass and fail conditions.
+```

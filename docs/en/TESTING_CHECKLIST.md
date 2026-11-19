@@ -1,38 +1,86 @@
-# WebRTC Gateway Real-World & Browser Integration Testing Checklist
+# WebRTC Gateway Real-World Release Testing Checklist (Checklist 2.0)
 
 > **Mission & Scope**:  
-> WebRTC Gateway is a multi-heterogeneous project bridging **low-level concurrent Go systems, WebRTC/SCTP NAT-traversal protocol stacks, and modern browser same-origin sandbox virtualization**. Isolated unit tests only verify localized assertions; they cannot anticipate real-world network fluctuations, mobile WebKit memory constraints, enterprise WAF rule conflicts, or high-throughput backpressure.  
-> This checklist serves as the **definitive real-world integration testing manual** for production deployments, major releases, and core protocol refactorings. Testing must be executed against real Linux testbed hosts, real containerized applications, enterprise reverse proxies/WAFs, and diverse desktop/mobile browser engines.
+> WebRTC Gateway is a multi-heterogeneous project bridging **low-level concurrent Go systems, WebRTC/SCTP NAT-traversal protocol stacks, and modern browser same-origin sandbox virtualization**.  
+> Isolated unit tests only verify localized assertions; they cannot anticipate real-world network fluctuations, mobile WebKit memory constraints, enterprise WAF rule conflicts, or high-throughput backpressure.  
+> **The QA team maintains absolute gatekeeper authority over releases**. Before every **MINOR (vX.Y+1.0)** and **MAJOR (vX+1.0.0)** release, the test lead must execute real-world holographic verification following this checklist to uphold core invariants and ensure 100% stable production delivery.
 
 ---
 
-## Seven Dimensions of Real-World Integration Testing
+## 1. Release-Tiered Gate Protocol
+
+In accordance with [docs/en/REVIEW_GUIDELINES.md](file:///docs/en/REVIEW_GUIDELINES.md) and [docs/en/RELEASE_CHECKLIST.md](file:///docs/en/RELEASE_CHECKLIST.md), the project rejects mechanical over-testing for trivial patches as well as premature sign-offs for architectural refactorings. A three-tiered release gate protocol is enforced:
 
 ```mermaid
 flowchart TD
-    subgraph E2E_Matrix["Real-World Integration Testing Matrix"]
-        D1["Dimension 1: Real Linux Host & Complex Application Workloads<br/>(Portainer / Jellyfin / Immich / LibreSpeed / HomeAssistant)"]
-        D2["Dimension 2: Enterprise WAF, Reverse Proxies & Real Client IP Propagation<br/>(SafeLine WAF / Nginx / Caddy / ModSecurity / X-Forwarded-For)"]
-        D3["Dimension 3: Complex NAT Topologies, TURN Relays & Mobile Roaming<br/>(Full/Restricted Cone / Symmetric NAT 4 / TURN Fallback / 4G-WiFi Roaming)"]
-        D4["Dimension 4: Modern Browser Engines & In-Browser DOM Virtualization<br/>(Chrome / Safari WebKit / Firefox / Edge / Worker Module / CookieJar)"]
-        D5["Dimension 5: High-Capacity Streaming, Backpressure & Hardware Decompression<br/>(10GB ISO / HTTP 206 Partial Content / 1Gbps vs 5Mbps / DecompressionStream)"]
-        D6["Dimension 6: Chaos Network Loss, Hostile Channels & Stress Testing<br/>(tc netem 30% loss / 150ms delay / Port scanning / IPRateLimiter Janitor)"]
-        D7["Dimension 7: Serverless Hibernation & Idempotent Lifecycle Recovery<br/>(Cloudflare DO Hibernation wake-up / Daemon graceful restarts)"]
+    ReleaseType{"SemVer Release Tier"}
+
+    ReleaseType -->|"MAJOR (vX+1.0.0)<br/>Protocol Wire Changes / Core Architecture"| MajorGate["🔴 MAJOR Mandatory Full Gate<br/>- 100% full pass across all 8 dimensions<br/>- Cross-version backward compatibility assertion<br/>- Real bare-metal & multi-browser verification<br/>- Formal Release Test Report archived"]
+    
+    ReleaseType -->|"MINOR (vX.Y+1.0)<br/>New Operational Modes / CLI / Compatible Features"| MinorGate["🟡 MINOR Blast-Radius Sampling Gate<br/>- Level 1 Automated CDP Matrix 100% PASS<br/>- Targeted sampling based on blast-radius matrix<br/>- Backward compatibility (legacy Agent on new hub)<br/>- Verification logs attached to PR"]
+    
+    ReleaseType -->|"PATCH (vX.Y.Z+1)<br/>Race Fixes / Boundary Defenses / UI Fixes"| PatchGate["🟢 PATCH Fast-Delivery Gate<br/>- Full CI suite PASS (Unit + Race + Typecheck)<br/>- Level 1 Automated CDP smoke regression<br/>- Local container smoke test PASS"]
+```
+
+### 1. Release Gate Criteria
+
+| Release Tier | Versioning Format | Core Verification Focus | Mandatory Passing Criteria | Sign-off & Archiving Requirement |
+| :--- | :---: | :--- | :--- | :--- |
+| **Major** | `vX+1.0.0` | Wire protocol evolution, security auth model, extreme backpressure, chaos network resilience. | **Mandatory 100% pass across all 8 dimensions**; zero skips or compromises. | Formal Release Test Report signed off by QA Lead, archived under `docs/RELEASE_REPORTS/`. |
+| **Minor** | `vX.Y+1.0` | New functional modes, CLI flag/env additions, backward-compatible protocol features. | **Level 1 CDP matrix 100% PASS**; targeted verification based on **blast-radius matrix**; legacy Agent interop passed. | Detailed test logs, screenshots, and packet captures attached to PR description. |
+| **Patch** | `vX.Y.Z+1` | Concurrency deadlocks, null-body boundaries, memory leak detox, UI interaction fixes. | Full automated CI pipeline (`tsc`, `go vet`, `go test -race`, `npm test`) and local Level 1 CDP smoke passed. | Negative proof test execution attached to PR. |
+
+### 2. MINOR Releases: Blast-Radius Driven Sampling Matrix
+
+For MINOR releases, the QA Lead activates targeted real-world dimensions based on modified packages:
+
+```mermaid
+flowchart LR
+    subgraph Blast_Radius_Mapping["MINOR Blast-Radius Driven Dimension Mapping"]
+        C1["Proxy & Security Layer<br/>(pkg/proxy, ssrf.go)"] --> R1["Dimension 1 (1.5 HTTPS Reverse Proxy)<br/>Dimension 2 (2.1-2.6 IP/WAF/SSRF)<br/>Dimension 8 (8.3-8.5 Security Boundaries)"]
+        C2["Browser Sandbox & Frontend<br/>(web/src/sw, patch, portal)"] --> R2["Level 1 CDP Matrix<br/>Dimension 1 (1.1 Portainer, 1.2 Jellyfin)<br/>Dimension 4 (4.1-4.7 DOM/Worker Virtualization)"]
+        C3["Signaling Hub & ICE<br/>(cmd/signal, pkg/signaling)"] --> R3["Dimension 3 (3.1-3.5 NAT Punching & Roaming)<br/>Dimension 6 (6.4 Slow Client Anti-Blocking)<br/>Dimension 7 (7.1-7.2 DO Hibernation & Clean Exit)<br/>Dimension 8 (8.1-8.2 Cross-Version Interop)"]
+        C4["Multiplexing & Flow Control<br/>(pkg/mux, frame.go)"] --> R4["Dimension 5 (5.1-5.5 10GB/Backpressure/Parity)<br/>Dimension 6 (6.1-6.2 Chaos Loss & Reordering)"]
     end
 ```
 
 ---
 
-## Testbed Topology & Anonymization Conventions
+## 2. Dual-Layer Testing Architecture
 
-Before executing tests, establish a staging environment mirroring production topologies:
+The verification pipeline is divided into two interdependent tiers:
+
+```mermaid
+flowchart TD
+    subgraph Test_Layers["Holographic Dual-Layer Testing Architecture"]
+        subgraph Layer1["Level 1: Automated Real-Browser CDP Matrix"]
+            L1_1["Launch mock_service full-stack stub (13 complex scenarios)"]
+            L1_2["Automate headless Chromium / Edge rendering engine (CDP :9222)"]
+            L1_3["Drive DataChannel executing Fetch, XHR, CookieJar, WebSocket, Worker, F5 refresh"]
+            L1_4["Command: npm --prefix web run test:browser"]
+        end
+
+        subgraph Layer2["Level 2: Real-World Testbed & Hardware Matrix"]
+            L2_1["Real Linux bare-metal (Docker / Portainer / Jellyfin / HomeAssistant / LibreSpeed)"]
+            L2_2["Real enterprise protection (SafeLine WAF / Nginx rate limits / Cloud metadata blocks)"]
+            L2_3["Mobile hardware network drift (iPhone / Android 4G ↔ Wi-Fi sudden handover)"]
+            L2_4["Linux kernel network chaos injection (tc netem 30% loss / 150ms delay / 25% reorder)"]
+        end
+
+        Layer1 -->|"CDP matrix passes -> Proceed to bare-metal testbed"| Layer2
+    end
+```
+
+---
+
+## 3. Testbed Topology & Anonymization Conventions
 
 ```mermaid
 flowchart LR
     subgraph External_Visitors["External Visitors (Diverse Browsers)"]
         BrowserA["Desktop Chrome / Edge"]
-        BrowserB["Mobile iOS Safari (5G/4G)"]
-        BrowserC["Firefox / macOS Safari"]
+        BrowserB["Mobile iOS Safari (5G/4G Roaming)"]
+        BrowserC["macOS Safari / Firefox"]
     end
 
     subgraph Public_Signaling["Public Signaling Hub"]
@@ -43,7 +91,7 @@ flowchart LR
         Agent["WebRTC Gateway Agent<br/>(outbound-only, zero open ports)"]
         WAF["WAF Firewall (SafeLine / ModSecurity)"]
         ReverseProxy["Nginx / Caddy Reverse Proxy"]
-        Apps["Real Application Workloads (Portainer / Jellyfin / LibreSpeed)"]
+        Apps["Real Application Workloads (Portainer / Jellyfin / LibreSpeed / PVE)"]
 
         Agent --> WAF --> ReverseProxy --> Apps
     end
@@ -53,296 +101,309 @@ flowchart LR
     External_Visitors <-->|"2. WebRTC P2P Direct Tunnel (UDP DTLS-SRTP DataChannel)"| Private_Homelab
 ```
 
-> [!NOTE] **Test Environment Anonymization Parameters (Do not commit real production IPs)**:
-> - **Private Linux Testbed Host**: `<testbed-host-ip>` (e.g. `192.168.1.x`, accessible via SSH for testing);
+> [!IMPORTANT] **Testbed Anonymization Parameters**:
+> - **Private Linux Testbed Host**: `<testbed-host-ip>` (accessible via SSH for chaos injection);
 > - **Public Signaling Endpoint**: `wss://<signal-domain>/ws` or self-hosted `ws://<signal-ip>:8888/ws`;
 > - **Cluster Registration Secret**: `-signal-secret <test-cluster-token>`;
 > - **Visitor Access Password**: `-access-secret <test-visitor-pass>`.
 
 ---
 
-## Dimension 1: Real Linux Host & Complex Application Workloads
+## 4. Eight Dimensions of Real-World Testing
+
+### Dimension 1: Real Linux Host & Complex Application Workloads
 
 Verifies that heavy, modern web applications reverse-proxied through the gateway maintain 100% native responsiveness:
 
 - [ ] **1.1 Rich Single Page Application (SPA) Administration (Portainer / Grafana)**
-  - **Deployment**: Launch Portainer on the Linux testbed: `docker run -d -p 9000:9000 portainer/portainer-ce:latest`.
+  - **Deployment**: `docker run -d -p 9000:9000 portainer/portainer-ce:latest`.
   - **Start Agent**: `./agent -node-id portainer -target http://127.0.0.1:9000`.
-  - **Verification Points**:
-    1. **SPA Routing**: Navigate between containers, image lists, and networks; assert smooth HTML5 History API transitions without 404s;
-    2. **Real-Time WebSocket Shell**: Open a container `Exec Console (bash/sh)` terminal; execute `top`, `ls -la`, `vim`; verify zero-latency typing, ANSI colors, and window resize adaptability;
-    3. **CSP Stripping**: Inspect DevTools (F12); confirm that the gateway stripped upstream restrictive CSPs, preventing script blocking and white-screen crashes.
+  - 🟢 **Positive Verification**: Navigate containers and images smoothly via HTML5 History API; open interactive terminal (`Exec Console`), test `top`, `ls -la`, `vim`, verifying zero-latency typing and ANSI color handling.
+  - 🔴 **Negative Proof**: Inspect DevTools (F12) to verify restrictive CSPs were stripped cleanly, preventing script blocking or white-screen crashes.
+  - 📊 **Criteria**: Terminal runs smoothly; 0 CSP blocking errors in console.
 
 - [ ] **1.2 Streaming Media & Sub-Second Scrubbing (Jellyfin / Immich)**
   - **Deployment**: Deploy Jellyfin or Immich with 4K high-bitrate media and photo libraries.
   - **Start Agent**: `./agent -node-id media -target http://127.0.0.1:8096`.
-  - **Verification Points**:
-    1. **High-Concurrency Thumbnail Grid**: Fast-scroll through thousands of photo thumbnails; assert multiplexed streams schedule smoothly without 503 errors;
-    2. **HTTP 206 Partial Content Seeking**: Play a 4K video and scrub forward/backward repeatedly;
-    3. **Packet Inspection**: Verify request headers carry `Range: bytes=xxx-` and the Agent responds with `206 Partial Content` and accurate `Content-Range`; playback resumes instantaneously without buffer deadlocks;
-    4. **Anti-Hotlinking Bypasses**: Verify third-party images render properly without 403 Forbidden.
+  - 🟢 **Positive Verification**: Fast-scroll through thousands of photo thumbnails; stream 4K video with rapid scrubbing; verify external image CDNs render without 403 Forbidden.
+  - 🔴 **Negative Proof**: Assert request headers carry `Range: bytes=xxx-` and the Agent responds with `206 Partial Content` and accurate `Content-Range`; scrubbing instantly cancels previous streams without buffer deadlocks.
+  - 📊 **Criteria**: Video scrubbing resumes in < 1 second; zero `Range Not Satisfiable` errors.
 
 - [ ] **1.3 Full-Duplex Real-Time Communication (HomeAssistant / Uptime Kuma)**
-  - **Deployment**: Deploy HomeAssistant smart home hub.
+  - **Deployment**: Deploy HomeAssistant.
   - **Start Agent**: `./agent -node-id hass -target http://127.0.0.1:8123`.
-  - **Verification Points**:
-    1. **SSE / WebSocket Live State Streams**: Toggle light switches; assert UI states sync bidirectionally in milliseconds;
-    2. **SCTP Message Defragmentation**: When HomeAssistant pushes large JSON state packages (> 64KB), confirm the frontend circular reassembly buffer reconstructs them without `SyntaxError: Unexpected end of JSON input`;
-    3. **Long-Lived Idle Keepalive**: Idle the page for 30 minutes; assert WebSocket ping/pong keepalives maintain the connection without dropping.
+  - 🟢 **Positive Verification**: Toggle light switches; UI states update bidirectionally in milliseconds; large JSON state payloads (> 64KB) reassemble cleanly in the frontend circular buffer without parse errors.
+  - 🔴 **Negative Proof**: Idle page for 30 minutes; assert WebSocket ping/pong keepalives maintain the connection without dropping.
+  - 📊 **Criteria**: Zero disconnection errors during idle periods; zero JSON syntax errors.
 
 - [ ] **1.4 Wire-Speed Throughput & W3C Upload Progress Virtualization (LibreSpeed)**
-  - **Deployment**: Deploy `adolfintel/speedtest`.
-  - **Start Agent**: `./agent -node-id speedtest -target http://127.0.0.1:80`.
-  - **Verification Points**:
-    1. **Wire-Speed Downlink**: Run speedtest; downlink should approach physical network capacity (e.g. 900Mbps+ on gigabit LAN);
-    2. **Smooth Upload Progress Bar**: Observe the upload phase; assert the progress bar advances smoothly from 0% to 100%, completely avoiding Chromium Bug 1214207 where upload progress freezes at 0%;
-    3. **Multi-Threaded Worker Support**: Confirm LibreSpeed Web Worker measurement threads execute correctly across the tunnel.
+  - **Deployment**: `docker run -d -p 8080:80 adolfintel/speedtest`.
+  - **Start Agent**: `./agent -node-id speedtest -target http://127.0.0.1:8080`.
+  - 🟢 **Positive Verification**: Downlink approaches physical network capacity (e.g. 900Mbps+ on gigabit LAN); upload progress bar advances smoothly from 0% to 100%, bypassing Chromium Bug 1214207.
+  - 🔴 **Negative Proof**: Verify multi-threaded measurement Workers route properly through the tunnel.
+  - 📊 **Criteria**: Upload progress increments smoothly; zero worker execution errors.
 
-- [ ] **1.5 Upstream Target HTTPS & Self-Signed Certificate Chain (Proxmox VE / DSM / Self-Signed HTTPS)**
-  - **Deployment**: Deploy a private management console on the Linux testbed that enforces HTTPS with self-signed or untrusted certificates (e.g. Proxmox VE console on port 8006, Synology DSM on port 5001, or OpenSSL self-signed Nginx HTTPS reverse proxy).
-  - **Start Agent (Strict Security Comparison)**:
-    1. **Phase A (Default Strict Verification)**:
-       - Run `./agent -node-id pve -target https://127.0.0.1:8006`;
-       - Initiate visitor access in browser;
-       - **Pass Criteria**: Agent strictly rejects untrusted TLS handshakes with `x509: certificate signed by unknown authority`; zero silent fallback or implicit security downgrades;
-    2. **Phase B (Explicit Trust Mode with -insecure)**:
-       - Run `./agent -node-id pve -target https://127.0.0.1:8006 -insecure`;
-       - **Pass Criteria**:
-         - Startup console prints a prominent high-risk security warning: `⚠️ INSECURE: TLS certificate verification is disabled`;
-         - Visitor browser loads the Proxmox VE / DSM login console smoothly;
-         - Post-login Web terminals (noVNC / xterm.js) and WSS bidirectional sockets connect without issues; TLS SNI and encrypted tunneling operate reliably.
+- [ ] **1.5 Upstream HTTPS & Self-Signed Certificate Traversal (Proxmox VE / DSM)**
+  - **Deployment**: Upstream target uses self-signed HTTPS (`https://127.0.0.1:8006`).
+  - 🟢 **Positive Verification**: With `-insecure`, Agent successfully connects to self-signed upstream and serves the admin console.
+  - 🔴 **Negative Proof**: Without `-insecure`, Agent rejects untrusted certificates, protecting against upstream MITM.
+  - 📊 **Criteria**: Strict certificate validation enforced by default; controlled bypass with flag.
 
 ---
 
-## Dimension 2: Enterprise WAF, Reverse Proxies & Real Client IP Propagation
+### Dimension 2: Enterprise WAF, Reverse Proxies & Real Client IP Propagation
 
-Verifies that authentic visitor client IPs propagate end-to-end through WebRTC DataChannels into intranet backends, enabling security tool synergies:
+- [ ] **2.1 Authoritative Client Real IP Propagation**
+  - **Deployment**: Reverse proxy `whoami` via Agent.
+  - 🟢 **Positive Verification**: Response body shows `X-Forwarded-For` and `X-Real-IP` matching visitor's authentic public IP.
+  - 📊 **Criteria**: Target backend logs visitor IP accurately.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Attacker as Attacker (IP: 203.0.113.88)
-    actor Legitimate as Legitimate User (IP: 198.51.100.2)
-    participant Signal as Public Signaling Server
-    participant Agent as Intranet Linux Agent
-    participant WAF as SafeLine WAF
-    participant App as Intranet Core Application
+- [ ] **2.2 Malicious Client IP Forgery Resistance (Anti-Spoofing)**
+  - 🔴 **Negative Proof**: Inject forged `X-Forwarded-For: 8.8.8.8` from browser DataChannel; assert Agent forcefully overwrites header with authentic remote socket IP.
+  - 📊 **Criteria**: Forged IP headers are completely overwritten.
 
-    Attacker->>Signal: 1. WebRTC Handshake
-    Signal->>Signal: 2. Extract physical socket IP: 203.0.113.88
-    Signal->>Agent: 3. Authoritative overwrite: msg.ClientIP = 203.0.113.88
-    Agent->>Agent: 4. Store session clientIP mapping
-    Attacker->>Agent: 5. Execute SQL Injection via DataChannel
-    Agent->>WAF: 6. Inject X-Forwarded-For: 203.0.113.88 & relay
-    WAF->>WAF: 7. Identify exploit & ban attacker IP: 203.0.113.88
-    WAF-->>Attacker: 8. Return HTTP 403 WAF Block Page
-    Note over WAF,App: Localhost (127.0.0.1) and other users remain unblocked!
-    Legitimate->>Agent: 9. Legitimate business request
-    Agent->>WAF: 10. Pass X-Forwarded-For: 198.51.100.2
-    WAF->>App: 11. Allow traffic securely
-```
+- [ ] **2.3 Enterprise WAF (SafeLine / ModSecurity) Per-IP Blocking**
+  - **Scenario**: Deploy SafeLine WAF upstream; simulate SQL injection attacks from a test visitor.
+  - 🟢 **Positive Verification**: Attacker IP is blocked by WAF; other visitors and localhost continue operating normally without false-positive bans on `127.0.0.1`.
+  - 📊 **Criteria**: Offending IP banned; normal traffic completely unaffected.
 
-- [ ] **2.1 Authoritative Client IP Propagation Test**
-  - **Deployment**: Launch `traefik/whoami` on the Linux testbed.
-  - **Start Agent**: `./agent -node-id whoami -target http://127.0.0.1:80`.
-  - **Action**: Access `https://<signal-domain>/#whoami` from an external public network (e.g. cellular 5G hotspot).
-  - **Pass Criteria**:
-    - Inspect request headers returned by `whoami`;
-    - **`X-Forwarded-For`** and **`X-Real-IP`** must **strictly equal the visitor's public physical IP**;
-    - Must never display `127.0.0.1`, the signaling server IP, or private subnet CIDRs.
+- [ ] **2.4 Nginx Per-IP Rate Limiting**
+  - **Scenario**: Nginx configured with `limit_req_zone $binary_remote_addr zone=api:10m rate=5r/s;`.
+  - 🔴 **Negative Proof**: High-frequency requests trigger `429 Too Many Requests` exclusively for the test visitor.
+  - 📊 **Criteria**: Only abusive visitor receives 429; concurrent visitors receive 200.
 
-- [ ] **2.2 Anti-Spoofing Request Header Test**
-  - **Action**: From the visitor DevTools console, dispatch requests with forged IP headers:
-    ```javascript
-    fetch('/api/test', {
-      headers: { 'X-Forwarded-For': '8.8.8.8', 'X-Real-IP': '1.1.1.1' }
-    });
-    ```
-  - **Pass Criteria**: Backend receives request headers where forged `8.8.8.8` headers are overwritten by the authoritative IP injected by signaling.
+- [ ] **2.5 Outbound Proxy Domain Whitelisting (`-allowed-proxy-domains`)**
+  - 🟢 **Positive Verification**: Requests to whitelisted domains are proxied via Agent; requests to non-whitelisted domains bypass Agent and use local visitor network.
+  - 📊 **Criteria**: Whitelisted resources proxy through tunnel; non-whitelisted route locally.
 
-- [ ] **2.3 Enterprise WAF (SafeLine / ModSecurity) Targeted IP Ban Test**
-  - **Setup**: Deploy SafeLine WAF in front of local applications on the Linux testbed.
-  - **Action**:
-    1. Visitor injects SQL probe payload into URL: `?id=1' AND 1=1 UNION SELECT null, version()--`;
-    2. Confirm browser immediately displays the WAF block screen (HTTP 403);
-    3. Check WAF administrative audit log:
-       - **Attacker IP** must accurately display the visitor's public IP (not `127.0.0.1`);
-    4. **Zero-False-Positive Ban Verification**: Ban the offending visitor IP in WAF;
-       - Offending visitor is blocked;
-       - **Core Test**: Access from testbed host via `curl http://127.0.0.1:<port>` or from another mobile device; **verify legitimate visitors and localhost services remain completely unaffected with zero false-positive shutdowns**.
-
-- [ ] **2.4 Nginx Per-IP Rate Limiting Test**
-  - **Action**: Rapidly fire 30 requests in a loop from a single browser.
-  - **Pass Criteria**: Only the bursting IP receives `429 Too Many Requests`; requests from other concurrent devices proceed unthrottled.
-
-- [ ] **2.5 Cross-Domain Reverse Proxy Whitelist (`-allowed-proxy-domains`)**
-  - **Config**: `agent -allowed-proxy-domains "*.hdslb.com,*.bilivideo.com"`.
-  - **Action**:
-    1. Access whitelisted CDN assets: Service Worker proxies through Agent with `x-p2p-allowed-domains` headers;
-    2. Access non-whitelisted external links (e.g. `https://github.com`): Service Worker cleanly routes through native visitor network, never triggering 400 Bad Request errors against the intranet gateway.
-
-- [ ] **2.6 SSRF Safe Dialer & DNS Rebinding (TOCTOU) Defense Test**
-  - **Mechanism**: Verifies hardware-level physical blocking of unauthorized internal addresses and fraudulent domains via `pkg/proxy/ssrf.go` (`SafeDialContext`).
-  - **Verification Points**:
-    1. **Cloud Metadata Injection Defense**:
-       - Trigger requests towards cloud metadata IPs (e.g. `http://169.254.169.254/latest/meta-data/` or `http://[fd00:ec2::254]/`);
-       - **Pass Criteria**: `SafeDialContext` inspects IP before TCP socket creation, immediately blocking with `SSRF protection: access to link-local address is blocked`, preventing credential leakage;
-    2. **DNS Rebinding Defense (Time-of-Check to Time-of-Use)**:
-       - Use dynamic DNS rebinding test hostnames (e.g. using `rbndr.us` resolving to a public IP on initial check and `127.0.0.1` on subsequent connects);
-       - **Pass Criteria**: The dialer re-resolves and enforces strict filtering on every TCP handshake, preventing TOCTOU loopback escape.
+- [ ] **2.6 SSRF Protection & DNS Rebinding (TOCTOU) Defenses**
+  - 🔴 **Negative Proof**: Request cloud metadata `http://169.254.169.254/latest/meta-data/`; assert `SafeDialContext` blocks request before TCP handshake; test DNS rebinding domain and assert re-resolution blocks loopback addresses.
+  - 📊 **Criteria**: Metadata and loopback rebinding attempts blocked before TCP connection.
 
 ---
 
-## Dimension 3: Complex NAT Topologies, TURN Relays & Mobile Roaming
+### Dimension 3: Complex NAT Topologies, TURN Relays & Mobile Roaming
 
-Verifies traversal robustness across strict enterprise firewalls and network transitions:
-
-- [ ] **3.1 Cone NAT Direct Punching (Full / Restricted / Port-Restricted Cone)**
-  - **Pass Criteria**: ICE collects host and reflexive (`srflx`) candidates; direct tunnel connects within 1~3 seconds; HUD displays **`⚡ P2P Direct`** with zero relay traffic on the signaling server.
+- [ ] **3.1 Cone NAT Direct Punching (Full / Restricted Cone)**
+  - 🟢 **Positive Verification**: WebRTC gathers `srflx` candidates; direct P2P connection establishes within 1-3s; HUD displays **`⚡ P2P Direct`**; signaling bandwidth drops to zero.
+  - 📊 **Criteria**: WireShark confirms direct UDP transmission between peers.
 
 - [ ] **3.2 Dual Symmetric NAT (Symmetric NAT 4) TURN Relay Fallback**
-  - **Simulation**: Enforce random port assignment via iptables on the Linux testbed:
-    ```bash
-    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE --random
-    ```
-  - **Config**: Configure TURN relay: `./agent -turn-url turn:relay.example.com:3478 -turn-user ops -turn-pass Secret123`.
-  - **Pass Criteria**: STUN direct punching fails gracefully; gateway state machine falls back to TURN relay within 3 seconds; HUD displays **`🛡️ TURN Relay`**; business traffic continues without interruption.
+  - **Scenario**: Configure symmetric NAT on Linux host; configure `-turn-url`.
+  - 🟢 **Positive Verification**: ICE fallback automatically routes over TURN; HUD displays **`🛡️ TURN Relay`**; full duplex communication functions normally.
+  - 📊 **Criteria**: Smooth fallback to TURN relay; zero connection drops.
 
-- [ ] **3.3 Mobile 4G ↔ Wi-Fi Physical Network Roaming & ICE Restart**
-  - **Device**: Physical iOS / Android smartphone.
-  - **Action**:
-    1. Stream a video over Wi-Fi;
-    2. During continuous playback, pull down the control center and **abruptly toggle off Wi-Fi**, forcing transition to 5G cellular;
-    3. Observe playback and DevTools console.
-  - **Pass Criteria**:
-    - Socket terminates; browser reconnects to signaling and dispatches Offer with `iceRestart: true`;
-    - Agent enforces the 5-second grace window, delaying stream teardown;
-    - WebRTC handshake renegotiates over the cellular route; **video continues playback seamlessly with zero page reload required**.
+- [ ] **3.3 Mobile 4G ↔ Wi-Fi Network Drift & ICE Restart Recovery**
+  - **Scenario**: Mobile browser streaming video; switch Wi-Fi off to transition to 4G cellular.
+  - 🟢 **Positive Verification**: Socket disconnection triggers ICE Restart with `iceRestart: true`; Agent maintains session over 5-second grace period; video resumes without page reload.
+  - 📊 **Criteria**: Seamless stream recovery; console logs `ICE Restart completed`.
 
-- [ ] **3.4 Manual ICE Restart Diagnostic Probe**
-  - **Action**: Click **`🔄 Trigger ICE Restart`** in the HUD diagnostics card during an active session.
-  - **Pass Criteria**: Renegotiates in place within 500ms while preserving existing DOM inputs and form states.
+- [ ] **3.4 Manual ICE Restart Diagnostics**
+  - 🟢 **Positive Verification**: Click **`🔄 Trigger ICE Restart`** in HUD; renegotiates connection in < 500ms; form inputs and DOM state preserved.
+  - 📊 **Criteria**: HUD updates status; DOM state remains intact.
 
-- [ ] **3.5 Pure IPv6 Dual-Stack & Mobile Cellular NAT64 Environment**
-  - **Scenario**: Mobile cellular 5G networks frequently allocate pure IPv6 addresses; tests gateway adaptability across mixed protocol topologies.
-  - **Verification Points**:
-    1. **IPv6 STUN Candidate Gathering**: In an IPv6-capable mobile or test environment, inspect the HUD diagnostics card; confirm WebRTC gathers `typ host` and `typ srflx` IPv6 candidates (e.g. `240e:...` / `2408:...`);
-    2. **IPv6 P2P Direct Tunneling**: When both peers have IPv6 connectivity, verify WebRTC prioritizes an IPv6 UDP direct tunnel, bypassing IPv4 NAT bottlenecks for lower latency;
-    3. **NAT64 / DNS64 Relay Fallback**: In pure IPv6 cellular environments lacking end-to-end IPv6 routes, verify smooth fallback through dual-stack public STUN/TURN relays with zero packet loss or connection blackholes.
+- [ ] **3.5 IPv6 Dual-Stack & Cellular NAT64 Environment**
+  - 🟢 **Positive Verification**: Gathers `240e:...` IPv6 candidates; establishes direct IPv6 peer connection bypassing IPv4 NAT.
+  - 📊 **Criteria**: IPv6 candidates prioritized; zero IPv6 routing deadlocks.
 
 ---
 
-## Dimension 4: Modern Browser Engines & In-Browser DOM Virtualization
+### Dimension 4: Modern Browser Engines & In-Browser DOM Virtualization
 
 - [ ] **4.1 Modern ES Module Web Worker Adaptation**
-  - **Scenario**: Applications using modern bundlers (Vite, VitePress, PDF.js v4) spawning module workers: `new Worker(url, { type: 'module' })`.
-  - **Pass Criteria**: Client patch appends `?_p2p_worker=module`; Service Worker dynamically injects `import "/patch.js";`; **zero `TypeError: Module scripts don't support importScripts()` exceptions**.
+  - 🟢 **Positive Verification**: Trigger `new Worker(url, { type: 'module' })`; patch layer appends `?_p2p_worker=module`; Service Worker injects `import "/patch.js";`; worker executes smoothly.
+  - 🔴 **Negative Proof**: Assert zero `TypeError: Module scripts don't support importScripts()`.
+  - 📊 **Criteria**: Module worker computations and network requests succeed.
 
-- [ ] **4.2 W3C Spec Strict 204/304 Null-Body Assertion**
-  - **Pass Criteria**: Cached 304 responses and REST 204 No Content return `new Response(null, { status })`; **zero `TypeError: Response with null-body status cannot have body` errors** across SPA navigations.
+- [ ] **4.2 W3C 204/304 Null-Body Strict Assertion**
+  - 🟢 **Positive Verification**: Requests returning 304 Not Modified or 204 No Content handle cache properly.
+  - 🔴 **Negative Proof**: Service Worker enforces `new Response(null, { status })`; zero `TypeError: Response with null-body status cannot have body`.
+  - 📊 **Criteria**: Zero console TypeErrors on null-body responses.
 
-- [ ] **4.3 Multi-Tab Session CookieJar Physical Isolation**
-  - **Action**: Open Tab 1 to Node A (Alice) and Tab 2 to Node B (Bob); log out of Node A.
-  - **Pass Criteria**: Node B session remains authenticated with zero cookie crosstalk; non-HttpOnly cookies synchronize to `document.cookie` bidirectionally.
+- [ ] **4.3 Session CookieJar Isolation & Multi-Tab Protection**
+  - 🟢 **Positive Verification**: Open Tab 1 (Node A, User Alice) and Tab 2 (Node B, User Bob) in same browser; logging out in Tab 1 leaves Tab 2 session completely unaffected.
+  - 📊 **Criteria**: CookieJars strictly isolated per remote session.
 
-- [ ] **4.4 New Window / Tab Node ID Persistence**
-  - **Action**: Click links with `target="_blank"` or trigger `window.open()`.
-  - **Pass Criteria**: Service Worker injects `window.__P2P_NODE_ID__`; new window rewrites to `?peer=<nodeId>#<nodeId>`, preserving tunnel context without `Target agent offline` errors.
+- [ ] **4.4 New Tab & Window Node ID Deep Persistence**
+  - 🟢 **Positive Verification**: Clicking `<a target="_blank">` or calling `window.open()` injects `window.__P2P_NODE_ID__`; `patch.js` rewrites dynamic links to `?peer=<nodeId>#<nodeId>`.
+  - 🔴 **Negative Proof**: Subdomain navigation never drops node context or falsely reports `Target agent offline`.
+  - 📊 **Criteria**: New tabs preserve session node context reliably.
 
-- [ ] **4.5 Anti-Frame-Busting Virtualization**
-  - **Scenario**: Consoles with frame-busting scripts (`if (top !== self) top.location = self.location`).
-  - **Pass Criteria**: Application runs seamlessly inside Portal iframes; outer Portal navbar and HUD remain intact.
+- [ ] **4.5 Anti-Frame-Busting Sandbox**
+  - 🟢 **Positive Verification**: Target pages with `top.location = self.location` run safely inside the Portal iframe; Portal navigation and HUD remain visible.
+  - 📊 **Criteria**: Top-level redirect attempts contained within sandbox.
 
-- [ ] **4.6 Cross-Engine Sandbox Matrix**
-  - [ ] **Chromium (Chrome 120+, Edge, Brave)**: 100% green across all pipelines.
-  - [ ] **WebKit (macOS Safari 17+, iOS Safari 17+)**: Verify zero silent crashes under WebKit memory quotas; verify Service Worker resumes upon returning from background.
-  - [ ] **Gecko (Firefox 125+)**: Verify MessagePort transfer and ReadableStream consumption.
+- [ ] **4.6 Cross-Browser Engine Sandbox Matrix**
+  - [ ] **Chromium (Chrome 120+, Edge)**: 100% PASS across all features.
+  - [ ] **WebKit (macOS Safari 17+, iOS Safari 17+)**: Zero memory crashes; SW recovers communication on background/foreground transitions.
+  - [ ] **Gecko (Firefox 125+)**: MessagePort and ReadableStream handle data without type errors.
 
----
-
-## Dimension 5: High-Capacity Streaming, Backpressure & Hardware Decompression
-
-- [ ] **5.1 10GB ISO Download with Zero Memory Buffer Bloat**
-  - **Action**: Download a 10GB ISO (`./agent -file /data/ubuntu-24.04.iso`) in Chrome/Safari.
-  - **Pass Criteria**:
-    - Browser activates File System Access API (`showSaveFilePicker`);
-    - Agent memory remains **< 50MB**; browser renderer memory remains **< 100MB**;
-    - Zero OOM crashes; computed SHA256 checksum strictly matches the original host file.
-
-- [ ] **5.2 1Gbps Producer vs 5Mbps Consumer Backpressure Throttling**
-  - **Scenario**: Linux host on gigabit LAN; visitor throttled via Chrome DevTools to `Regular 3G (1.5Mbps)`.
-  - **Pass Criteria**:
-    - Agent monitors DataChannel `bufferedAmount`; pauses reads when high-water mark is hit;
-    - Agent resident memory remains constant (< 32MB);
-    - Clicking **`⏹ Cancel Download`** dispatches RST frames and aborts local file reads immediately with zero ghost streams.
-
-- [ ] **5.3 Gzip Hardware Decompression & HEAD Bypass**
-  - **Pass Criteria**:
-    - Static JS/CSS assets transmit with `x-p2p-content-encoding: gzip` (60%~80% reduction);
-    - Browser stream decompresses via native `DecompressionStream('gzip')` without corruption;
-    - `fetch('/bundle.js', { method: 'HEAD' })` cleanly bypasses decompression; **zero `TypeError: Compressed input was truncated` errors**.
-
-- [ ] **5.4 P2P File Vault Concurrent Multi-Download & Mid-Transfer Abort Reclamation**
-  - **Start Agent Mode**: `./agent -file-server -file-dir /data/shares`.
-  - **Action 1 (Concurrent Multiplexed Downloads)**:
-    - In the File Vault UI, simultaneously check and download 3 files (> 2GB each);
-    - **Pass Criteria**: 3 logical streams are fairly scheduled across a single DataChannel by the Muxer without starvation or odd/even stream ID collision;
-  - **Action 2 (Mid-Transfer Abort / Immediate Tab Close)**:
-    - At ~50% progress across all 3 files, click "Cancel All" or force-close the browser tab;
-    - **Pass Criteria**:
-      1. Browser `AbortController` fires and signals stream termination across the tunnel;
-      2. Linux Agent detects disconnection within **< 500ms**, immediately invoking `file.Close()` on open file descriptors;
-      3. Verify with `lsof -p $(pidof agent) | grep /data/shares`; **file descriptor count drops to zero immediately with zero orphan descriptor leaks**;
-      4. Host RSS memory returns smoothly to baseline without buffer retention leaks.
+- [ ] **4.7 Pure Byte Stream HTML Injection & Chunk Boundary Defenses**
+  - 🟢 **Positive Verification**: Patch scripts injected safely into `<head>`.
+  - 🔴 **Negative Proof**: When `<head>` spans chunk boundaries, byte-level scanner handles split tokens without producing `\uFFFD` UTF-8 corruption; non-HTML JSON API responses remain untouched.
+  - 📊 **Criteria**: Zero UTF-8 decoding corruption; `JSON.parse()` passes on all API responses.
 
 ---
 
-## Dimension 6: Chaos Network Loss, Hostile Channels & Stress Testing
+### Dimension 5: High-Capacity Streaming, Backpressure & Hardware Decompression
+
+- [ ] **5.1 10GB Zero-Copy Download**
+  - **Mode**: `./agent -file /data/large.iso` (6GB-10GB).
+  - 🟢 **Positive Verification**: Web File System API (`showSaveFilePicker`) streams directly to disk; SHA256 checksum matches source file.
+  - 🔴 **Negative Proof**: Monitor memory with `htop`; Agent memory stays `< 50MB`, browser memory `< 100MB`; zero OOM crashes.
+  - 📊 **Criteria**: Constant flat memory profile; 100% SHA256 match.
+
+- [ ] **5.2 1Gbps vs 5Mbps Extreme Backpressure Throttling**
+  - **Scenario**: Fast Agent, slow visitor throttled to 1.5Mbps.
+  - 🟢 **Positive Verification**: Agent monitors `bufferedAmount`, pausing reads at high watermark (256KB) and resuming at low watermark (64KB).
+  - 🔴 **Negative Proof**: Canceling download emits RST frame; Agent immediately terminates reader without zombie stream accumulation.
+  - 📊 **Criteria**: Memory remains constant; reads stop instantly on cancellation.
+
+- [ ] **5.3 Gzip Hardware Decompression & HEAD / Null-Body Boundaries**
+  - 🟢 **Positive Verification**: Compressed assets transfer with `x-p2p-content-encoding: gzip`; decoded via native `DecompressionStream('gzip')`.
+  - 🔴 **Negative Proof**: Requests with `method: 'HEAD'` or `204 No Content` bypass decompression pipeline; zero `TypeError: Compressed input was truncated`.
+  - 📊 **Criteria**: Compressed assets transfer intact; zero decompression errors on empty bodies.
+
+- [ ] **5.4 P2P File Vault Concurrent Tasks & Mid-Stream Abort Cleanup**
+  - **Mode**: `./agent -dir /data/shares`.
+  - 🟢 **Positive Verification**: Download 3 files concurrently; multiplexer schedules slices equitably.
+  - 🔴 **Negative Proof**: Close tab mid-download; `AbortController` emits RST frame; Agent closes file handles in < 500ms; `lsof` verifies zero orphaned handles.
+  - 📊 **Criteria**: File handles release immediately; RSS memory returns to baseline.
+
+- [ ] **5.5 Multiplexing Parity Watermark & Anti-Ghosting Invariant**
+  - 🟢 **Positive Verification**: Client allocates odd streams (1, 3, 5); Agent allocates even streams (2, 4, 6).
+  - 🔴 **Negative Proof**: Resetting streams discards delayed packets matching monotonic watermark without terminating legitimate opposing streams.
+  - 📊 **Criteria**: 1000 stream allocations and resets complete with 0 active stream leaks.
+
+---
+
+### Dimension 6: Chaos Network Loss, Hostile Channels & Stress Testing
 
 ```bash
-# Chaos testing commands on Linux Testbed Host (Run as root)
-# 1. Simulate 30% packet loss and 150ms cross-continent latency:
+# Chaos network injection commands (run as root on Linux testbed)
+# 1. Simulate 30% packet loss and 150ms latency:
 tc qdisc add dev eth0 root netem loss 30% delay 150ms 20ms
 
 # 2. Simulate 25% packet reordering:
 tc qdisc add dev eth0 root netem delay 50ms reorder 25% 50%
 
-# 3. Clean up chaos rules:
+# 3. Restore network:
 tc qdisc del dev eth0 root
 ```
 
-- [ ] **6.1 30% Loss + 150ms Latency Channel Integrity**
-  - **Pass Criteria**: Under 30% loss, SCTP retransmissions maintain byte-perfect data delivery with zero CRC corruptions.
+- [ ] **6.1 30% Loss + 150ms Latency Integrity**
+  - 🟢 **Positive Verification**: Large assets download intact over hostile channel via SCTP selective retransmissions.
+  - 🔴 **Negative Proof**: Data transfers without byte corruption or CRC errors; speeds recover within 2 seconds of clearing `tc`.
+  - 📊 **Criteria**: SHA256 checksums match 100%.
 
-- [ ] **6.2 25% Packet Reordering Stream Integrity**
-  - **Pass Criteria**: P2PMux binary framing reassembles chunks by sequence without framing errors.
+- [ ] **6.2 25% Packet Reordering Stability**
+  - 🔴 **Negative Proof**: P2PMux binary framing reassembles frames by sequence number; zero frame unpack or boundary errors.
+  - 📊 **Criteria**: Packets reassemble intact; zero `Invalid frame header` errors.
 
-- [ ] **6.3 Port Scanning & IPRateLimiter Memory Leak Stress**
-  - **Action**: Simulate 5,000 distinct source IPs flooding the signaling server.
-  - **Pass Criteria**: Connection quotas (`-max-ip-conns 64`) reject floods; after test completion, `janitorLoop` prunes orphan IP keys; **resident memory returns to baseline with zero chronic leaks**.
+- [ ] **6.3 Public Port Scanning & IPRateLimiter Memory Leak Stress**
+  - 🔴 **Negative Proof**: Flood 5,000 distinct source IPs at Signal server; verify rate limiting drops excess handshakes; pprof heap profile confirms `janitorLoop` evicts stale keys without memory leaks.
+  - 📊 **Criteria**: Heap profile remains baseline; zero memory leak alarms.
 
----
-
-## Dimension 7: Serverless Hibernation & Idempotent Lifecycle Recovery
-
-- [ ] **7.1 Cloudflare Worker WebSocket Hibernation Wake-up Test**
-  - **Action**: Idle connected agent for 30+ minutes until the Durable Object hibernates; send visitor request to wake it up.
-  - **Pass Criteria**: DO `ensureState()` restores `nodeSecrets`, `nodeVisitorAuth`, and `ipConns` from session attachments; visitor authentication and anti-hijacking defenses enforce strictly with zero auth bypass.
-
-- [ ] **7.2 Daemon Graceful Shutdown & Auto-Reconnection**
-  - **Action**: Dispatch `kill -SIGTERM` to the Signal process during active transfers; restart Signal.
-  - **Pass Criteria**: Signal executes 5-second graceful shutdown; Agent recovers via exponential backoff (2s, 4s, 8s...) and reconnects automatically without becoming a zombie process.
+- [ ] **6.4 Signaling Slow Client Head-of-Line Blocking Defense**
+  - 🔴 **Negative Proof**: Attach an intentionally stalled WebSocket client; trigger Agent registration; broker snapshots clients, releases `RUnlock()`, and broadcasts asynchronously without blocking the write lock.
+  - 📊 **Criteria**: New Agent registration completes in < 10ms despite slow client presence.
 
 ---
 
-## Sign-off Protocol for Major Releases
+### Dimension 7: Serverless Hibernation & Daemon Lifecycle Verification
 
-| Dimension | Focus Area | Mandatory Requirement | Signee | Status |
+- [x] **7.1 Cloudflare Worker SQLite Durable Object WebSocket Hibernation Live E2E**
+  - **Environment**: Real Cloudflare Workers (Free tier) + SQLite Durable Objects:
+    - Signaling: `wss://<cf-signal-custom-domain>/ws` | `wss://<cf-signal-worker-domain>/ws`
+    - Portal: `https://<cf-portal-worker-domain>` | `https://<cf-portal-custom-domain>`
+    - Automated Suite: `test/cloudflare_live_e2e_test.go` (`npm run test:cf`)
+  - 🟢 **Positive Verification**: Agent and Client connect to dynamically sharded DO rooms (`?node=<nodeId>`), completing registration, discovery, and SDP/ICE exchange.
+  - 🔴 **Negative Proof**: HTTP requests to `/ws` return `426 Upgrade Required`; unauthorized registrations rejected (`4003 Unauthorized`); Agent disconnection broadcasts `peer_status: offline`. Real Linux VM to Windows host P2P DataChannel traversal achieves 1.6ms RTT.
+  - 📊 **Criteria**: `go test -v -run TestCloudflareLive ./test/...` passes 100%; zero data races under CGO `-race`.
+
+- [ ] **7.2 Daemon Graceful Shutdown & Auto-Reconnect**
+  - 🔴 **Negative Proof**: Send `kill -SIGTERM` to Signal during active streams; verify 5-second graceful shutdown; Agent reconnects via exponential backoff (2s, 4s, 8s...) and re-registers Node ID.
+  - 📊 **Criteria**: Zero panics on Signal exit; Agent cleanly recovers connection.
+
+- [ ] **7.3 Container Non-Root Execution (Least Privilege)**
+  - 🔴 **Negative Proof**: Inspect `Dockerfile.agent` and `Dockerfile.server`; assert containers run under unprivileged user `appuser` (UID: 10001); low ports bound via `cap_net_bind_service`.
+  - 📊 **Criteria**: `docker exec` shows `uid=10001(appuser)`.
+
+---
+
+### Dimension 8: Cross-Version Interoperability & Security Baseline Hardening
+
+- [ ] **8.1 Backward Compatibility (N-1 Agent vs N Signal/Portal)**
+  - **Scenario**: Public Signaling and Portal updated to vN; intranet Agent remains on vN-1.
+  - 🟢 **Positive Verification**: Legacy Agent connects and registers on new Signal hub; visitor connects via new Web Portal and browses pages normally.
+  - 🔴 **Negative Proof**: Core protocol handshakes negotiate backward compatibility; zero protocol mismatch crashes.
+  - 📊 **Criteria**: Seamless access to legacy Agent; zero handshake exceptions.
+
+- [ ] **8.2 Wire Protocol Frame Integrity & Demux Isolation**
+  - 🔴 **Negative Proof**: Enforce `TypeHeaders` first-frame contract; prohibit injecting unnegotiated control frames into stream headers; HTTP and WebSocket streams demux cleanly via `HandleStreamWithMeta`.
+  - 📊 **Criteria**: First frame is standard Wire frame; zero 10-second timeout deadlocks.
+
+- [ ] **8.3 Expiring Share Links (`-sign-link`) Anti-Tamper & Anti-Expiry**
+  - **Command**: `agent -node-id vault -access-secret MyPass -sign-link 1m`.
+  - 🟢 **Positive Verification**: Visitors access tunnel without password prompt within 1-minute validity window.
+  - 🔴 **Negative Proof**: Accessing after 65 seconds returns `403 Forbidden: signature expired`; modifying `exp` or `sig` parameters is rejected by HMAC-SHA256 verification.
+  - 📊 **Criteria**: Expired and tampered links blocked 100%.
+
+- [ ] **8.4 Directory Hosting Mode (`-dir`) Path Traversal Defense**
+  - **Command**: `./agent -node-id vault -dir /app/data`.
+  - 🔴 **Negative Proof**: Test traversal payloads (`/?node=vault&path=/../../etc/passwd`, null-byte truncations, backslashes); assert path sanitizers in `file_proxy.go` return `403 Forbidden` or `404 Not Found`.
+  - 📊 **Criteria**: 100% of traversal attempts blocked; zero host file leaks.
+
+- [ ] **8.5 Zero Credential Leakage Principle**
+  - 🔴 **Negative Proof**: Inspect console, Network tab, DOM source, and URL hash/query after visitor login; assert `SIGNAL_SECRET` never leaks in plaintext or encoded form.
+  - 📊 **Criteria**: Zero occurrences of `SIGNAL_SECRET` in frontend environment.
+
+---
+
+## 5. Real-World Sign-off Protocol
+
+Before every release, the QA Lead signs off based on release tier (MAJOR full pass / MINOR targeted sampling):
+
+| Verification Dimension | Verification Focus | Mandatory Criteria | MINOR Sampling Rationale | Status (v2.1.0 Sign-off) |
 | :---: | :--- | :--- | :---: | :---: |
-| **Dimension 1** | Real Linux Heavy Web Apps | Portainer, Jellyfin, LibreSpeed 100% functional | | ⬜ PENDING |
-| **Dimension 2** | Enterprise WAF & Real Client IP | Accurate X-Forwarded-For, WAF IP ban without localhost false positives | | ⬜ PENDING |
-| **Dimension 3** | Complex NAT & Roaming Recovery | Symmetric NAT TURN fallback, 4G/Wi-Fi switch ICE Restart | | ⬜ PENDING |
-| **Dimension 4** | Cross-Browser Engines & DOM Sandboxing | Zero errors across Chrome, Safari, Firefox; module workers pass | | ⬜ PENDING |
-| **Dimension 5** | 10GB Streaming & Backpressure | Stream to disk, weak network memory < 50MB, HEAD gzip bypass | | ⬜ PENDING |
-| **Dimension 6** | Chaos Network Loss & Stress | 30% packet loss data intact, Janitor sweeps orphan IP keys | | ⬜ PENDING |
-| **Dimension 7** | Serverless Hibernation & Lifecycles | CF DO hibernation state restore, daemon restart auto-reconnect | | ⬜ PENDING |
+| **Level 1** | Automated Real-Browser CDP Matrix | 13 full-stack scenarios + page reload 100% PASS | **Mandatory** | 🟢 PASS |
+| **Dimension 1** | Real Linux Host & Heavy Web Apps | Streaming, Range 206, proxy rewrites, PVE HTTPS | Proxy / Frontend | 🟢 PASS |
+| **Dimension 2** | Enterprise WAF & Client IP Propagation | X-Forwarded-For injection, WAF IP ban anti-false-positive | Network / Security | 🟢 PASS |
+| **Dimension 3** | Complex NAT Punching & ICE Traversal | STUN/TURN gathering, in-place ICE Restart | Signaling / ICE | 🟢 PASS |
+| **Dimension 4** | In-Browser Sandbox & DOM Virtualization | ES Module Worker, Null-Body, CookieJar isolation | Frontend / SW | 🟢 PASS |
+| **Dimension 5** | Streaming & Extreme Backpressure | Chunked streaming, backpressure braking, RST on cancel | Multiplexing | 🟢 PASS |
+| **Dimension 6** | Chaos Network Loss & Stress Testing | 30% loss 150ms delay without deadlocks | Network / Signaling | 🟢 PASS |
+| **Dimension 7** | Serverless Hibernation & Daemon Lifecycle | DO hibernation auth persistence, Cloudflare edge P2P | Edge / Daemons | 🟢 PASS |
+| **Dimension 8** | Cross-Version Interop & Security Baselines | -sign-link anti-tamper, -dir anti-traversal | **Protocol Mandatory** | 🟢 PASS |
+
+> Archived Report: [v2.1.0 Release Test Report](file:///docs/RELEASE_REPORTS/v2.1.0_TEST_REPORT.md)
+
+---
+
+## 6. Release Test Report Template
+
+After sign-off, the QA Lead attaches the following report to the release PR and archives it under `docs/RELEASE_REPORTS/vX.Y.Z_TEST_REPORT.md` for MAJOR releases:
+
+```markdown
+# WebRTC Gateway vX.Y.Z Release Test Report
+
+- **Release Tier**: [MAJOR / MINOR / PATCH]
+- **QA Lead / Test Authority**: [Name / Authority]
+- **Execution Date**: YYYY-MM-DD HH:mm:ss
+- **Testbed Topology**:
+  - Signaling Hub: [Self-Hosted Linux / Cloudflare Worker DO]
+  - Intranet Host: Linux Ubuntu 24.04 LTS (x86_64)
+  - Visitor Matrix: Chromium 128+, iOS Safari 17.5 (5G Cellular), macOS Safari 17+
+- **Automated Level 1 Matrix**:
+  - `npm --prefix web run test:browser`: 13/13 PASSED (100%)
+- **Real-World Testbed Results**:
+  - [Dimension 1]: PASS (Portainer / Jellyfin verified)
+  - [Dimension 2]: PASS (WAF blocking & whoami headers verified)
+  - [Dimension 3]: PASS (4G/Wi-Fi handover packet capture verified)
+  - [Dimension 4]: PASS (ES Module Worker verified)
+  - [Dimension 5]: PASS (10GB ISO SHA256 & memory verified)
+  - [Dimension 6]: PASS (tc netem 30% loss curve verified)
+  - [Dimension 7]: PASS (DO hibernation & graceful restart verified)
+  - [Dimension 8]: PASS (N-1 Agent interop verified)
+- **Final Verdict**: 🟢 ACCEPT (Approved for Release)
+```

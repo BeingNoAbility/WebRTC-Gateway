@@ -113,7 +113,7 @@ export default withMermaid(
               items: [
                 { text: 'Overview & Quickstart', link: '/en/guide/' },
                 { text: 'Architecture & Design', link: '/en/guide/architecture' },
-                { text: 'P2PMux Wire Protocol Specification', link: '/guide/protocol-specification' },
+                { text: 'P2PMux Wire Protocol Specification', link: '/en/guide/protocol-specification' },
                 { text: 'Browser Compatibility', link: '/en/guide/browser-compatibility' },
               ],
             },

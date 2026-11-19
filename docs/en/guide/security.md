@@ -98,3 +98,71 @@ Starting with **v1.8.0**, the gateway provides end-to-end client IP transparency
 - **Targeted IP Blacklists**: SafeLine, Nginx WAF, and ModSecurity accurately block malicious public IPs without mistakenly banning `127.0.0.1`;
 - **Per-IP Rate Limiting**: HTTP 429 throttling applies specifically to the offending visitor IP;
 - **GeoIP & Compliance Auditing**: Internal backend access logs record authentic visitor geolocation.
+
+### ③ In-Place ICE Restart Roaming Update
+- When mobile visitors switch between Wi-Fi and 5G cellular networks, in-place ICE Restart keeps the DataChannel alive while the Agent dynamically refreshes the bound public IP, ensuring downstream requests immediately inherit the updated IP for WAF auditing.
+
+---
+
+## 6. Universal Security Hardening & Attack Surface Convergence (v1.8.1)
+
+Starting with **v1.8.1**, the gateway implements comprehensive defense-in-depth measures:
+
+### ① Portal Web Console DOM XSS Prevention
+- **Strict Character Set Whitelist**: Node IDs across URL hash, query parameters, subdomains, and local storage must conform to `/^[a-zA-Z0-9._-]{1,64}$/`. Non-compliant inputs are rejected and safely sanitized;
+- **Native DOM Attribute Binding**: Settings modals avoid template string HTML concatenation, using standard DOM property assignments (`input.value = ...`) and HTML entity escaping.
+
+### ② Principle of Least Privilege for Secret Handling (PoLP)
+- Removed `window.__P2P_SECRET__` injection into proxied HTML pages, preventing upstream scripts from sniffing credentials;
+- Stripped `?secret=` exposure from URL query parameters, iframe broadcasts, and signaling join handshakes.
+
+### ③ `/--p2p-proxy/` Outbound Proxy Security Convergence
+- Deprecated fuzzy suffix heuristic matching (`.mp4` bypass) in favor of strict origin and subdomain boundary checks;
+- Restricts proxying to same-origin and parent-domain subdomains by default, offering an `-allowed-proxy-domains` wildcard whitelist for legitimate external CDNs;
+- Completely decoupled `-proxy` from the signaling transport to prevent local reverse-proxy pollution.
+
+### ④ Sliding Window Brute-Force Defense & Endpoint Hardening
+- Enforced sliding-window `IsLocked` circuit breaking during WebSocket handshakes, terminating connections on repeated auth failures;
+- Removed unauthenticated `list_nodes` endpoints from edge Cloudflare Workers.
+
+---
+
+## 7. Control Plane & Data Plane Resource Governance (v2.2 Defenses)
+
+Starting with **v2.2.0**, the gateway enforces strict quota governance and anti-DoS controls across signaling and data planes:
+
+### ① Cross-Site WebSocket Hijacking Defense & Origin Whitelisting (CSWSH)
+- **Browser Origin Enforcement**: For browser clients carrying `Origin` headers (Web Portal / visitors), the signaling server validates against an explicit `-allowed-origins` / `SIGNAL_ALLOWED_ORIGINS` whitelist. Wildcard subdomains (`https://*.pages.dev`) and port wildcards (`http://localhost:*`) are supported, with non-whitelisted origins rejected with `HTTP 403 Forbidden`;
+- **Automatic Same-Origin Trust**: Matches where `Origin` equals the current signaling `Host` are trusted by default to avoid configuration friction;
+- **Independent Native CLI Access**: Native CLI Agents and curl commands do not transmit `Origin` headers. The signaling server safely permits the WebSocket upgrade and delegates authentication to `SIGNAL_SECRET` HMAC anti-replay checks;
+- **Backward-Compatible Safety Valve**: When no whitelist is configured, connections are permitted with an audit notice to prevent service disruptions on upgraded installations.
+
+### ② Control Plane Session Quotas & Janitor Anti-DoS
+- **Per-Session Candidate Forwarding Cap**: ICE candidate forwarding per session is bounded to **32 candidates**, aligning with the Agent-side `MaxCandidatesPerSession = 32` quota to discard excess candidates;
+- **Offline Waiting Queue Bound**: When a target Agent is offline, pending visitor queues are capped at **128 visitors** per node, preventing unbounded half-open session memory leaks;
+- **Half-Open SDP Handshake Janitor**: A background cleanup loop automatically closes connections and releases resources if an Offer does not receive an Answer within 30 seconds.
+
+### ③ Mux Global Inbound Memory Budget & Physical Backpressure
+- **128MB Global Memory Budget**: Implements a global inbound memory ceiling (default 128MB) at the multiplexing layer to prevent slow consumers from exhausting Agent memory across concurrent streams;
+- **Dual-Watermark SCTP a_rwnd Throttling**: When inbound buffers reach the 96MB high watermark, frame consumption pauses, naturally exhausting the transport-layer SCTP receive window (`a_rwnd`) and throttling remote sender transmission. Processing resumes when buffers drain below the 64MB low watermark;
+- **Targeted Reset & Zero-Leak Accounting**: Streams stalling under backpressure beyond 3 seconds are isolated and terminated with `RST_STREAM` without impacting sibling streams. Draining and resets atomically decrement buffer counters to zero.
+
+### ④ Production Security Warning Banner
+- **Unprotected Mode Warnings**: When Signal or Agent launches without `SIGNAL_SECRET` or `ACCESS_SECRET`, the console emits high-contrast security warnings detailing potential risks of open registration or unauthorized access;
+- **TTY Detection**: Automatically detects interactive terminal sessions to display ANSI high-contrast highlights, while stripping escape codes in non-interactive environments (Docker, Kubernetes, redirects) to ensure clean log collection.
+
+---
+
+## 8. Design Philosophy & Security Boundaries
+
+To maintain core system agility and lightweight operational characteristics, the project strictly adheres to two fundamental architectural boundaries:
+
+### ① Stateless Transport Gatekeeper
+- `-access-secret` and HMAC expiring signatures function strictly as **L4/L7 network-level P2P tunnel admission controls**;
+- Their purpose is to prevent unauthorized visitors from opening WebRTC physical tunnels using fast mathematical verification (HMAC-SHA256) without database or Redis dependencies;
+- **Separation of Application Concerns**: Fine-grained user accounts, multi-tenant RBAC, OAuth2/OIDC single sign-on, and per-session revocations belong to upstream intranet web services (Nextcloud, Jellyfin, Vaultwarden) or dedicated authentication proxies (Authelia, Keycloak). The gateway does not act as a bloated centralized identity provider.
+
+### ② Native SSRF Immunity by Design
+- The Agent daemon employs **strict unidirectional target binding** (`-target http://127.0.0.1:8080`, `-dir`, or `-file`);
+- Once a tunnel is established, visitor HTTP requests are strictly routed to the predetermined target; the Agent never permits arbitrary destination IP or outbound URL proxying;
+- As a result, the gateway is **natively immune to SSRF (Server-Side Request Forgery)** at the topology level, avoiding fragile and complex internal IP/CIDR filtering.

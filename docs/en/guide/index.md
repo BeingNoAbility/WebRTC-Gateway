@@ -20,6 +20,7 @@ This project introduces a zero-client browser-based WebRTC penetration architect
 | Topic | Overview | Audience |
 | :--- | :--- | :--- |
 | **[Architecture & Design](./architecture)** | P2PMux v1 binary framing protocol, Service Worker interception, DOM virtualization monkey patches, and isolated CookieJars. | Architects & Developers |
+| **[P2PMux Wire Protocol Specification](./protocol-specification)** | 10-byte fixed header, stream parity invariants, state machines, 32KB runtime memory alignment, and SCTP backpressure. | Protocol Implementers & Systems Engineers |
 | **[Production Deployment](./deployment)** | Cloudflare Workers edge deployment, single self-contained Go binaries, and Docker / Docker Compose orchestration. | DevOps & Self-Hosters |
 | **[Agent Configuration](./agent-configuration)** | Complete CLI flags, environment variables, YAML configuration templates, and priority resolution. | All Users & NAS Admins |
 | **[P2P File & Directory Server](./file-server)** | Zero-port in-memory file sharing, private lightweight file delivery, and static directory hosting. | All Users & Collaborators |

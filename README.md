@@ -115,13 +115,14 @@ sequenceDiagram
 | 专题模块 | 核心内容概述 | 快速链接 |
 | :--- | :--- | :--- |
 | **系统架构与协议原理** | 深入理解 P2PMux v1 二进制分帧协议、浏览器 Service Worker 透明拦截、DOM 虚拟化补丁与独立 CookieJar 机制 | [架构与设计原理](./docs/guide/architecture.md) |
+| **P2PMux 协议形式化规约** | 10 字节定长帧头、奇偶流分配律、状态机模型、32KB 内存阶梯对齐、SCTP 接收窗口背压与跨端测试向量 | [协议形式化规约](./docs/guide/protocol-specification.md) |
 | **生产部署完全手册** | Cloudflare Workers 边缘免服务器部署、自建 Linux/Windows 单二进制守护进程、Docker Compose 编排与非特权容器加固 | [生产部署指南](./docs/guide/deployment.md) |
 | **配置参数完全字典** | Agent 与 Signal 全量 40+ 命令行参数、环境变量、配置优先级机制与 YAML/JSON 模板 | [配置完全手册](./docs/guide/agent-configuration.md) |
 | **安全机制与访问控制** | 控制面与数据面密钥物理隔离、HMAC-SHA256 无状态时效安全分享、路径穿越防御与真实客户端 IP 透传 | [安全与权限控制](./docs/guide/security.md) |
 | **P2P 文件与目录服务** | 纯内存零端口监听文件分发、大文件流式断点续传与现代化暗黑风文件树只读托管 | [文件与目录服务](./docs/guide/file-server.md) |
 | **跨浏览器兼容性矩阵** | Chrome、Edge、Firefox (Tier 1) 与 iOS Safari/WebKit (Tier 2) 深度适配说明与后台挂起自愈流水线 | [浏览器兼容性矩阵](./docs/guide/browser-compatibility.md) |
 | **故障排查与常见问题** | 对称型 NAT (NAT 4) 穿透诊断、TURN 降级中继配置、自签 HTTPS 证书与移动漫游排障 FAQ | [故障排查与 FAQ](./docs/guide/troubleshooting.md) |
-| **工程规范与审计门禁** | 文档与文案工程规范、辩证审查 5 大不变量、全息实战 7 大维度测试清单、正式发版核验红线 | [工程规范与门禁清单](./docs/STYLE_GUIDE.md) |
+| **工程规范与审计门禁** | 文档与文案工程规范、辩证审查 5 大不变量、全息实战发版测试清单 (Checklist 2.0)、正式发版核验红线 | [工程规范与门禁清单](./docs/STYLE_GUIDE.md) |
 
 ---
 

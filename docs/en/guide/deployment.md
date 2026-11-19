@@ -138,3 +138,26 @@ services:
       - SIGNAL_SECRET=YourMasterSecretKey
       - ACCESS_SECRET=YourPassword123
 ```
+
+### 4. Container Hardening & Non-Root Execution (`--user` / Least Privilege)
+
+- **Least Privilege by Default**:
+  - Official container images run under non-root user `appuser` (UID: 10001, GID: 10001) by default;
+  - Conforms strictly to CIS Docker Benchmarks and Kubernetes Restricted Pod Security Standards, mitigating container escape risks.
+- **Arbitrary UID/GID `--user` Support (Host Permission Alignment)**:
+  - On Synology DSM, QNAP, Unraid, or custom Linux hosts, specify `--user $(id -u):$(id -g)` or `--user 1000:1000` to avoid file permission conflicts:
+  ```bash
+  docker run -d --name webrtc-agent --restart unless-stopped \
+    --user 1000:1000 \
+    --net=host \
+    -v /volume1/media:/media:ro \
+    -e NODE_ID=nas-vault \
+    -e SIGNAL_URL=wss://p2p.yourdomain.com/ws \
+    -e DIR_PATH=/media \
+    -e ACCESS_SECRET=YourPassword123 \
+    ghcr.io/beingnoability/webrtc-p2p-agent:latest
+  ```
+- **Privileged Port Capabilities (`CAP_NET_BIND_SERVICE`)**:
+  - The `server` image is provisioned with `setcap 'cap_net_bind_service=+ep'`, allowing unprivileged users to bind directly to privileged low ports (`:443` or `:80`) without root access.
+- **Read-Only Root Filesystem Compatibility (`--read-only`)**:
+  - Both Signal server and Agent maintain purely stateless in-memory streaming pipelines, natively supporting `docker run --read-only` and Kubernetes `readOnlyRootFilesystem: true`.
