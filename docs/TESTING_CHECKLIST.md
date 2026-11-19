@@ -438,19 +438,21 @@ tc qdisc del dev eth0 root
 
 每次正式发版时，测试主管必须根据发版定级（MAJOR 全量签核 / MINOR 抽样签核），在 PR 或发版报告中签核：
 
-| 验证维度 | 核心检验焦点 | 必备通过条件 | MINOR 抽样依据 | 状态 (v2.1.0 签核) |
-| :---: | :--- | :--- | :---: | :---: |
-| **Level 1** | 自动化 CDP 真实浏览器矩阵 | 13 大全栈场景 + 页面刷新重连 100% 绿灯 | **必跑** | 🟢 PASS |
-| **维度一** | 真实 Linux 重度 Web 应用 | 流式传输、206 串流、跳转改写、PVE HTTPS 正常 | 涉及反代/前端 | 🟢 PASS |
-| **维度二** | 企业级 WAF 与客户端 IP 透传 | X-Forwarded-For 精准透传，WAF 封禁单 IP 防误杀 | 涉及网络/安全 | 🟢 PASS |
-| **维度三** | 复杂 NAT 打洞与实时 ICE 穿透 | STUN/TURN 候选收集，原位 ICE Restart 自愈不断播 | 涉及信令/ICE | 🟢 PASS |
-| **维度四** | 浏览器沙箱与 DOM 虚拟化 | ES Module Worker、Null-Body、Cookie 隔离、纯字节注入 | 涉及前端/SW | 🟢 PASS |
-| **维度五** | 流式传输与极端背压控制 | 流式分块无损落盘，弱网背压制动，取消下载立即 RST | 涉及多路复用 | 🟢 PASS |
-| **维度六** | 混沌网络损耗与抗压排毒 | 30% 丢包 150ms 延迟损耗无死锁，连接优雅维持 | 涉及网络/信令 | 🟢 PASS |
-| **维度七** | 边缘休眠与守护进程生命周期 | DO 休眠唤醒鉴权不丢，真实 Cloudflare 边缘跨网穿透 | 涉及边缘/守护 | 🟢 PASS |
-| **维度八** | 跨版本异构互通与安全基线 | -sign-link 防篡改防过期，-dir 目录防路径逃逸 | **涉及协议必测** | 🟢 PASS |
+| 验证维度 | 核心检验焦点 | 必备通过条件 | MINOR 抽样依据 | 状态 (v2.1.0 签核) | 状态 (v2.2.0 MAJOR 签核) |
+| :---: | :--- | :--- | :---: | :---: | :---: |
+| **Level 1** | 自动化 CDP 真实浏览器矩阵 | 13 大全栈场景 + 页面刷新重连 100% 绿灯 | **必跑** | 🟢 PASS | 🟢 PASS |
+| **维度一** | 真实 Linux 重度 Web 应用 | 流式传输、206 串流、跳转改写、PVE HTTPS 正常 | 涉及反代/前端 | 🟢 PASS | 🟢 PASS |
+| **维度二** | 企业级 WAF 与客户端 IP 透传 | X-Forwarded-For 精准透传，WAF 封禁单 IP 防误杀 | 涉及网络/安全 | 🟢 PASS | 🟢 PASS |
+| **维度三** | 复杂 NAT 打洞与实时 ICE 穿透 | STUN/TURN 候选收集，原位 ICE Restart 自愈不断播 | 涉及信令/ICE | 🟢 PASS | 🟢 PASS |
+| **维度四** | 浏览器沙箱与 DOM 虚拟化 | ES Module Worker、Null-Body、Cookie 隔离、纯字节注入 | 涉及前端/SW | 🟢 PASS | 🟢 PASS |
+| **维度五** | 流式传输与极端背压控制 | 流式分块无损落盘，弱网背压制动，取消下载立即 RST | 涉及多路复用 | 🟢 PASS | 🟢 PASS |
+| **维度六** | 混沌网络损耗与抗压排毒 | 30% 丢包 150ms 延迟损耗无死锁，连接优雅维持 | 涉及网络/信令 | 🟢 PASS | 🟢 PASS |
+| **维度七** | 边缘休眠与守护进程生命周期 | DO 休眠唤醒鉴权不丢，真实 Cloudflare 边缘跨网穿透 | 涉及边缘/守护 | 🟢 PASS | 🟢 PASS |
+| **维度八** | 跨版本异构互通与安全基线 | -sign-link 防篡改防过期，-dir 目录防路径逃逸 | **涉及协议必测** | 🟢 PASS | 🟢 PASS |
 
-> 归档详情查阅：[v2.1.0 发版全息测试签核报告](file:///docs/RELEASE_REPORTS/v2.1.0_TEST_REPORT.md)
+> 归档详情查阅：
+> - [v2.2.0 发版全息测试签核报告 (MAJOR)](file:///docs/RELEASE_REPORTS/v2.2.0_TEST_REPORT.md)
+> - [v2.1.0 发版全息测试签核报告 (MINOR)](file:///docs/RELEASE_REPORTS/v2.1.0_TEST_REPORT.md)
 
 ---
 

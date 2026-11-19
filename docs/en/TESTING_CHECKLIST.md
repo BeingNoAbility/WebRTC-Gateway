@@ -364,19 +364,21 @@ tc qdisc del dev eth0 root
 
 Before every release, the QA Lead signs off based on release tier (MAJOR full pass / MINOR targeted sampling):
 
-| Verification Dimension | Verification Focus | Mandatory Criteria | MINOR Sampling Rationale | Status (v2.1.0 Sign-off) |
-| :---: | :--- | :--- | :---: | :---: |
-| **Level 1** | Automated Real-Browser CDP Matrix | 13 full-stack scenarios + page reload 100% PASS | **Mandatory** | 🟢 PASS |
-| **Dimension 1** | Real Linux Host & Heavy Web Apps | Streaming, Range 206, proxy rewrites, PVE HTTPS | Proxy / Frontend | 🟢 PASS |
-| **Dimension 2** | Enterprise WAF & Client IP Propagation | X-Forwarded-For injection, WAF IP ban anti-false-positive | Network / Security | 🟢 PASS |
-| **Dimension 3** | Complex NAT Punching & ICE Traversal | STUN/TURN gathering, in-place ICE Restart | Signaling / ICE | 🟢 PASS |
-| **Dimension 4** | In-Browser Sandbox & DOM Virtualization | ES Module Worker, Null-Body, CookieJar isolation | Frontend / SW | 🟢 PASS |
-| **Dimension 5** | Streaming & Extreme Backpressure | Chunked streaming, backpressure braking, RST on cancel | Multiplexing | 🟢 PASS |
-| **Dimension 6** | Chaos Network Loss & Stress Testing | 30% loss 150ms delay without deadlocks | Network / Signaling | 🟢 PASS |
-| **Dimension 7** | Serverless Hibernation & Daemon Lifecycle | DO hibernation auth persistence, Cloudflare edge P2P | Edge / Daemons | 🟢 PASS |
-| **Dimension 8** | Cross-Version Interop & Security Baselines | -sign-link anti-tamper, -dir anti-traversal | **Protocol Mandatory** | 🟢 PASS |
+| Verification Dimension | Verification Focus | Mandatory Criteria | MINOR Sampling Rationale | Status (v2.1.0 Sign-off) | Status (v2.2.0 MAJOR Sign-off) |
+| :---: | :--- | :--- | :---: | :---: | :---: |
+| **Level 1** | Automated Real-Browser CDP Matrix | 13 full-stack scenarios + page reload 100% PASS | **Mandatory** | 🟢 PASS | 🟢 PASS |
+| **Dimension 1** | Real Linux Host & Heavy Web Apps | Streaming, Range 206, proxy rewrites, PVE HTTPS | Proxy / Frontend | 🟢 PASS | 🟢 PASS |
+| **Dimension 2** | Enterprise WAF & Client IP Propagation | X-Forwarded-For injection, WAF IP ban anti-false-positive | Network / Security | 🟢 PASS | 🟢 PASS |
+| **Dimension 3** | Complex NAT Punching & ICE Traversal | STUN/TURN gathering, in-place ICE Restart | Signaling / ICE | 🟢 PASS | 🟢 PASS |
+| **Dimension 4** | In-Browser Sandbox & DOM Virtualization | ES Module Worker, Null-Body, CookieJar isolation | Frontend / SW | 🟢 PASS | 🟢 PASS |
+| **Dimension 5** | Streaming & Extreme Backpressure | Chunked streaming, backpressure braking, RST on cancel | Multiplexing | 🟢 PASS | 🟢 PASS |
+| **Dimension 6** | Chaos Network Loss & Stress Testing | 30% loss 150ms delay without deadlocks | Network / Signaling | 🟢 PASS | 🟢 PASS |
+| **Dimension 7** | Serverless Hibernation & Daemon Lifecycle | DO hibernation auth persistence, Cloudflare edge P2P | Edge / Daemons | 🟢 PASS | 🟢 PASS |
+| **Dimension 8** | Cross-Version Interop & Security Baselines | -sign-link anti-tamper, -dir anti-traversal | **Protocol Mandatory** | 🟢 PASS | 🟢 PASS |
 
-> Archived Report: [v2.1.0 Release Test Report](file:///docs/RELEASE_REPORTS/v2.1.0_TEST_REPORT.md)
+> Archived Reports:
+> - [v2.2.0 Release Holographic Test Report (MAJOR)](file:///docs/en/RELEASE_REPORTS/v2.2.0_TEST_REPORT.md)
+> - [v2.1.0 Release Holographic Test Report (MINOR)](file:///docs/en/RELEASE_REPORTS/v2.1.0_TEST_REPORT.md)
 
 ---
 
