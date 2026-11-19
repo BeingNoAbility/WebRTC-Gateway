@@ -1607,9 +1607,11 @@ func main() {
 		}
 	}
 
-	originsStr := "All (Permissive / Warning)"
+	originsStr := "Strict (Same-Origin Only / Cross-Origin Blocked)"
 	if *allowedOrigins != "" {
 		originsStr = *allowedOrigins
+	} else if *allowAllOrigins {
+		originsStr = "All (Permissive / Warning)"
 	}
 
 	log.Printf("==================================================")
