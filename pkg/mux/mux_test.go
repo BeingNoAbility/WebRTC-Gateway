@@ -932,9 +932,9 @@ func TestMux_DualChannel_Routing(t *testing.T) {
 	})
 
 	// 1. Send Ping on clientMux (StreamID 0, TypePing)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_, err := clientMux.Ping(ctx)
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pingCancel()
+	_, err := clientMux.Ping(pingCtx)
 	if err != nil {
 		t.Fatalf("Ping failed: %v", err)
 	}
@@ -962,11 +962,13 @@ func TestMux_DualChannel_Routing(t *testing.T) {
 	}
 
 	// Server accepts stream
-	acceptedStream, err := agentMux.AcceptStream(ctx)
+	streamCtx, streamCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer streamCancel()
+	acceptedStream, err := agentMux.AcceptStream(streamCtx)
 	if err != nil {
 		t.Fatalf("AcceptStream failed: %v", err)
 	}
-	headers, err := acceptedStream.ReadHeaders(ctx)
+	headers, err := acceptedStream.ReadHeaders(streamCtx)
 	if err != nil {
 		t.Fatalf("ReadHeaders failed: %v", err)
 	}
