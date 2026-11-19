@@ -2107,8 +2107,8 @@ class PortalApp {
   }
 
   private getDiagnosticsHtml(): string {
-    const portalVer = 'v2.2.0';
-    const wireSpec = 'P2PMux v2.2 (10-byte Header / 32KB Frame)';
+    const portalVer = 'v2.3.0';
+    const wireSpec = 'P2PMux v2.3 Dual-Channel (10-byte Header / 32KB Frame)';
     let signalHost = 'Unknown';
     try {
       const u = new URL(this.signalUrl);
