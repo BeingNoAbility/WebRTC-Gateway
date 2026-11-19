@@ -16,7 +16,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"webrtc-gateway/pkg/agent"
-	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/proxy"
 	"webrtc-gateway/pkg/signaling"
 )
@@ -303,16 +302,10 @@ func TestSecretAuth_CorrectSecret_Success(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel error: %v", err)
+		t.Fatalf("setupClientDualMux error: %v", err)
 	}
-
-	clientMux := mux.NewMux(dc, true)
-	defer clientMux.Close()
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
@@ -331,12 +324,17 @@ func TestSecretAuth_CorrectSecret_Success(t *testing.T) {
 	}
 	_ = clientPC.SetLocalDescription(offer)
 
-	// Send offer WITH matching secret
+	exp := time.Now().Add(1 * time.Hour).Unix()
+	sdpFingerprint := agent.ExtractSDPFingerprint(offer.SDP)
+	sign := agent.ComputeHMAC(secretToken, fmt.Sprintf("%s:%d:%s", nodeID, exp, sdpFingerprint))
+
+	// Send offer WITH cryptographic signature bound to SDP fingerprint
 	_ = safeWriteClientWS(&signaling.Message{
 		Type:   signaling.TypeOffer,
 		NodeID: nodeID,
 		SDP:    &offer,
-		Secret: secretToken,
+		Exp:    exp,
+		Sign:   sign,
 	})
 
 	answerCh := make(chan signaling.Message, 1)
@@ -360,17 +358,15 @@ func TestSecretAuth_CorrectSecret_Success(t *testing.T) {
 		t.Fatalf("Timeout waiting for Answer with correct secret")
 	}
 
-	dcOpenCh := make(chan struct{}, 1)
-	dc.OnOpen(func() {
-		close(dcOpenCh)
-	})
-
 	select {
-	case <-dcOpenCh:
-		t.Logf("WebRTC DataChannel connected successfully with matching Secret!")
+	case <-allOpenCh:
+		t.Logf("WebRTC DataChannels connected successfully with matching Secret!")
 	case <-time.After(3 * time.Second):
-		t.Fatalf("Timeout waiting for DataChannel to open")
+		t.Fatalf("Timeout waiting for DataChannels to open")
 	}
+
+	clientMux := createMux()
+	defer clientMux.Close()
 
 	// Verify HTTP request over tunnel
 	stream, err := clientMux.OpenStream()
@@ -450,7 +446,8 @@ func TestSecretAuth_WrongSecret_Rejected(t *testing.T) {
 
 	clientPC, _ := webrtc.NewPeerConnection(webrtc.Configuration{})
 	defer clientPC.Close()
-	_, _ = clientPC.CreateDataChannel("p2pmux", nil)
+	_, _ = clientPC.CreateDataChannel("p2pcontrol", nil)
+	_, _ = clientPC.CreateDataChannel("p2pdata", nil)
 
 	offer, _ := clientPC.CreateOffer(nil)
 	_ = clientPC.SetLocalDescription(offer)
@@ -527,7 +524,8 @@ func TestSecretAuth_EmptySecret_Rejected(t *testing.T) {
 
 	clientPC, _ := webrtc.NewPeerConnection(webrtc.Configuration{})
 	defer clientPC.Close()
-	_, _ = clientPC.CreateDataChannel("p2pmux", nil)
+	_, _ = clientPC.CreateDataChannel("p2pcontrol", nil)
+	_, _ = clientPC.CreateDataChannel("p2pdata", nil)
 
 	offer, _ := clientPC.CreateOffer(nil)
 	_ = clientPC.SetLocalDescription(offer)
@@ -758,7 +756,7 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 
 	// 2. Client with VALID future share signature -> successfully connects over WebRTC & DataChannel!
 	futureExp := time.Now().Add(2 * time.Hour).Unix()
-	validSign := agent.GenerateShareSignature(nodeID, futureExp, nodeSecret)
+	rawShareSign := agent.GenerateShareSignature(nodeID, futureExp, nodeSecret)
 
 	clientWS, _, _ := websocket.DefaultDialer.Dial(wsURL, nil)
 	defer clientWS.Close()
@@ -793,16 +791,10 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel error: %v", err)
+		t.Fatalf("setupClientDualMux error: %v", err)
 	}
-
-	clientMux := mux.NewMux(dc, true)
-	defer clientMux.Close()
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
@@ -821,6 +813,9 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 	}
 	_ = clientPC.SetLocalDescription(offer)
 
+	sdpFingerprint := agent.ExtractSDPFingerprint(offer.SDP)
+	validSign := agent.ComputeHMAC(rawShareSign, fmt.Sprintf("%s:%d:%s", nodeID, futureExp, sdpFingerprint))
+
 	// Send offer WITH Exp and Sign (No raw secret!)
 	_ = safeWriteClientWS(&signaling.Message{
 		Type:   signaling.TypeOffer,
@@ -837,15 +832,15 @@ func TestSecretAuth_HMACShareLink_E2E(t *testing.T) {
 		t.Fatalf("Timeout waiting for Answer with valid share signature")
 	}
 
-	dcOpenCh := make(chan struct{}, 1)
-	dc.OnOpen(func() { close(dcOpenCh) })
-
 	select {
-	case <-dcOpenCh:
-		t.Logf("DataChannel opened successfully via stateless HMAC-SHA256 signed share link!")
+	case <-allOpenCh:
+		t.Logf("DataChannels opened successfully via stateless HMAC-SHA256 signed share link!")
 	case <-time.After(5 * time.Second):
-		t.Fatalf("Timeout waiting for DataChannel to open via share link")
+		t.Fatalf("Timeout waiting for DataChannels to open via share link")
 	}
+
+	clientMux := createMux()
+	defer clientMux.Close()
 
 	// Verify HTTP access
 	stream, err := clientMux.OpenStream()

@@ -354,19 +354,15 @@ func GenerateShareLink(baseURL, nodeID, secret string, duration time.Duration) s
 }
 
 // VerifyAuth validates whether a client connection request is authorized.
-// It supports DTLS fingerprint replay defense (F-04), one-way derived auth keys (F-02),
-// and backward-compatible temporary share link signatures.
+// In v2.3+, all authentications strictly require DTLS certificate fingerprint binding (F-04)
+// and one-way derived auth keys (F-02). Legacy plaintext tokens and unbound signatures are rejected.
 func (a *Agent) VerifyAuth(nodeID, accessSecret, reqSecret string, exp int64, sign, sdpFingerprint string) bool {
 	if accessSecret == "" {
 		return true // No authentication configured on agent (public access)
 	}
 
-	// 1. Direct access secret token verification (legacy)
-	if reqSecret != "" && subtle.ConstantTimeCompare([]byte(reqSecret), []byte(accessSecret)) == 1 {
-		return true
-	}
-
-	if sign == "" || exp <= 0 {
+	// Mandatory DTLS certificate fingerprint and cryptographic signature (zero legacy plaintext)
+	if sdpFingerprint == "" || sign == "" || exp <= 0 {
 		return false
 	}
 
@@ -380,28 +376,26 @@ func (a *Agent) VerifyAuth(nodeID, accessSecret, reqSecret string, exp int64, si
 	// Derived authKey: HMAC-SHA256(accessSecret, "node-auth:" + nodeID)
 	authKey := ComputeHMAC(accessSecret, "node-auth:"+nodeID)
 
-	// Tier 1: DTLS certificate fingerprint binding with derived authKey
-	if sdpFingerprint != "" {
-		expectedSign := ComputeHMAC(authKey, fmt.Sprintf("%s:%d:%s", nodeID, exp, sdpFingerprint))
-		if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedSign))) == 1 {
-			return true
-		}
-		// Tier 2: DTLS certificate fingerprint binding with direct accessSecret
-		expectedSignDirect := ComputeHMAC(accessSecret, fmt.Sprintf("%s:%d:%s", nodeID, exp, sdpFingerprint))
-		if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedSignDirect))) == 1 {
-			return true
-		}
+	// Tier 1: DTLS certificate fingerprint binding with derived authKey (Web Portal standard)
+	expectedSign := ComputeHMAC(authKey, fmt.Sprintf("%s:%d:%s", nodeID, exp, sdpFingerprint))
+	if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedSign))) == 1 {
+		return true
 	}
 
-	// Tier 3: Backward-compatible share link without fingerprint (nodeID:exp)
-	if exp > 0 {
-		expectedShareSign := GenerateShareSignature(nodeID, exp, accessSecret)
-		if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedShareSign))) == 1 {
-			return true
-		}
+	// Tier 2: DTLS certificate fingerprint binding with direct accessSecret (CLI / SDK standard)
+	expectedSignDirect := ComputeHMAC(accessSecret, fmt.Sprintf("%s:%d:%s", nodeID, exp, sdpFingerprint))
+	if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedSignDirect))) == 1 {
+		return true
 	}
 
-	log.Printf("[Agent] Auth verification failed for node %s", nodeID)
+	// Tier 3: Signed share link cryptographically bound to visitor DTLS fingerprint
+	expectedShareSign := GenerateShareSignature(nodeID, exp, accessSecret)
+	expectedBoundShareSign := ComputeHMAC(expectedShareSign, fmt.Sprintf("%s:%d:%s", nodeID, exp, sdpFingerprint))
+	if subtle.ConstantTimeCompare([]byte(strings.ToLower(sign)), []byte(strings.ToLower(expectedBoundShareSign))) == 1 {
+		return true
+	}
+
+	log.Printf("[Agent] Auth verification failed for node %s (fingerprint: %s)", nodeID, sdpFingerprint)
 	return false
 }
 
@@ -841,7 +835,7 @@ func (a *Agent) handleOffer(sess *AgentSession, sdp *webrtc.SessionDescription, 
 			dcID = *id
 		}
 		log.Printf("[Agent] [Session %s Gen %d] OnDataChannel label=%s id=%d", sessionID, currentGen, dc.Label(), dcID)
-		if dc.Label() != "p2pmux" {
+		if dc.Label() != "p2pcontrol" && dc.Label() != "p2pdata" {
 			return
 		}
 
@@ -851,26 +845,52 @@ func (a *Agent) handleOffer(sess *AgentSession, sdp *webrtc.SessionDescription, 
 			log.Printf("[Agent] [Session %s] Ignoring DataChannel for stale gen=%d (current gen=%d)", sessionID, currentGen, sess.Generation)
 			return
 		}
+
+		if dc.Label() == "p2pcontrol" {
+			sess.controlDC = dc
+		} else if dc.Label() == "p2pdata" {
+			sess.dataDC = dc
+		}
+
+		// Both p2pcontrol and p2pdata DataChannels must be present to initialize DualMux
+		if sess.controlDC == nil || sess.dataDC == nil || sess.Mux != nil {
+			sess.mu.Unlock()
+			return
+		}
+
 		cookieSession := sess.CookieID
-		transport := &countedTransport{DataChannel: dc, txCounter: &a.txBytesTotal}
-		m := mux.NewMux(transport, false)
+		controlTransport := &countedTransport{DataChannel: sess.controlDC, txCounter: &a.txBytesTotal}
+		dataTransport := &countedTransport{DataChannel: sess.dataDC, txCounter: &a.txBytesTotal}
+		m := mux.NewDualMux(controlTransport, dataTransport, false)
 		sess.Mux = m
+		controlDC := sess.controlDC
+		dataDC := sess.dataDC
 		sess.mu.Unlock()
 
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		handleMsg := func(msg webrtc.DataChannelMessage) {
 			atomic.AddUint64(&a.rxBytesTotal, uint64(len(msg.Data)))
 			if err := m.HandleIncomingMessage(msg.Data); err != nil {
 				log.Printf("[Agent] Mux handle message error: %v", err)
 			}
-		})
+		}
 
-		dc.OnClose(func() {
-			log.Printf("[Agent] [Session %s Gen %d] DataChannel closed", sessionID, currentGen)
+		controlDC.OnMessage(handleMsg)
+		dataDC.OnMessage(handleMsg)
+
+		controlDC.OnClose(func() {
+			log.Printf("[Agent] [Session %s Gen %d] Control DataChannel closed", sessionID, currentGen)
+			_ = m.Close()
+		})
+		dataDC.OnClose(func() {
+			log.Printf("[Agent] [Session %s Gen %d] Data DataChannel closed", sessionID, currentGen)
 			_ = m.Close()
 		})
 
-		dc.OnOpen(func() {
-			log.Printf("[Agent] [Session %s Gen %d] DataChannel p2pmux OPENED! (cookieSession: %s)", sessionID, currentGen, cookieSession)
+		controlDC.OnOpen(func() {
+			log.Printf("[Agent] [Session %s Gen %d] Control DataChannel OPENED! (cookieSession: %s)", sessionID, currentGen, cookieSession)
+		})
+		dataDC.OnOpen(func() {
+			log.Printf("[Agent] [Session %s Gen %d] Data DataChannel OPENED! (cookieSession: %s)", sessionID, currentGen, cookieSession)
 		})
 
 		// Accept incoming streams and route to Reverse Proxy
@@ -1067,6 +1087,14 @@ func (a *Agent) streamAcceptLoop(sessionID, cookieSession string, m *mux.Mux) {
 			if probe.Method == "" && probe.MethodAlt != "" {
 				probe.Method = probe.MethodAlt
 			}
+			if probe.Method == "ECHO" || probe.Path == "/echo" {
+				defer s.Close()
+				buf := new(bytes.Buffer)
+				_, _ = io.Copy(buf, io.LimitReader(s, 64*1024))
+				_, _ = s.Write(buf.Bytes())
+				return
+			}
+
 			if probe.Method == "" {
 				probe.Method = "GET"
 			}

@@ -169,42 +169,50 @@ func TestAgent_HMACShareSignature(t *testing.T) {
 	ag := New(nodeID, "ws://127.0.0.1:8888/ws", "", secret, "http://127.0.0.1:8080")
 	defer ag.Close()
 
-	// 1. Direct secret token verification
-	if !ag.VerifyAuth(nodeID, secret, secret, 0, "", "") {
-		t.Fatalf("Direct secret should be authorized")
+	// 1. Direct secret token without fingerprint (legacy token auth) MUST be rejected in v2.3
+	if ag.VerifyAuth(nodeID, secret, secret, 0, "", "") {
+		t.Fatalf("Legacy direct secret without fingerprint must be rejected in v2.3")
 	}
 	if ag.VerifyAuth(nodeID, secret, "wrong-secret", 0, "", "") {
 		t.Fatalf("Wrong direct secret should be rejected")
 	}
 
-	// 2. Valid HMAC signature verification (future expiration, legacy share link)
+	// 2. Legacy fingerprint-free share signature MUST be rejected in v2.3
 	futureExp := time.Now().Add(24 * time.Hour).Unix()
-	validSign := GenerateShareSignature(nodeID, futureExp, secret)
-	if !ag.VerifyAuth(nodeID, secret, "", futureExp, validSign, "") {
-		t.Fatalf("Valid HMAC signature was rejected")
+	rawShareSign := GenerateShareSignature(nodeID, futureExp, secret)
+	if ag.VerifyAuth(nodeID, secret, "", futureExp, rawShareSign, "") {
+		t.Fatalf("Legacy fingerprint-free share signature must be rejected in v2.3")
 	}
 
-	// 3. Expired HMAC signature verification (past expiration)
+	// 3. Bound share link signature with matching DTLS fingerprint MUST be authorized
+	dtlsFingerprint := "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
+	boundShareSign := ComputeHMAC(rawShareSign, fmt.Sprintf("%s:%d:%s", nodeID, futureExp, dtlsFingerprint))
+	if !ag.VerifyAuth(nodeID, secret, "", futureExp, boundShareSign, dtlsFingerprint) {
+		t.Fatalf("Valid bound share link signature was rejected")
+	}
+
+	// 4. Expired HMAC signature verification (past expiration)
 	pastExp := time.Now().Add(-2 * time.Hour).Unix()
-	expiredSign := GenerateShareSignature(nodeID, pastExp, secret)
-	if ag.VerifyAuth(nodeID, secret, "", pastExp, expiredSign, "") {
+	pastShareSign := GenerateShareSignature(nodeID, pastExp, secret)
+	pastBoundSign := ComputeHMAC(pastShareSign, fmt.Sprintf("%s:%d:%s", nodeID, pastExp, dtlsFingerprint))
+	if ag.VerifyAuth(nodeID, secret, "", pastExp, pastBoundSign, dtlsFingerprint) {
 		t.Fatalf("Expired HMAC signature should have been rejected")
 	}
 
-	// 4. Tampered signature verification
-	tamperedSign := validSign[:len(validSign)-2] + "ff"
-	if ag.VerifyAuth(nodeID, secret, "", futureExp, tamperedSign, "") {
+	// 5. Tampered signature verification
+	tamperedSign := boundShareSign[:len(boundShareSign)-2] + "ff"
+	if ag.VerifyAuth(nodeID, secret, "", futureExp, tamperedSign, dtlsFingerprint) {
 		t.Fatalf("Tampered signature should have been rejected")
 	}
 
-	// 5. Signature for different nodeID
-	otherNodeSign := GenerateShareSignature("other-node", futureExp, secret)
-	if ag.VerifyAuth(nodeID, secret, "", futureExp, otherNodeSign, "") {
+	// 6. Signature for different nodeID
+	otherNodeShare := GenerateShareSignature("other-node", futureExp, secret)
+	otherNodeBound := ComputeHMAC(otherNodeShare, fmt.Sprintf("other-node:%d:%s", futureExp, dtlsFingerprint))
+	if ag.VerifyAuth(nodeID, secret, "", futureExp, otherNodeBound, dtlsFingerprint) {
 		t.Fatalf("Signature for other node should have been rejected")
 	}
 
-	// 6. F-04: SDP DTLS Certificate Fingerprint HMAC Proof & Replay Defense
-	dtlsFingerprint := "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
+	// 7. F-04: SDP DTLS Certificate Fingerprint HMAC Proof & Replay Defense (Derived AuthKey)
 	authKey := ComputeHMAC(secret, "node-auth:"+nodeID)
 	fpSign := ComputeHMAC(authKey, fmt.Sprintf("%s:%d:%s", nodeID, futureExp, dtlsFingerprint))
 
@@ -414,9 +422,13 @@ func TestAgent_SessionClientIP_LifecycleAndCleanup(t *testing.T) {
 	}
 	defer pc.Close()
 
-	_, err = pc.CreateDataChannel("p2pmux", nil)
+	_, err = pc.CreateDataChannel("p2pcontrol", nil)
 	if err != nil {
-		t.Fatalf("Failed to create DataChannel: %v", err)
+		t.Fatalf("Failed to create p2pcontrol DataChannel: %v", err)
+	}
+	_, err = pc.CreateDataChannel("p2pdata", nil)
+	if err != nil {
+		t.Fatalf("Failed to create p2pdata DataChannel: %v", err)
 	}
 
 	offer, err := pc.CreateOffer(nil)
@@ -569,9 +581,13 @@ func TestAgent_PendingICECandidates_BufferedAndFlushed(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	_, err = clientPC.CreateDataChannel("p2pmux", nil)
+	_, err = clientPC.CreateDataChannel("p2pcontrol", nil)
 	if err != nil {
-		t.Fatalf("Failed to create DataChannel: %v", err)
+		t.Fatalf("Failed to create p2pcontrol DataChannel: %v", err)
+	}
+	_, err = clientPC.CreateDataChannel("p2pdata", nil)
+	if err != nil {
+		t.Fatalf("Failed to create p2pdata DataChannel: %v", err)
 	}
 
 	offer, err := clientPC.CreateOffer(nil)

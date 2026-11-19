@@ -14,7 +14,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"webrtc-gateway/pkg/agent"
-	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/proxy"
 	"webrtc-gateway/pkg/signaling"
 )
@@ -68,9 +67,9 @@ func TestPhase4LargeStreamingAndBackpressure(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel error: %v", err)
+		t.Fatalf("setupClientDualMux error: %v", err)
 	}
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -88,9 +87,6 @@ func TestPhase4LargeStreamingAndBackpressure(t *testing.T) {
 	_ = clientPC.SetLocalDescription(offer)
 	_ = safeWriteWS(&signaling.Message{Type: signaling.TypeOffer, NodeID: agentNodeID, SDP: &offer})
 
-	dcOpenCh := make(chan struct{})
-	dc.OnOpen(func() { close(dcOpenCh) })
-
 	go func() {
 		for {
 			var msg signaling.Message
@@ -107,17 +103,14 @@ func TestPhase4LargeStreamingAndBackpressure(t *testing.T) {
 	}()
 
 	select {
-	case <-dcOpenCh:
-		t.Log("WebRTC DataChannel connected for streaming and backpressure test!")
+	case <-allOpenCh:
+		t.Log("WebRTC DataChannels connected for streaming and backpressure test!")
 	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for DataChannel")
+		t.Fatal("Timeout waiting for DataChannels")
 	}
 
-	clientMux := mux.NewMux(dc, true)
+	clientMux := createMux()
 	defer clientMux.Close()
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	// 5. Open stream and request chunked streaming download (1MB)
 	stream, err := clientMux.OpenStream()

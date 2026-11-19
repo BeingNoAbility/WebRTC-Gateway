@@ -18,7 +18,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"webrtc-gateway/pkg/agent"
-	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/proxy"
 	"webrtc-gateway/pkg/signaling"
 )
@@ -331,12 +330,9 @@ func TestCloudflareLive_P2P_WebRTC_DataChannel_E2E(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	ordered := true
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{
-		Ordered: &ordered,
-	})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel error: %v", err)
+		t.Fatalf("setupClientDualMux error: %v", err)
 	}
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -397,26 +393,17 @@ func TestCloudflareLive_P2P_WebRTC_DataChannel_E2E(t *testing.T) {
 		t.Fatal("Timeout waiting for WebRTC Answer via Cloudflare DO")
 	}
 
-	// 6. Wait for DataChannel to Open
-	dcOpened := make(chan struct{})
-	dc.OnOpen(func() {
-		close(dcOpened)
-	})
-
+	// 6. Wait for DataChannels to Open
 	select {
-	case <-dcOpened:
-		t.Log("[PASS] WebRTC DataChannel successfully opened over Cloudflare signaling!")
+	case <-allOpenCh:
+		t.Log("[PASS] WebRTC DataChannels successfully opened over Cloudflare signaling!")
 	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for DataChannel to open")
+		t.Fatal("Timeout waiting for DataChannels to open")
 	}
 
 	// 7. Initialize P2PMux on Visitor Client
-	clientMux := mux.NewMux(dc, true)
+	clientMux := createMux()
 	defer clientMux.Close()
-
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	// Verify Ping/Pong over WebRTC DataChannel
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -563,12 +550,9 @@ func TestCloudflareLive_CrossNetwork_DebianToWindows_E2E(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	ordered := true
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{
-		Ordered: &ordered,
-	})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel error: %v", err)
+		t.Fatalf("setupClientDualMux error: %v", err)
 	}
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -629,26 +613,17 @@ func TestCloudflareLive_CrossNetwork_DebianToWindows_E2E(t *testing.T) {
 		t.Fatal("Timeout waiting for WebRTC Answer via Cloudflare DO")
 	}
 
-	// 6. Wait for DataChannel to Open between Windows and Linux VM
-	dcOpened := make(chan struct{})
-	dc.OnOpen(func() {
-		close(dcOpened)
-	})
-
+	// 6. Wait for DataChannels to Open between Windows and Linux VM
 	select {
-	case <-dcOpened:
-		t.Log("[PASS] Cross-network WebRTC DataChannel (Linux VM <-> Windows) OPENED!")
+	case <-allOpenCh:
+		t.Log("[PASS] Cross-network WebRTC DataChannels (Linux VM <-> Windows) OPENED!")
 	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for cross-network DataChannel to open")
+		t.Fatal("Timeout waiting for cross-network DataChannels to open")
 	}
 
 	// 7. Initialize P2PMux on Visitor Client
-	clientMux := mux.NewMux(dc, true)
+	clientMux := createMux()
 	defer clientMux.Close()
-
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	// Verify Ping/Pong RTT across machines
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -908,12 +883,9 @@ func TestCloudflareLive_TURN_Relay_ForcedSymmetricNAT_E2E(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	ordered := true
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{
-		Ordered: &ordered,
-	})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel error: %v", err)
+		t.Fatalf("setupClientDualMux error: %v", err)
 	}
 
 	var relayCandidateObserved bool
@@ -990,17 +962,12 @@ func TestCloudflareLive_TURN_Relay_ForcedSymmetricNAT_E2E(t *testing.T) {
 		t.Fatal("Timeout waiting for WebRTC Answer via Cloudflare DO")
 	}
 
-	// 6. Wait for DataChannel to Open over TURN Relay
-	dcOpened := make(chan struct{})
-	dc.OnOpen(func() {
-		close(dcOpened)
-	})
-
+	// 6. Wait for DataChannels to Open over TURN Relay
 	select {
-	case <-dcOpened:
-		t.Log("[PASS] WebRTC DataChannel successfully opened over Cloudflare TURN Relay!")
+	case <-allOpenCh:
+		t.Log("[PASS] WebRTC DataChannels successfully opened over Cloudflare TURN Relay!")
 	case <-time.After(30 * time.Second):
-		t.Fatal("Timeout waiting for DataChannel to open over TURN Relay")
+		t.Fatal("Timeout waiting for DataChannels to open over TURN Relay")
 	}
 
 	relayMu.Lock()
@@ -1013,12 +980,8 @@ func TestCloudflareLive_TURN_Relay_ForcedSymmetricNAT_E2E(t *testing.T) {
 	}
 
 	// 7. Initialize P2PMux on Visitor Client
-	clientMux := mux.NewMux(dc, true)
+	clientMux := createMux()
 	defer clientMux.Close()
-
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	// 8. Measure Ping/Pong RTT over TURN Relay
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)

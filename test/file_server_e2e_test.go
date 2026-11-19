@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,7 +17,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"webrtc-gateway/pkg/agent"
-	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/proxy"
 	"webrtc-gateway/pkg/signaling"
 )
@@ -91,16 +91,10 @@ func TestE2E_FileServer_SingleFileAndRange(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel failed: %v", err)
+		t.Fatalf("setupClientDualMux failed: %v", err)
 	}
-
-	clientMux := mux.NewMux(dc, true)
-	defer clientMux.Close()
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
@@ -113,14 +107,16 @@ func TestE2E_FileServer_SingleFileAndRange(t *testing.T) {
 		}
 	})
 
-	futureExp := time.Now().Add(2 * time.Hour).Unix()
-	validSign := agent.GenerateShareSignature(nodeID, futureExp, "iso-secret-pass")
-
 	offer, err := clientPC.CreateOffer(nil)
 	if err != nil {
 		t.Fatalf("CreateOffer failed: %v", err)
 	}
 	_ = clientPC.SetLocalDescription(offer)
+
+	futureExp := time.Now().Add(2 * time.Hour).Unix()
+	rawShareSign := agent.GenerateShareSignature(nodeID, futureExp, "iso-secret-pass")
+	fp := agent.ExtractSDPFingerprint(offer.SDP)
+	validSign := agent.ComputeHMAC(rawShareSign, fmt.Sprintf("%s:%d:%s", nodeID, futureExp, fp))
 
 	_ = safeWriteWS(&signaling.Message{
 		Type:   signaling.TypeOffer,
@@ -137,14 +133,15 @@ func TestE2E_FileServer_SingleFileAndRange(t *testing.T) {
 		t.Fatalf("Timeout waiting for Answer")
 	}
 
-	dcOpenCh := make(chan struct{}, 1)
-	dc.OnOpen(func() { close(dcOpenCh) })
 	select {
-	case <-dcOpenCh:
-		t.Logf("WebRTC DataChannel opened for single file download test!")
+	case <-allOpenCh:
+		t.Logf("WebRTC Dual DataChannels opened for single file download test!")
 	case <-time.After(5 * time.Second):
-		t.Fatalf("Timeout waiting for DataChannel to open")
+		t.Fatalf("Timeout waiting for DataChannels to open")
 	}
+
+	clientMux := createMux()
+	defer clientMux.Close()
 
 	// 5. Test Full Download of 1MB ISO via DataChannel
 	downloadStream, err := clientMux.OpenStream()
@@ -303,16 +300,10 @@ func TestE2E_FileServer_DirectoryMode(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel failed: %v", err)
+		t.Fatalf("setupClientDualMux failed: %v", err)
 	}
-
-	clientMux := mux.NewMux(dc, true)
-	defer clientMux.Close()
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
@@ -344,14 +335,15 @@ func TestE2E_FileServer_DirectoryMode(t *testing.T) {
 		t.Fatalf("Timeout waiting for Answer")
 	}
 
-	dcOpenCh := make(chan struct{}, 1)
-	dc.OnOpen(func() { close(dcOpenCh) })
 	select {
-	case <-dcOpenCh:
-		t.Logf("DataChannel opened for directory server test!")
+	case <-allOpenCh:
+		t.Logf("Dual DataChannels opened for directory server test!")
 	case <-time.After(5 * time.Second):
-		t.Fatalf("Timeout waiting for DataChannel to open")
+		t.Fatalf("Timeout waiting for DataChannels to open")
 	}
+
+	clientMux := createMux()
+	defer clientMux.Close()
 
 	// 5. Test fetching index.html via "/"
 	s1, err := clientMux.OpenStream()
@@ -478,16 +470,10 @@ func TestE2E_FileServer_SpecialCharactersAndMediaMIME(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel failed: %v", err)
+		t.Fatalf("setupClientDualMux failed: %v", err)
 	}
-
-	clientMux := mux.NewMux(dc, true)
-	defer clientMux.Close()
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
@@ -519,14 +505,15 @@ func TestE2E_FileServer_SpecialCharactersAndMediaMIME(t *testing.T) {
 		t.Fatalf("Timeout waiting for Answer")
 	}
 
-	dcOpenCh := make(chan struct{}, 1)
-	dc.OnOpen(func() { close(dcOpenCh) })
 	select {
-	case <-dcOpenCh:
-		t.Logf("DataChannel opened for anime special char test!")
+	case <-allOpenCh:
+		t.Logf("Dual DataChannels opened for anime special char test!")
 	case <-time.After(5 * time.Second):
-		t.Fatalf("Timeout waiting for DataChannel to open")
+		t.Fatalf("Timeout waiting for DataChannels to open")
 	}
+
+	clientMux := createMux()
+	defer clientMux.Close()
 
 	// 5. Test fetching special anime filename via percent-encoded path
 	s1, err := clientMux.OpenStream()

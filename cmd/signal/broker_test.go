@@ -796,8 +796,8 @@ func TestSignalServer_FailFastDeprecatedSecret(t *testing.T) {
 // 1. Task 8 (L 项): Signal Origin 跨域分流准入策略 (Browser vs CLI Agent)
 func TestSignal_OriginFiltering_BrowserVsCLI(t *testing.T) {
 	// Configure allowed patterns: wildcard Cloudflare Pages subdomain and localhost port wildcard
-	SetOriginChecker(NewOriginChecker("https://*.pages.dev,http://localhost:*"))
-	defer SetOriginChecker(NewOriginChecker(""))
+	SetOriginChecker(NewOriginChecker("https://*.pages.dev,http://localhost:*", false))
+	defer SetOriginChecker(NewOriginChecker("", false))
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -860,11 +860,21 @@ func TestSignal_OriginFiltering_BrowserVsCLI(t *testing.T) {
 		t.Fatalf("Expected HTTP 403 Forbidden for bad origin, got: %d (%v)", statusCode, err)
 	}
 
-	// Case 6: Fallback when allowed origins is empty -> Permitted with warning (downward compatibility)
-	SetOriginChecker(NewOriginChecker(""))
+	// Case 6: Empty allowed origins blocks unauthorized cross-origin by default in v2.3
+	SetOriginChecker(NewOriginChecker("", false))
+	_, resp, err = dialer.Dial(wsURL, headersUnauthorized)
+	if err == nil {
+		t.Fatalf("Expected empty allowed origins to block unauthorized cross-origin by default in v2.3")
+	}
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("Expected HTTP 403 Forbidden for empty allowed origins by default")
+	}
+
+	// Case 7: Explicit allow-all-origins permits cross-origin with warning
+	SetOriginChecker(NewOriginChecker("", true))
 	conn, resp, err = dialer.Dial(wsURL, headersUnauthorized)
 	if err != nil {
-		t.Fatalf("Expected permissive fallback when allowed origins is empty, got: %v", err)
+		t.Fatalf("Expected explicit allow-all-origins to permit cross-origin, got: %v", err)
 	}
 	_ = conn.Close()
 	_ = resp.Body.Close()

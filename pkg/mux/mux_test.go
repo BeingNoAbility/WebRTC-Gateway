@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"webrtc-gateway/pkg/protocol"
 )
 
 type mockTransport struct {
@@ -894,5 +895,233 @@ func TestMux_InboundBackpressure_TimeoutBetweenWatermarkAndMax(t *testing.T) {
 	}
 	if inBytes := agentMux.InboundBytes(); inBytes != 3000 {
 		t.Fatalf("Expected inboundBytes to rollback to 3000 after stream 2 timed out, got %d", inBytes)
+	}
+}
+
+func TestMux_DualChannel_Routing(t *testing.T) {
+	c1, c2 := newMockPair()
+	defer c1.Close()
+	defer c2.Close()
+
+	d1, d2 := newMockPair()
+	defer d1.Close()
+	defer d2.Close()
+
+	clientMux := NewDualMux(c1, d1, true)
+	defer clientMux.Close()
+	agentMux := NewDualMux(c2, d2, false)
+	defer agentMux.Close()
+
+	c1.SetMessageHandler(func(data []byte) {
+		_ = clientMux.HandleIncomingMessage(data)
+	})
+	d1.SetMessageHandler(func(data []byte) {
+		_ = clientMux.HandleIncomingMessage(data)
+	})
+
+	var controlFramesAgent atomic.Int64
+	var dataFramesAgent atomic.Int64
+
+	c2.SetMessageHandler(func(data []byte) {
+		controlFramesAgent.Add(1)
+		_ = agentMux.HandleIncomingMessage(data)
+	})
+	d2.SetMessageHandler(func(data []byte) {
+		dataFramesAgent.Add(1)
+		_ = agentMux.HandleIncomingMessage(data)
+	})
+
+	// 1. Send Ping on clientMux (StreamID 0, TypePing)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := clientMux.Ping(ctx)
+	if err != nil {
+		t.Fatalf("Ping failed: %v", err)
+	}
+	if controlFramesAgent.Load() == 0 {
+		t.Errorf("Expected PING to arrive on agent control channel")
+	}
+	if dataFramesAgent.Load() != 0 {
+		t.Errorf("Expected 0 frames on agent data channel during PING, got %d", dataFramesAgent.Load())
+	}
+
+	// 2. Open Stream and send HEADERS + DATA
+	stream, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+	err = stream.WriteHeaders([]byte(`{"test":"dual"}`))
+	if err != nil {
+		t.Fatalf("WriteHeaders failed: %v", err)
+	}
+
+	testPayload := []byte("hello dual channel data")
+	_, err = stream.Write(testPayload)
+	if err != nil {
+		t.Fatalf("Write data failed: %v", err)
+	}
+
+	// Server accepts stream
+	acceptedStream, err := agentMux.AcceptStream(ctx)
+	if err != nil {
+		t.Fatalf("AcceptStream failed: %v", err)
+	}
+	headers, err := acceptedStream.ReadHeaders(ctx)
+	if err != nil {
+		t.Fatalf("ReadHeaders failed: %v", err)
+	}
+	if string(headers) != `{"test":"dual"}` {
+		t.Errorf("Expected headers `{\"test\":\"dual\"}`, got %s", string(headers))
+	}
+
+	readBuf := make([]byte, len(testPayload))
+	_, err = io.ReadFull(acceptedStream, readBuf)
+	if err != nil {
+		t.Fatalf("Read data failed: %v", err)
+	}
+	if string(readBuf) != string(testPayload) {
+		t.Errorf("Expected payload %s, got %s", string(testPayload), string(readBuf))
+	}
+
+	if dataFramesAgent.Load() == 0 {
+		t.Errorf("Expected data frames to arrive on agent data channel")
+	}
+}
+
+func TestMux_DualChannel_OrphanDataBeforeHeaders(t *testing.T) {
+	c1, c2 := newMockPair()
+	defer c1.Close()
+	defer c2.Close()
+
+	d1, d2 := newMockPair()
+	defer d1.Close()
+	defer d2.Close()
+
+	agentMux := NewDualMux(c2, d2, false)
+	defer agentMux.Close()
+
+	c2.SetMessageHandler(func(data []byte) {
+		_ = agentMux.HandleIncomingMessage(data)
+	})
+	d2.SetMessageHandler(func(data []byte) {
+		_ = agentMux.HandleIncomingMessage(data)
+	})
+
+	// Manually construct and inject DATA frame for StreamID 1 FIRST (simulating race on p2pdata)
+	streamID := uint32(1)
+	orphanData := []byte("data arrived before headers!")
+	dataFrame := protocol.NewFrame(streamID, protocol.TypeData, protocol.FlagNone, orphanData)
+	encodedData := dataFrame.Encode()
+
+	// Send via d1 (data channel)
+	if err := d1.Send(encodedData); err != nil {
+		t.Fatalf("Send orphan data failed: %v", err)
+	}
+
+	// Small sleep to ensure DATA frame arrives and is buffered in pendingOrphans
+	time.Sleep(30 * time.Millisecond)
+
+	// Verify agent has not yet passed stream to acceptCh, but orphan is buffered
+	agentMux.orphanMu.Lock()
+	orphansLen := len(agentMux.pendingOrphans[streamID])
+	agentMux.orphanMu.Unlock()
+	if orphansLen != 1 {
+		t.Fatalf("Expected 1 orphan frame buffered, got %d", orphansLen)
+	}
+
+	// Now send HEADERS frame on c1 (control channel)
+	headersPayload := []byte(`{"path":"/api/test"}`)
+	headersFrame := protocol.NewFrame(streamID, protocol.TypeHeaders, protocol.FlagNone, headersPayload)
+	encodedHeaders := headersFrame.Encode()
+	if err := c1.Send(encodedHeaders); err != nil {
+		t.Fatalf("Send headers failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	s, err := agentMux.AcceptStream(ctx)
+	if err != nil {
+		t.Fatalf("AcceptStream failed after headers: %v", err)
+	}
+
+	// Verify headers
+	h, err := s.ReadHeaders(ctx)
+	if err != nil {
+		t.Fatalf("ReadHeaders failed: %v", err)
+	}
+	if string(h) != string(headersPayload) {
+		t.Fatalf("Headers mismatch: got %s, want %s", string(h), string(headersPayload))
+	}
+
+	// Verify orphan data was flushed and readable
+	buf := make([]byte, len(orphanData))
+	_, err = io.ReadFull(s, buf)
+	if err != nil {
+		t.Fatalf("ReadFull data failed: %v", err)
+	}
+	if string(buf) != string(orphanData) {
+		t.Fatalf("Payload mismatch: got %s, want %s", string(buf), string(orphanData))
+	}
+
+	// Verify pendingOrphans is now empty
+	agentMux.orphanMu.Lock()
+	remainingOrphans := len(agentMux.pendingOrphans[streamID])
+	agentMux.orphanMu.Unlock()
+	if remainingOrphans != 0 {
+		t.Fatalf("Expected 0 orphans remaining after flush, got %d", remainingOrphans)
+	}
+}
+
+func TestMux_DualChannel_OrphanTimeout(t *testing.T) {
+	c1, c2 := newMockPair()
+	defer c1.Close()
+	defer c2.Close()
+
+	d1, d2 := newMockPair()
+	defer d1.Close()
+	defer d2.Close()
+
+	agentMux := NewDualMux(c2, d2, false)
+	defer agentMux.Close()
+
+	var rstReceived atomic.Bool
+	c1.SetMessageHandler(func(data []byte) {
+		f, err := protocol.DecodeFrameBytes(data)
+		if err == nil && f.Type == protocol.TypeRstStream && f.StreamID == 3 {
+			rstReceived.Store(true)
+		}
+	})
+
+	c2.SetMessageHandler(func(data []byte) {
+		_ = agentMux.HandleIncomingMessage(data)
+	})
+	d2.SetMessageHandler(func(data []byte) {
+		_ = agentMux.HandleIncomingMessage(data)
+	})
+
+	// Inject orphan data frame on stream 3 without ever sending headers
+	streamID := uint32(3)
+	dataFrame := protocol.NewFrame(streamID, protocol.TypeData, protocol.FlagNone, []byte("never gets headers"))
+	if err := d1.Send(dataFrame.Encode()); err != nil {
+		t.Fatalf("Send data failed: %v", err)
+	}
+
+	// Wait for TTL (500ms) + reaper tick
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for !rstReceived.Load() && time.Now().Before(deadline) {
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	if !rstReceived.Load() {
+		t.Fatalf("Expected RST_STREAM to be sent after orphan frame timed out")
+	}
+
+	// Verify orphan was purged from memory
+	agentMux.orphanMu.Lock()
+	remaining := len(agentMux.pendingOrphans[streamID])
+	agentMux.orphanMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("Expected orphan to be purged from pendingOrphans, got %d", remaining)
 	}
 }

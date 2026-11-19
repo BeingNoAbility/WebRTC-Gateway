@@ -16,7 +16,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"webrtc-gateway/pkg/agent"
-	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/proxy"
 	"webrtc-gateway/pkg/signaling"
 )
@@ -153,9 +152,9 @@ func TestPhase3FullHTTPAndWSTunnel(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel error: %v", err)
+		t.Fatalf("setupClientDualMux error: %v", err)
 	}
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -173,9 +172,6 @@ func TestPhase3FullHTTPAndWSTunnel(t *testing.T) {
 	_ = clientPC.SetLocalDescription(offer)
 	_ = safeWriteJSON(&signaling.Message{Type: signaling.TypeOffer, NodeID: agentNodeID, SDP: &offer})
 
-	dcOpenCh := make(chan struct{})
-	dc.OnOpen(func() { close(dcOpenCh) })
-
 	go func() {
 		for {
 			var msg signaling.Message
@@ -192,17 +188,14 @@ func TestPhase3FullHTTPAndWSTunnel(t *testing.T) {
 	}()
 
 	select {
-	case <-dcOpenCh:
-		t.Log("WebRTC P2P DataChannel open!")
+	case <-allOpenCh:
+		t.Log("WebRTC Dual DataChannels open!")
 	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for DataChannel")
+		t.Fatal("Timeout waiting for DataChannels")
 	}
 
-	clientMux := mux.NewMux(dc, true)
+	clientMux := createMux()
 	defer clientMux.Close()
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	// ----------------------------------------------------
 	// Verification 1: Basic HTTP GET Request (/api/info)
@@ -305,7 +298,9 @@ func TestPhase3FullHTTPAndWSTunnel(t *testing.T) {
 		_ = stream2.WriteHeaders(reqBytes2)
 		_ = stream2.Close()
 
-		respHeaderBytes2, err := stream2.ReadHeaders(context.Background())
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+		respHeaderBytes2, err := stream2.ReadHeaders(ctx2)
+		cancel2()
 		if err != nil {
 			t.Fatalf("ReadHeaders error: %v", err)
 		}

@@ -36,11 +36,12 @@ type Stream struct {
 	headersOnce  sync.Once
 	headersCh    chan []byte
 
-	readClosed  bool
-	writeClosed bool
-	isReset     bool
-	err         error
-	lastActive  atomic.Int64
+	readClosed      bool
+	writeClosed     bool
+	headersReceived bool
+	isReset         bool
+	err             error
+	lastActive      atomic.Int64
 }
 
 func (s *Stream) touch() {
@@ -55,12 +56,13 @@ func (s *Stream) LastActive() time.Time {
 func newStream(id uint32, m *Mux) *Stream {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Stream{
-		id:        id,
-		mux:       m,
-		ctx:       ctx,
-		cancel:    cancel,
-		inbound:   make([][]byte, 0, 16),
-		headersCh: make(chan []byte, 1),
+		id:              id,
+		mux:             m,
+		ctx:             ctx,
+		cancel:          cancel,
+		inbound:         make([][]byte, 0, 16),
+		headersCh:       make(chan []byte, 1),
+		headersReceived: !m.isClient,
 	}
 	s.touch()
 	s.cond = sync.NewCond(&s.mu)
@@ -267,9 +269,7 @@ func (s *Stream) Reset() error {
 	s.mu.Unlock()
 
 	// Wake up any goroutines waiting on mux backpressure
-	s.mux.bpMu.Lock()
-	s.mux.bpCond.Broadcast()
-	s.mux.bpMu.Unlock()
+	s.mux.broadcastBackpressure()
 
 	frame := protocol.NewFrame(s.id, protocol.TypeRstStream, protocol.FlagNone, nil)
 	_ = s.mux.writeFrame(frame)
@@ -301,9 +301,7 @@ func (s *Stream) pushInboundData(payload []byte, fin bool) {
 			s.cond.Broadcast()
 			s.mu.Unlock()
 
-			s.mux.bpMu.Lock()
-			s.mux.bpCond.Broadcast()
-			s.mux.bpMu.Unlock()
+			s.mux.broadcastBackpressure()
 
 			go func() {
 				rstFrame := protocol.NewFrame(s.id, protocol.TypeRstStream, protocol.FlagNone, nil)
@@ -326,9 +324,7 @@ func (s *Stream) pushInboundData(payload []byte, fin bool) {
 				s.drainUnreadInboundLocked()
 				s.cond.Broadcast()
 
-				s.mux.bpMu.Lock()
-				s.mux.bpCond.Broadcast()
-				s.mux.bpMu.Unlock()
+				s.mux.broadcastBackpressure()
 
 				go func() {
 					rstFrame := protocol.NewFrame(s.id, protocol.TypeRstStream, protocol.FlagNone, nil)
@@ -370,11 +366,15 @@ func (s *Stream) pushInboundHeaders(payload []byte) {
 	s.headersOnce.Do(func() {
 		cp := make([]byte, len(payload))
 		copy(cp, payload)
+		s.mu.Lock()
+		s.headersReceived = true
+		s.mu.Unlock()
 		select {
 		case s.headersCh <- cp:
 		default:
 		}
 	})
+	s.checkFullClose()
 }
 
 // markRemoteReset marks stream as reset by remote peer.
@@ -385,19 +385,18 @@ func (s *Stream) markRemoteReset() {
 	s.isReset = true
 	s.readClosed = true
 	s.writeClosed = true
+	s.headersReceived = true
 	s.drainUnreadInboundLocked()
 	s.err = ErrStreamReset
 	s.cancel()
 	s.cond.Broadcast()
 
-	s.mux.bpMu.Lock()
-	s.mux.bpCond.Broadcast()
-	s.mux.bpMu.Unlock()
+	s.mux.broadcastBackpressure()
 }
 
 func (s *Stream) checkFullClose() {
 	s.mu.Lock()
-	bothClosed := s.readClosed && s.writeClosed
+	bothClosed := s.readClosed && s.writeClosed && s.headersReceived
 	s.mu.Unlock()
 
 	if bothClosed {

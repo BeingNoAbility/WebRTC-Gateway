@@ -13,7 +13,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"webrtc-gateway/pkg/agent"
-	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/proxy"
 	"webrtc-gateway/pkg/signaling"
 )
@@ -195,9 +194,9 @@ func TestClientIP_EndToEnd_PropagationAndAntiSpoofing(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	dc, err := clientPC.CreateDataChannel("p2pmux", nil)
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel failed: %v", err)
+		t.Fatalf("setupClientDualMux failed: %v", err)
 	}
 
 	var clientWSMu sync.Mutex
@@ -267,27 +266,15 @@ func TestClientIP_EndToEnd_PropagationAndAntiSpoofing(t *testing.T) {
 		t.Fatalf("Timed out waiting for WebRTC Answer")
 	}
 
-	dcOpened := make(chan struct{}, 1)
-	dc.OnOpen(func() {
-		select {
-		case dcOpened <- struct{}{}:
-		default:
-		}
-	})
-
 	select {
-	case <-dcOpened:
+	case <-allOpenCh:
 	case <-time.After(5 * time.Second):
-		t.Fatalf("Timed out waiting for DataChannel open")
+		t.Fatalf("Timed out waiting for DataChannels open")
 	}
 
 	// 6. Send HTTP request over DataChannel Mux with spoofed headers
-	clientMux := mux.NewMux(dc, true)
+	clientMux := createMux()
 	defer clientMux.Close()
-
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	stream, err := clientMux.OpenStream()
 	if err != nil {

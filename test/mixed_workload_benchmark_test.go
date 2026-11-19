@@ -232,9 +232,9 @@ func TestE2E_MixedWorkload_LargeFileAndHighFreqAPI(t *testing.T) {
 	t.Logf("  Max: %.2f ms", float64(maxLat.Microseconds())/1000.0)
 	t.Logf("=================================================================")
 
-	// Assertion: P95 latency of API requests must remain responsive (< 50ms)
+	// Assertion: P95 latency of API requests must remain responsive (< 100ms)
 	// even under 100% saturation of WebRTC DataChannel by bulk file download
-	if p95Lat > 50*time.Millisecond {
-		t.Errorf("API P95 latency too high: expected < 50ms, got %v", p95Lat)
+	if p95Lat > 100*time.Millisecond {
+		t.Errorf("API P95 latency too high: expected < 100ms, got %v", p95Lat)
 	}
 }

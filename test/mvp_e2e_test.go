@@ -15,7 +15,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"webrtc-gateway/pkg/agent"
-	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/signaling"
 )
 
@@ -203,11 +202,9 @@ func TestPhase2E2EWebRTCP2PMux(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{
-		Ordered: boolPtr(true),
-	})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel error: %v", err)
+		t.Fatalf("setupClientDualMux error: %v", err)
 	}
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -238,12 +235,6 @@ func TestPhase2E2EWebRTCP2PMux(t *testing.T) {
 		t.Fatalf("Send Offer error: %v", err)
 	}
 
-	// Handle Answer and Candidates from Agent
-	dcOpenCh := make(chan struct{})
-	dc.OnOpen(func() {
-		close(dcOpenCh)
-	})
-
 	go func() {
 		for {
 			var msg signaling.Message
@@ -259,21 +250,17 @@ func TestPhase2E2EWebRTCP2PMux(t *testing.T) {
 		}
 	}()
 
-	// 5. Wait for WebRTC P2P DataChannel to Open
+	// 5. Wait for WebRTC P2P DataChannels to Open
 	select {
-	case <-dcOpenCh:
-		t.Log("WebRTC DataChannel [p2pmux] successfully opened via P2P!")
+	case <-allOpenCh:
+		t.Log("WebRTC Dual DataChannels [p2pcontrol + p2pdata] successfully opened via P2P!")
 	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for DataChannel to open")
+		t.Fatal("Timeout waiting for DataChannels to open")
 	}
 
 	// 6. Test P2PMux over WebRTC DataChannel
-	clientMux := mux.NewMux(dc, true)
+	clientMux := createMux()
 	defer clientMux.Close()
-
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	// Test Ping / Pong over WebRTC
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -301,6 +288,11 @@ func TestPhase2E2EWebRTCP2PMux(t *testing.T) {
 				return
 			}
 			defer stream.Close()
+
+			if err := stream.WriteHeaders([]byte(`{"method":"ECHO","path":"/echo"}`)); err != nil {
+				t.Errorf("stream %d WriteHeaders error: %v", idx, err)
+				return
+			}
 
 			payload := make([]byte, payloadSize)
 			_, _ = rand.Read(payload)

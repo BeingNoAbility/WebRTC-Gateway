@@ -71,9 +71,9 @@ func setupE2EEnvironment(t *testing.T, handler http.Handler) (
 		t.Fatalf("NewPeerConnection error: %v", err)
 	}
 
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel error: %v", err)
+		t.Fatalf("setupClientDualMux error: %v", err)
 	}
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -91,9 +91,6 @@ func setupE2EEnvironment(t *testing.T, handler http.Handler) (
 	_ = clientPC.SetLocalDescription(offer)
 	_ = safeWriteWS(&signaling.Message{Type: signaling.TypeOffer, NodeID: nodeID, SDP: &offer})
 
-	dcOpenCh := make(chan struct{})
-	dc.OnOpen(func() { close(dcOpenCh) })
-
 	go func() {
 		for {
 			var msg signaling.Message
@@ -110,15 +107,12 @@ func setupE2EEnvironment(t *testing.T, handler http.Handler) (
 	}()
 
 	select {
-	case <-dcOpenCh:
+	case <-allOpenCh:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for WebRTC DataChannel to open")
+		t.Fatal("Timeout waiting for WebRTC DataChannels to open")
 	}
 
-	clientMux = mux.NewMux(dc, true)
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
+	clientMux = createMux()
 
 	cleanup = func() {
 		cancel()
@@ -650,9 +644,9 @@ func TestE2E_DataChannel_ReconnectionResilience(t *testing.T) {
 		}
 		defer clientPC.Close()
 
-		dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+		_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 		if err != nil {
-			return fmt.Errorf("dc error: %w", err)
+			return fmt.Errorf("setupClientDualMux error: %w", err)
 		}
 
 		clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -670,9 +664,6 @@ func TestE2E_DataChannel_ReconnectionResilience(t *testing.T) {
 		_ = clientPC.SetLocalDescription(offer)
 		_ = safeWriteWS(&signaling.Message{Type: signaling.TypeOffer, NodeID: nodeID, SDP: &offer})
 
-		dcOpenCh := make(chan struct{})
-		dc.OnOpen(func() { close(dcOpenCh) })
-
 		go func() {
 			for {
 				var msg signaling.Message
@@ -689,16 +680,13 @@ func TestE2E_DataChannel_ReconnectionResilience(t *testing.T) {
 		}()
 
 		select {
-		case <-dcOpenCh:
+		case <-allOpenCh:
 		case <-time.After(5 * time.Second):
 			return fmt.Errorf("timeout waiting for DC open in %s", sessionTag)
 		}
 
-		clientMux := mux.NewMux(dc, true)
+		clientMux := createMux()
 		defer clientMux.Close()
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			_ = clientMux.HandleIncomingMessage(msg.Data)
-		})
 
 		stream, err := clientMux.OpenStream()
 		if err != nil {

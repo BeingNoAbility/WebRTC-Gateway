@@ -27,6 +27,9 @@ type AgentSession struct {
 	PC  *webrtc.PeerConnection
 	Mux *mux.Mux
 
+	controlDC *webrtc.DataChannel
+	dataDC    *webrtc.DataChannel
+
 	pendingCandidates []webrtc.ICECandidateInit
 	teardownTimer     *time.Timer
 	closed            bool

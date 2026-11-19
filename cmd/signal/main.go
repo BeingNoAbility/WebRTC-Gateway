@@ -40,10 +40,11 @@ import (
 // OriginChecker handles WebSocket Origin verification against allowed origins and same-host rules.
 type OriginChecker struct {
 	allowedPatterns []string
+	allowAll        bool
 	warnOnce        sync.Once
 }
 
-func NewOriginChecker(patterns string) *OriginChecker {
+func NewOriginChecker(patterns string, allowAll bool) *OriginChecker {
 	var list []string
 	for _, p := range strings.Split(patterns, ",") {
 		p = strings.TrimSpace(p)
@@ -51,7 +52,7 @@ func NewOriginChecker(patterns string) *OriginChecker {
 			list = append(list, p)
 		}
 	}
-	return &OriginChecker{allowedPatterns: list}
+	return &OriginChecker{allowedPatterns: list, allowAll: allowAll}
 }
 
 func (oc *OriginChecker) CheckOrigin(r *http.Request) bool {
@@ -59,14 +60,6 @@ func (oc *OriginChecker) CheckOrigin(r *http.Request) bool {
 	// Native / CLI clients (Go CLI Agent, curl) do not send Origin header.
 	// Pass through to TypeRegister secret verification.
 	if origin == "" {
-		return true
-	}
-
-	// Downward compatibility safe-valve: if no allowed origins configured, allow all but warn once
-	if len(oc.allowedPatterns) == 0 {
-		oc.warnOnce.Do(func() {
-			log.Printf("[Security Warning] SIGNAL_ALLOWED_ORIGINS is not configured. Allowing cross-origin WebSocket from Origin: %s (Consider setting SIGNAL_ALLOWED_ORIGINS for CSWSH protection)", origin)
-		})
 		return true
 	}
 
@@ -78,6 +71,15 @@ func (oc *OriginChecker) CheckOrigin(r *http.Request) bool {
 
 	// Default trust same-origin (origin host == request Host)
 	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+
+	// In v2.3+: Empty allowed-origins blocks cross-origin requests by default.
+	// Only explicit allowAll permits cross-origin without whitelist.
+	if oc.allowAll {
+		oc.warnOnce.Do(func() {
+			log.Printf("[Security Warning] Signal running with --allow-all-origins. Permitting cross-origin WebSocket from Origin: %s", origin)
+		})
 		return true
 	}
 
@@ -152,7 +154,7 @@ func matchHostPattern(pattern, host string) bool {
 var globalOriginChecker atomic.Pointer[OriginChecker]
 
 func init() {
-	SetOriginChecker(NewOriginChecker(""))
+	SetOriginChecker(NewOriginChecker("", false))
 }
 
 // GetOriginChecker returns the active OriginChecker instance.
@@ -1194,6 +1196,7 @@ func main() {
 	tlsAuto := flag.Bool("tls-auto", cfgTLSAuto, "Automatically generate in-memory self-signed ECDSA certificate for local/LAN HTTPS Secure Context (env: TLS_AUTO)")
 	signalSecret := flag.String("signal-secret", cfgSignalSecret, "Server-wide pre-shared secret for agent registration & anti-hijacking (env: SIGNAL_SECRET)")
 	allowedOrigins := flag.String("allowed-origins", cfgAllowedOrigins, "Comma-separated allowed origins for browser WebSocket signaling (supports wildcards, env: SIGNAL_ALLOWED_ORIGINS)")
+	allowAllOrigins := flag.Bool("allow-all-origins", os.Getenv("SIGNAL_ALLOW_ALL_ORIGINS") == "true", "Allow all cross-origin WebSocket signaling connections without whitelist (dev/test only, env: SIGNAL_ALLOW_ALL_ORIGINS)")
 	configFlag := flag.String("config", "", "Path to configuration file (.yaml, .yml, or .json, env: CONFIG_FILE)")
 	maxIPConns := flag.Int("max-ip-conns", cfgMaxIPConns, "Maximum concurrent WebSocket connections per client IP (env: MAX_IP_CONNS)")
 	trustedProxies := flag.String("trusted-proxies", cfgTrustedProxies, "Comma-separated trusted proxy CIDRs/IPs for real client IP extraction (env: TRUSTED_PROXIES)")
@@ -1224,9 +1227,13 @@ func main() {
 		log.Printf("[Server] Custom trusted proxies configured (%d prefixes): %s", len(trustedPrefixes), *trustedProxies)
 	}
 
-	SetOriginChecker(NewOriginChecker(*allowedOrigins))
+	SetOriginChecker(NewOriginChecker(*allowedOrigins, *allowAllOrigins))
 	if *allowedOrigins != "" {
 		log.Printf("[Server] Allowed WebSocket origins configured: %s", *allowedOrigins)
+	} else if *allowAllOrigins {
+		log.Printf("[Server Warning] Signal running with --allow-all-origins (CSWSH whitelist disabled)")
+	} else {
+		log.Printf("[Server] Strict CSWSH protection active: cross-origin WebSocket requests blocked by default")
 	}
 
 	broker := NewSignalBroker(finalSecret)

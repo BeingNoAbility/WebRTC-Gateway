@@ -31,7 +31,19 @@ const (
 	DefaultInboundLowWaterMark int64 = 64 * 1024 * 1024
 	// DefaultInboundBackpressureTimeout is how long an incoming DATA frame waits for buffer drain before resetting the stream.
 	DefaultInboundBackpressureTimeout = 3 * time.Second
+
+	// DefaultMaxOrphanBytesPerStream is the maximum memory buffered for orphan frames of a single stream (64KB).
+	DefaultMaxOrphanBytesPerStream = 64 * 1024
+	// DefaultMaxGlobalOrphanBytes is the total global orphan frame memory cap (256KB).
+	DefaultMaxGlobalOrphanBytes = 256 * 1024
+	// DefaultOrphanFrameTTL is the maximum time an orphan frame is held awaiting HEADERS (500ms).
+	DefaultOrphanFrameTTL = 500 * time.Millisecond
 )
+
+type pendingOrphan struct {
+	frame     *protocol.Frame
+	arrivedAt time.Time
+}
 
 // Transport defines the underlying packet transport interface (e.g. *webrtc.DataChannel).
 type Transport interface {
@@ -41,23 +53,26 @@ type Transport interface {
 	OnBufferedAmountLow(f func())
 }
 
-// Mux manages multiplexed logical streams over a single Transport.
+// Mux manages multiplexed logical streams over dual Transports (p2pcontrol + p2pdata) or a single legacy Transport.
 type Mux struct {
-	transport       Transport
-	isClient        bool
-	nextStreamID    uint32
-	maxPeerStreamID uint32
-	closedStreams   map[uint32]struct{}
+	controlTransport Transport
+	dataTransport    Transport
+	isClient         bool
+	nextStreamID     uint32
+	maxPeerStreamID  uint32
+	closedStreams    map[uint32]struct{}
 
 	mu       sync.RWMutex
 	streams  map[uint32]*Stream
 	acceptCh chan *Stream
 
-	writeMu  sync.Mutex
-	bpMu     sync.Mutex
-	bpCond   *sync.Cond
-	closed   bool
-	closedCh chan struct{}
+	writeMu       sync.Mutex
+	controlBpMu   sync.Mutex
+	controlBpCond *sync.Cond
+	dataBpMu      sync.Mutex
+	dataBpCond    *sync.Cond
+	closed        bool
+	closedCh      chan struct{}
 
 	maxInboundBytes       int64
 	inboundHighWaterMark  int64
@@ -68,18 +83,23 @@ type Mux struct {
 	inboundBpMu   sync.Mutex
 	inboundBpCond *sync.Cond
 
+	// Orphan data frame buffer (DATA arriving before HEADERS on p2pdata)
+	orphanMu         sync.Mutex
+	pendingOrphans   map[uint32][]*pendingOrphan
+	orphanBytesTotal int
+
 	pingSeq      atomic.Uint64
 	pingsMu      sync.Mutex
 	pendingPings map[uint64]chan struct{}
-	legacyPongCh chan struct{}
 	closeMu      sync.Once
 }
 
-// NewMux creates a new Mux over the given Transport.
+// NewDualMux creates a new Mux operating with dedicated control and data transports.
 // isClient: true if visitor browser (allocates odd stream IDs), false if agent (allocates even stream IDs).
-func NewMux(transport Transport, isClient bool) *Mux {
+func NewDualMux(controlTransport, dataTransport Transport, isClient bool) *Mux {
 	m := &Mux{
-		transport:             transport,
+		controlTransport:      controlTransport,
+		dataTransport:         dataTransport,
 		isClient:              isClient,
 		streams:               make(map[uint32]*Stream),
 		closedStreams:         make(map[uint32]struct{}),
@@ -90,8 +110,12 @@ func NewMux(transport Transport, isClient bool) *Mux {
 		inboundLowWaterMark:   DefaultInboundLowWaterMark,
 		inboundBackpressureTo: DefaultInboundBackpressureTimeout,
 		pendingPings:          make(map[uint64]chan struct{}),
-		legacyPongCh:          make(chan struct{}, 1),
+		pendingOrphans:        make(map[uint32][]*pendingOrphan),
 	}
+
+	m.controlBpCond = sync.NewCond(&m.controlBpMu)
+	m.dataBpCond = sync.NewCond(&m.dataBpMu)
+	m.inboundBpCond = sync.NewCond(&m.inboundBpMu)
 
 	if isClient {
 		m.nextStreamID = 1
@@ -99,20 +123,32 @@ func NewMux(transport Transport, isClient bool) *Mux {
 		m.nextStreamID = 2
 	}
 
-	m.bpCond = sync.NewCond(&m.bpMu)
-	m.inboundBpCond = sync.NewCond(&m.inboundBpMu)
+	if controlTransport != nil {
+		controlTransport.SetBufferedAmountLowThreshold(DefaultBufferedLowWaterMark)
+		controlTransport.OnBufferedAmountLow(func() {
+			m.controlBpMu.Lock()
+			m.controlBpCond.Broadcast()
+			m.controlBpMu.Unlock()
+		})
+	}
 
-	// Configure transport backpressure low threshold
-	transport.SetBufferedAmountLowThreshold(DefaultBufferedLowWaterMark)
-	transport.OnBufferedAmountLow(func() {
-		m.bpMu.Lock()
-		m.bpCond.Broadcast()
-		m.bpMu.Unlock()
-	})
+	if dataTransport != nil {
+		dataTransport.SetBufferedAmountLowThreshold(DefaultBufferedLowWaterMark)
+		dataTransport.OnBufferedAmountLow(func() {
+			m.dataBpMu.Lock()
+			m.dataBpCond.Broadcast()
+			m.dataBpMu.Unlock()
+		})
+	}
 
 	go m.reaperLoop()
 
 	return m
+}
+
+// NewMux creates a new Mux over a single Transport (convenience wrapper).
+func NewMux(transport Transport, isClient bool) *Mux {
+	return NewDualMux(transport, nil, isClient)
 }
 
 // OpenStream initiates a new outbound stream.
@@ -181,60 +217,90 @@ func (m *Mux) HandleIncomingMessage(data []byte) error {
 	m.mu.RUnlock()
 
 	if !exists {
-		// New incoming stream initiated by peer
-		if frame.Type == protocol.TypeHeaders || frame.Type == protocol.TypeData || frame.Type == protocol.TypeWSConnect {
-			// Validate parity: Client allocates odd IDs, Agent allocates even IDs
-			isExpectedPeerID := (m.isClient && frame.StreamID%2 == 0) || (!m.isClient && frame.StreamID%2 == 1)
-			if !isExpectedPeerID {
-				return nil
-			}
-
-			m.mu.Lock()
-			if m.closed {
-				m.mu.Unlock()
-				return ErrMuxClosed
-			}
-
-			// Peer wraparound detection: if peer was near the top of the ID space and now sends low IDs (F-10)
-			if m.maxPeerStreamID >= 0xFFFF0000 && frame.StreamID < 0x100000 {
-				m.maxPeerStreamID = frame.StreamID
-				// Reset tombstoned closed streams from previous epoch
-				m.closedStreams = make(map[uint32]struct{})
-			}
-
-			// Ghost stream protection: drop frame if stream was already closed or is older than the high-water mark window.
-			const streamWindow uint32 = 1024
-			if _, isClosed := m.closedStreams[frame.StreamID]; isClosed {
-				m.mu.Unlock()
-				return nil
-			}
-			if m.maxPeerStreamID > streamWindow && frame.StreamID < m.maxPeerStreamID-streamWindow {
-				m.mu.Unlock()
-				return nil
-			}
-
-			if frame.StreamID > m.maxPeerStreamID {
-				m.maxPeerStreamID = frame.StreamID
-			}
-
-			s = newStream(frame.StreamID, m)
-			s.initialType = frame.Type
-			m.streams[frame.StreamID] = s
-
-			select {
-			case m.acceptCh <- s:
-				m.mu.Unlock()
-			default:
-				// Buffer full, reset stream
-				delete(m.streams, frame.StreamID)
-				m.mu.Unlock()
-				s.Reset()
-				return nil
-			}
-		} else {
-			// Frame for unknown/already closed stream, ignore or RST
+		// Validate parity: Client allocates odd IDs, Agent allocates even IDs
+		isExpectedPeerID := (m.isClient && frame.StreamID%2 == 0) || (!m.isClient && frame.StreamID%2 == 1)
+		if !isExpectedPeerID {
 			return nil
 		}
+
+		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			return ErrMuxClosed
+		}
+
+		// Peer wraparound detection: if peer was near the top of the ID space and now sends low IDs (F-10)
+		if m.maxPeerStreamID >= 0xFFFF0000 && frame.StreamID < 0x100000 {
+			m.maxPeerStreamID = frame.StreamID
+			// Reset tombstoned closed streams from previous epoch
+			m.closedStreams = make(map[uint32]struct{})
+		}
+
+		// Ghost stream protection: drop frame if stream was already closed or is older than the high-water mark window.
+		const streamWindow uint32 = 1024
+		if _, isClosed := m.closedStreams[frame.StreamID]; isClosed {
+			m.mu.Unlock()
+			return nil
+		}
+		if m.maxPeerStreamID > streamWindow && frame.StreamID < m.maxPeerStreamID-streamWindow {
+			m.mu.Unlock()
+			return nil
+		}
+
+		// If this is an orphan DATA frame on dual-channel mux (arriving on p2pdata before HEADERS on p2pcontrol)
+		if m.dataTransport != nil && (frame.Type == protocol.TypeData || frame.Type == protocol.TypeWSData) {
+			m.mu.Unlock()
+			m.bufferOrphanFrame(frame)
+			return nil
+		}
+
+		if frame.Type == protocol.TypeRstStream {
+			m.mu.Unlock()
+			m.dropOrphans(frame.StreamID)
+			return nil
+		}
+
+		// In single-transport or standard header arrival, initiating frames: TypeHeaders, TypeData (single-transport), TypeWSConnect
+		if frame.Type != protocol.TypeHeaders && frame.Type != protocol.TypeData && frame.Type != protocol.TypeWSConnect {
+			m.mu.Unlock()
+			return nil
+		}
+
+		if frame.StreamID > m.maxPeerStreamID {
+			m.maxPeerStreamID = frame.StreamID
+		}
+
+		s = newStream(frame.StreamID, m)
+		s.initialType = frame.Type
+		m.streams[frame.StreamID] = s
+
+		select {
+		case m.acceptCh <- s:
+			m.mu.Unlock()
+		default:
+			// Buffer full, reset stream
+			delete(m.streams, frame.StreamID)
+			m.mu.Unlock()
+			s.Reset()
+			return nil
+		}
+
+		// Flush initiating payload
+		if frame.Type == protocol.TypeHeaders {
+			s.pushInboundHeaders(frame.Payload)
+		} else if frame.Type == protocol.TypeData || frame.Type == protocol.TypeWSConnect {
+			fin := (frame.Flags & protocol.FlagFin) != 0
+			s.pushInboundData(frame.Payload, fin)
+		}
+
+		// Flush any orphan data frames that arrived before HEADERS/WSConnect
+		orphans := m.takeOrphanFrames(frame.StreamID)
+		for _, of := range orphans {
+			fin := (of.frame.Flags & protocol.FlagFin) != 0
+			s.pushInboundData(of.frame.Payload, fin)
+		}
+
+		return nil
 	}
 
 	switch frame.Type {
@@ -275,11 +341,6 @@ func (m *Mux) handleControlFrame(frame *protocol.Frame) error {
 				return nil
 			}
 		}
-		// Legacy fallback if payload < 8 bytes
-		select {
-		case m.legacyPongCh <- struct{}{}:
-		default:
-		}
 	}
 	return nil
 }
@@ -315,8 +376,6 @@ func (m *Mux) Ping(ctx context.Context) (time.Duration, error) {
 		return 0, ErrPingTimeout
 	case <-ch:
 		return time.Since(start), nil
-	case <-m.legacyPongCh:
-		return time.Since(start), nil
 	}
 }
 
@@ -324,17 +383,112 @@ func (m *Mux) Ping(ctx context.Context) (time.Duration, error) {
 const DefaultStreamIdleTimeout = 5 * time.Minute
 
 func (m *Mux) reaperLoop() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	idleTicker := time.NewTicker(30 * time.Second)
+	defer idleTicker.Stop()
+
+	orphanTicker := time.NewTicker(100 * time.Millisecond)
+	defer orphanTicker.Stop()
 
 	for {
 		select {
 		case <-m.closedCh:
 			return
-		case <-ticker.C:
+		case <-idleTicker.C:
 			m.reapIdleStreams()
+		case <-orphanTicker.C:
+			m.orphanMu.Lock()
+			hasOrphans := len(m.pendingOrphans) > 0
+			m.orphanMu.Unlock()
+			if hasOrphans {
+				m.reapExpiredOrphans()
+			}
 		}
 	}
+}
+
+func (m *Mux) reapExpiredOrphans() {
+	now := time.Now()
+	var expiredStreamIDs []uint32
+
+	m.orphanMu.Lock()
+	for streamID, orphans := range m.pendingOrphans {
+		if len(orphans) > 0 && now.Sub(orphans[0].arrivedAt) > DefaultOrphanFrameTTL {
+			expiredStreamIDs = append(expiredStreamIDs, streamID)
+		}
+	}
+	for _, sid := range expiredStreamIDs {
+		orphans := m.pendingOrphans[sid]
+		delete(m.pendingOrphans, sid)
+		for _, o := range orphans {
+			m.orphanBytesTotal -= len(o.frame.Payload)
+		}
+	}
+	if m.orphanBytesTotal < 0 {
+		m.orphanBytesTotal = 0
+	}
+	m.orphanMu.Unlock()
+
+	for _, sid := range expiredStreamIDs {
+		m.mu.Lock()
+		if m.closedStreams == nil {
+			m.closedStreams = make(map[uint32]struct{})
+		}
+		m.closedStreams[sid] = struct{}{}
+		m.mu.Unlock()
+
+		rst := protocol.NewFrame(sid, protocol.TypeRstStream, protocol.FlagNone, nil)
+		_ = m.writeFrame(rst)
+	}
+}
+
+// bufferOrphanFrame stores an orphan DATA/WS_DATA frame awaiting HEADERS on dual-channel mux.
+func (m *Mux) bufferOrphanFrame(f *protocol.Frame) {
+	m.orphanMu.Lock()
+	defer m.orphanMu.Unlock()
+
+	frameLen := len(f.Payload)
+	// Check global cap (256KB)
+	if m.orphanBytesTotal+frameLen > DefaultMaxGlobalOrphanBytes {
+		return
+	}
+
+	streamOrphans := m.pendingOrphans[f.StreamID]
+	streamBytes := 0
+	for _, o := range streamOrphans {
+		streamBytes += len(o.frame.Payload)
+	}
+	// Check per-stream cap (64KB)
+	if streamBytes+frameLen > DefaultMaxOrphanBytesPerStream {
+		return
+	}
+
+	m.pendingOrphans[f.StreamID] = append(streamOrphans, &pendingOrphan{
+		frame:     f,
+		arrivedAt: time.Now(),
+	})
+	m.orphanBytesTotal += frameLen
+}
+
+func (m *Mux) takeOrphanFrames(streamID uint32) []*pendingOrphan {
+	m.orphanMu.Lock()
+	defer m.orphanMu.Unlock()
+
+	orphans, ok := m.pendingOrphans[streamID]
+	if !ok {
+		return nil
+	}
+	delete(m.pendingOrphans, streamID)
+	for _, o := range orphans {
+		m.orphanBytesTotal -= len(o.frame.Payload)
+	}
+	if m.orphanBytesTotal < 0 {
+		m.orphanBytesTotal = 0
+	}
+	return orphans
+}
+
+func (m *Mux) dropOrphans(streamID uint32) {
+	_ = m.takeOrphanFrames(streamID)
 }
 
 func (m *Mux) reapIdleStreams() {
@@ -373,62 +527,94 @@ var frameEncodePool = sync.Pool{
 	},
 }
 
-// writeFrame writes an encoded frame to the underlying transport with backpressure flow control.
-// High-priority control frames (PING, PONG, RST, HEADERS, stream 0) bypass data buffer backpressure,
+func (m *Mux) broadcastBackpressure() {
+	if m.controlBpCond != nil {
+		m.controlBpMu.Lock()
+		m.controlBpCond.Broadcast()
+		m.controlBpMu.Unlock()
+	}
+	if m.dataBpCond != nil {
+		m.dataBpMu.Lock()
+		m.dataBpCond.Broadcast()
+		m.dataBpMu.Unlock()
+	}
+}
+
+// writeFrame writes an encoded frame to the appropriate transport (control vs data) with backpressure flow control.
+// Control frames (PING, PONG, RST, HEADERS, stream 0) route to controlTransport and bypass data backpressure,
 // preventing Head-of-Line (HoL) blocking when large data streams saturate the buffer.
 func (m *Mux) writeFrame(f *protocol.Frame) error {
-	isHighPriority := f.StreamID == 0 ||
-		f.Type == protocol.TypePing ||
-		f.Type == protocol.TypePong ||
-		f.Type == protocol.TypeRstStream ||
-		f.Type == protocol.TypeHeaders
+	isBulkData := f.Type == protocol.TypeData || f.Type == protocol.TypeWSData
 
-	if !isHighPriority {
-		m.bpMu.Lock()
-		for m.transport.BufferedAmount() > DefaultBufferedHighWaterMark {
+	var targetTransport Transport
+	var bpMu *sync.Mutex
+	var bpCond *sync.Cond
+
+	if isBulkData && m.dataTransport != nil {
+		targetTransport = m.dataTransport
+		bpMu = &m.dataBpMu
+		bpCond = m.dataBpCond
+	} else if isBulkData {
+		targetTransport = m.controlTransport
+		bpMu = &m.controlBpMu
+		bpCond = m.controlBpCond
+	} else {
+		// Control frame: routed over controlTransport, bypasses backpressure
+		targetTransport = m.controlTransport
+		bpMu = nil
+		bpCond = nil
+	}
+
+	if targetTransport == nil {
+		return ErrMuxClosed
+	}
+
+	if bpCond != nil {
+		bpMu.Lock()
+		for targetTransport.BufferedAmount() > DefaultBufferedHighWaterMark {
 			m.mu.RLock()
 			closed := m.closed
 			m.mu.RUnlock()
 			if closed {
-				m.bpMu.Unlock()
+				bpMu.Unlock()
 				return ErrMuxClosed
 			}
 
 			s := m.getStream(f.StreamID)
 			if s == nil {
-				m.bpMu.Unlock()
+				bpMu.Unlock()
 				return ErrStreamClosed
 			}
 			select {
 			case <-s.Context().Done():
-				m.bpMu.Unlock()
+				bpMu.Unlock()
 				return s.Context().Err()
 			default:
 			}
 
-			m.bpCond.Wait()
+			bpCond.Wait()
 
 			m.mu.RLock()
 			closed = m.closed
 			m.mu.RUnlock()
 			if closed {
-				m.bpMu.Unlock()
+				bpMu.Unlock()
 				return ErrMuxClosed
 			}
 
 			s = m.getStream(f.StreamID)
 			if s == nil {
-				m.bpMu.Unlock()
+				bpMu.Unlock()
 				return ErrStreamClosed
 			}
 			select {
 			case <-s.Context().Done():
-				m.bpMu.Unlock()
+				bpMu.Unlock()
 				return s.Context().Err()
 			default:
 			}
 		}
-		m.bpMu.Unlock()
+		bpMu.Unlock()
 	}
 
 	m.writeMu.Lock()
@@ -457,7 +643,7 @@ func (m *Mux) writeFrame(f *protocol.Frame) error {
 		encoded = f.Encode()
 	}
 
-	return m.transport.Send(encoded)
+	return targetTransport.Send(encoded)
 }
 
 func (m *Mux) removeStream(id uint32) {
@@ -499,13 +685,26 @@ func (m *Mux) Close() error {
 			s.markResetNoRemove()
 		}
 
-		m.bpMu.Lock()
-		m.bpCond.Broadcast()
-		m.bpMu.Unlock()
+		if m.controlBpCond != nil {
+			m.controlBpMu.Lock()
+			m.controlBpCond.Broadcast()
+			m.controlBpMu.Unlock()
+		}
+
+		if m.dataBpCond != nil {
+			m.dataBpMu.Lock()
+			m.dataBpCond.Broadcast()
+			m.dataBpMu.Unlock()
+		}
 
 		m.inboundBpMu.Lock()
 		m.inboundBpCond.Broadcast()
 		m.inboundBpMu.Unlock()
+
+		m.orphanMu.Lock()
+		m.pendingOrphans = make(map[uint32][]*pendingOrphan)
+		m.orphanBytesTotal = 0
+		m.orphanMu.Unlock()
 
 		m.pingsMu.Lock()
 		for seq, ch := range m.pendingPings {

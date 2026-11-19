@@ -60,7 +60,6 @@ class PortalApp {
   private initialSubpath: string = '/';
   private ws: WebSocket | null = null;
   private pc: RTCPeerConnection | null = null;
-  private legacyFallbackAttempted: boolean = false;
 
   // WebRTC HUD Diagnostics & Real-time Metrics
   private hudStatsTimer: any = null;
@@ -83,6 +82,8 @@ class PortalApp {
     iceState: 'disconnected',
     connState: 'new',
   };
+  private controlDc: RTCDataChannel | null = null;
+  private dataDc: RTCDataChannel | null = null;
   private dc: RTCDataChannel | null = null;
   private mux: P2PMux | null = null;
   private pingInterval: any = null;
@@ -597,7 +598,7 @@ class PortalApp {
   }
 
   private getSignalingWsUrl(): string {
-    if (this.legacyFallbackAttempted || !this.peerId) {
+    if (!this.peerId) {
       return this.signalUrl;
     }
     try {
@@ -657,7 +658,6 @@ class PortalApp {
           return;
         }
         if (msg.status === 'online') {
-          this.legacyFallbackAttempted = false;
           this.hideOfflinePrompt();
           if (this.authKeyPromise) {
             await this.authKeyPromise;
@@ -674,17 +674,6 @@ class PortalApp {
           await this.initWebRTC();
         } else {
           this.log(`Target peer [${this.peerId}] is OFFLINE.`);
-          // Cloudflare DO edge sharding fallback (PERF-10 / Trap 4):
-          // If connection was sharded via ?node= and peer reported offline, retry once on legacy global room
-          if (!this.legacyFallbackAttempted && this.ws && this.ws.url && this.ws.url.includes('node=')) {
-            this.legacyFallbackAttempted = true;
-            this.log(`Peer reported offline in sharded room. Falling back to legacy global signaling for compatibility...`);
-            try {
-              this.ws.close();
-            } catch {}
-            this.startSignaling();
-            return;
-          }
           if (this.signalVal) this.signalVal.textContent = 'Peer Offline';
           this.showOfflinePrompt(this.peerId);
         }
@@ -808,12 +797,16 @@ class PortalApp {
       }
     };
 
-    // Create DataChannel with label "p2pmux"
-    this.dc = this.pc.createDataChannel('p2pmux', {
+    // Create dual DataChannels: "p2pcontrol" and "p2pdata"
+    this.controlDc = this.pc.createDataChannel('p2pcontrol', {
       ordered: true,
     });
+    this.dataDc = this.pc.createDataChannel('p2pdata', {
+      ordered: true,
+    });
+    this.dc = this.controlDc;
 
-    this.setupDataChannel(this.dc);
+    this.setupDataChannels(this.controlDc, this.dataDc);
 
     // Create Offer
     const offer = await this.pc.createOffer();
@@ -826,13 +819,17 @@ class PortalApp {
       await this.authKeyPromise;
     }
 
-    // F-04: DTLS certificate fingerprint binding with derived authKey
-    if (this.authKey && offer.sdp) {
+    // F-04: Mandatory DTLS certificate fingerprint binding with derived authKey or signed share link
+    if (offer.sdp) {
       const sdpFingerprint = extractSDPFingerprint(offer.sdp);
       if (sdpFingerprint) {
-        const expTime = exp || Math.floor(Date.now() / 1000) + 300;
-        exp = expTime;
-        sign = await computeHMACSHA256Hex(this.authKey, `${this.peerId}:${expTime}:${sdpFingerprint}`);
+        if (this.authKey) {
+          const expTime = exp || Math.floor(Date.now() / 1000) + 300;
+          exp = expTime;
+          sign = await computeHMACSHA256Hex(this.authKey, `${this.peerId}:${expTime}:${sdpFingerprint}`);
+        } else if (this.shareSign && exp) {
+          sign = await computeHMACSHA256Hex(this.shareSign, `${this.peerId}:${exp}:${sdpFingerprint}`);
+        }
       }
     }
 
@@ -849,29 +846,56 @@ class PortalApp {
     );
   }
 
-  private setupDataChannel(dc: RTCDataChannel) {
-    dc.onopen = () => {
-      this.log('DataChannel [p2pmux] OPENED! Direct P2P tunnel established.');
-      this.updateConnState('connected');
+  private setupDataChannels(controlDc: RTCDataChannel, dataDc: RTCDataChannel) {
+    let controlOpen = false;
+    let dataOpen = false;
 
-      this.mux = new P2PMux(dc, true);
-      if (this.btnPing) this.btnPing.disabled = false;
-      if (this.btnEcho) this.btnEcho.disabled = false;
+    const checkBothOpen = () => {
+      if (controlOpen && dataOpen && !this.mux) {
+        this.log('Dual DataChannels [p2pcontrol + p2pdata] OPENED! Direct P2P tunnel established.');
+        this.updateConnState('connected');
 
-      this.startPingLoop();
-      this.mountAppViewport();
+        this.mux = new P2PMux(controlDc, dataDc, true);
+        if (this.btnPing) this.btnPing.disabled = false;
+        if (this.btnEcho) this.btnEcho.disabled = false;
+
+        this.startPingLoop();
+        this.mountAppViewport();
+      }
     };
 
-    dc.onclose = () => {
-      this.log('DataChannel closed.');
+    controlDc.onopen = () => {
+      controlOpen = true;
+      this.log('DataChannel [p2pcontrol] opened.');
+      checkBothOpen();
+    };
+
+    dataDc.onopen = () => {
+      dataOpen = true;
+      this.log('DataChannel [p2pdata] opened.');
+      checkBothOpen();
+    };
+
+    const handleClose = (label: string) => {
+      this.log(`DataChannel [${label}] closed.`);
       this.updateConnState('disconnected');
       if (this.pingInterval) clearInterval(this.pingInterval);
       if (this.btnPing) this.btnPing.disabled = true;
       if (this.btnEcho) this.btnEcho.disabled = true;
+      if (this.mux) {
+        this.mux.destroy();
+        this.mux = null;
+      }
     };
 
-    dc.onerror = (err) => {
-      this.log(`DataChannel error: ${err}`);
+    controlDc.onclose = () => handleClose('p2pcontrol');
+    dataDc.onclose = () => handleClose('p2pdata');
+
+    controlDc.onerror = (err) => {
+      this.log(`Control DataChannel error: ${err}`);
+    };
+    dataDc.onerror = (err) => {
+      this.log(`Data DataChannel error: ${err}`);
     };
   }
 
@@ -2369,13 +2393,17 @@ class PortalApp {
         await this.authKeyPromise;
       }
 
-      // F-04: DTLS certificate fingerprint binding with derived authKey
-      if (this.authKey && offer.sdp) {
+      // F-04: Mandatory DTLS certificate fingerprint binding with derived authKey or signed share link
+      if (offer.sdp) {
         const sdpFingerprint = extractSDPFingerprint(offer.sdp);
         if (sdpFingerprint) {
-          const expTime = exp || Math.floor(Date.now() / 1000) + 300;
-          exp = expTime;
-          sign = await computeHMACSHA256Hex(this.authKey, `${this.peerId}:${expTime}:${sdpFingerprint}`);
+          if (this.authKey) {
+            const expTime = exp || Math.floor(Date.now() / 1000) + 300;
+            exp = expTime;
+            sign = await computeHMACSHA256Hex(this.authKey, `${this.peerId}:${expTime}:${sdpFingerprint}`);
+          } else if (this.shareSign && exp) {
+            sign = await computeHMACSHA256Hex(this.shareSign, `${this.peerId}:${exp}:${sdpFingerprint}`);
+          }
         }
       }
 
@@ -2456,7 +2484,6 @@ class PortalApp {
   private reconnect() {
     this.hideOfflinePrompt();
     this.hideAuthPrompt();
-    this.legacyFallbackAttempted = false;
     this.isIceRestarting = false;
     if (this.iceRestartTimer) {
       clearTimeout(this.iceRestartTimer);
@@ -2503,7 +2530,9 @@ class PortalApp {
 
     if (this.pingInterval) clearInterval(this.pingInterval);
     if (this.mux) {
-      try { this.dc?.close(); } catch {}
+      this.mux.destroy();
+      try { this.controlDc?.close(); } catch {}
+      try { this.dataDc?.close(); } catch {}
       this.mux = null;
     }
     if (this.pc) {
@@ -2858,6 +2887,7 @@ class PortalApp {
 
     const payload = new TextEncoder().encode(testText);
     const stream = this.mux.openStream();
+    stream.sendHeaders({ method: 'ECHO', path: '/echo' });
     this.log(`Opened new P2P Stream (ID=${stream.id}). Sending ${payload.byteLength} bytes...`);
 
     const startTime = performance.now();

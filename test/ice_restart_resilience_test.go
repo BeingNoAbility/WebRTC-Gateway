@@ -15,7 +15,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"webrtc-gateway/pkg/agent"
-	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/proxy"
 	"webrtc-gateway/pkg/signaling"
 )
@@ -103,9 +102,9 @@ func TestE2E_ICERestart_SessionContinuityAndWeakNetwork(t *testing.T) {
 	}
 	defer clientPC.Close()
 
-	dc, err := clientPC.CreateDataChannel("p2pmux", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
+	_, _, allOpenCh, createMux, err := setupClientDualMux(clientPC)
 	if err != nil {
-		t.Fatalf("CreateDataChannel error: %v", err)
+		t.Fatalf("setupClientDualMux error: %v", err)
 	}
 
 	clientPC.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -122,9 +121,6 @@ func TestE2E_ICERestart_SessionContinuityAndWeakNetwork(t *testing.T) {
 	initialOffer, _ := clientPC.CreateOffer(nil)
 	_ = clientPC.SetLocalDescription(initialOffer)
 	_ = safeWriteWS(&signaling.Message{Type: signaling.TypeOffer, NodeID: nodeID, SDP: &initialOffer})
-
-	dcOpenCh := make(chan struct{})
-	dc.OnOpen(func() { close(dcOpenCh) })
 
 	answerCh := make(chan webrtc.SessionDescription, 5)
 	go func() {
@@ -154,16 +150,13 @@ func TestE2E_ICERestart_SessionContinuityAndWeakNetwork(t *testing.T) {
 	}
 
 	select {
-	case <-dcOpenCh:
+	case <-allOpenCh:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for DataChannel open")
+		t.Fatal("Timeout waiting for DataChannels open")
 	}
 
-	clientMux := mux.NewMux(dc, true)
+	clientMux := createMux()
 	defer clientMux.Close()
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		_ = clientMux.HandleIncomingMessage(msg.Data)
-	})
 
 	// 1. Initial State: Login and obtain session cookie
 	s1, err := clientMux.OpenStream()
