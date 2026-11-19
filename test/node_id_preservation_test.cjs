@@ -49,6 +49,14 @@ assert(patchCode.includes('_p2p_worker'), 'patch.js wraps Worker for dynamic mod
 assert(!portalCode.includes('value="${this.peerId}"'), 'portal.js MUST NOT interpolate peerId into input value attribute (P0-2)');
 assert(!portalCode.includes('value="${this.secret}"'), 'portal.js MUST NOT interpolate secret into input value attribute (P0-2)');
 
+const indexHtmlPath = path.resolve(__dirname, '../web/dist/index.html');
+assert(fs.existsSync(indexHtmlPath), 'web/dist/index.html exists');
+const indexHtmlCode = fs.readFileSync(indexHtmlPath, 'utf-8');
+assert(indexHtmlCode.includes('v2.2.0'), 'index.html displays v2.2.0 version badge in header');
+assert(portalCode.includes('btnCloseOffline') && portalCode.includes('btnDismissOffline'), 'portal.js provides dismissable offline prompt with close and dismiss controls');
+assert(portalCode.includes('p2pOfflineAlertBar'), 'portal.js degrades to non-blocking offline alert bar on dismiss');
+assert(portalCode.includes('P2PMux v2.2 (10-byte Header / 32KB Frame)'), 'portal.js displays non-sensitive protocol and runtime diagnostics');
+
 // 3. Test patch.js virtualization in simulated DOM environment
 function createMockDOM(options = {}) {
   const listeners = {};

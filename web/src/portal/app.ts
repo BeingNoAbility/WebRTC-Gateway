@@ -87,6 +87,7 @@ class PortalApp {
   private mux: P2PMux | null = null;
   private pingInterval: any = null;
   private swRegistration: ServiceWorkerRegistration | null = null;
+  private isOfflineModalDismissed: boolean = false;
 
   // UI Elements
   private connBadge = document.getElementById('connBadge') as HTMLElement;
@@ -1867,6 +1868,9 @@ class PortalApp {
             <div id="shareCopyTip" style="font-size: 11px; color: #3fb950; display: none;">✓ 已复制到剪贴板！可以直接发送给他人访问。</div>
           </div>
         </div>
+        <div id="settingsDiagnosticsContainer" style="margin-bottom: 20px;">
+          ${this.getDiagnosticsHtml()}
+        </div>
         <div style="display: flex; gap: 10px; justify-content: flex-end;">
           <button id="btnToggleDebugView" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 14px; border-radius: 6px; font-size: 13px; cursor: pointer;">Toggle Debug View</button>
           <button id="btnSaveReconnect" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;">Save & Connect</button>
@@ -2072,14 +2076,101 @@ class PortalApp {
       if (inputTurnUser) inputTurnUser.value = localStorage.getItem('p2p_turn_user') || '';
       const inputTurnPass = document.getElementById('inputTurnPass') as HTMLInputElement;
       if (inputTurnPass) inputTurnPass.value = localStorage.getItem('p2p_turn_pass') || '';
+
+      const diag = document.getElementById('settingsDiagnosticsContainer');
+      if (diag) diag.innerHTML = this.getDiagnosticsHtml();
     }
   }
 
-  private showOfflinePrompt(peerId: string) {
+  private getDiagnosticsHtml(): string {
+    const portalVer = 'v2.2.0';
+    const wireSpec = 'P2PMux v2.2 (10-byte Header / 32KB Frame)';
+    let signalHost = 'Unknown';
+    try {
+      const u = new URL(this.signalUrl);
+      signalHost = `${u.protocol}//${u.host}${u.pathname}`;
+    } catch {
+      signalHost = this.escapeHtml(this.signalUrl.split('?')[0]);
+    }
+    const swState = navigator.serviceWorker?.controller ? 'Active & Intercepting' : 'Standby / Registering';
+    const sctpSupport = typeof window.RTCPeerConnection !== 'undefined' ? 'SCTP DataChannel Supported' : 'Unsupported';
+
+    return `
+      <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px 12px; font-size: 11px; color: #8b949e; line-height: 1.6; text-align: left; font-family: monospace;">
+        <div style="font-weight: 600; color: #c9d1d9; margin-bottom: 4px; display: flex; justify-content: space-between;">
+          <span>📋 客户端排障与运行环境 (Diagnostics)</span>
+          <span style="color: #58a6ff;">${portalVer}</span>
+        </div>
+        <div>• <strong>Portal Version</strong>: <span style="color: #79c0ff;">${portalVer}</span></div>
+        <div>• <strong>Wire Protocol</strong>: <span style="color: #7ee787;">${wireSpec}</span></div>
+        <div>• <strong>Signaling Host</strong>: <span style="color: #c9d1d9;">${this.escapeHtml(signalHost)}</span></div>
+        <div>• <strong>Service Worker</strong>: <span style="color: ${navigator.serviceWorker?.controller ? '#3fb950' : '#d29922'};">${swState}</span></div>
+        <div>• <strong>WebRTC / Engine</strong>: <span style="color: #c9d1d9;">${sctpSupport}</span></div>
+      </div>
+    `;
+  }
+
+  private dismissOfflinePrompt() {
+    this.hideOfflineOverlay();
+    this.isOfflineModalDismissed = true;
+    this.showOfflineAlertBar(this.peerId);
+  }
+
+  private hideOfflineOverlay() {
+    const overlay = document.getElementById('p2pOfflineOverlay');
+    if (overlay) overlay.remove();
+  }
+
+  private showOfflineAlertBar(peerId: string) {
+    let bar = document.getElementById('p2pOfflineAlertBar');
+    const safePeer = this.escapeHtml(peerId);
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'p2pOfflineAlertBar';
+      bar.style.cssText = `
+        position: sticky; top: 0; left: 0; right: 0; width: 100%;
+        background: rgba(210, 153, 34, 0.15); border-bottom: 1px solid rgba(210, 153, 34, 0.4);
+        color: #e3b341; padding: 10px 16px; font-size: 13px;
+        display: flex; justify-content: space-between; align-items: center;
+        z-index: 10000; box-sizing: border-box;
+        backdrop-filter: blur(6px);
+      `;
+      document.body.prepend(bar);
+    }
+    bar.innerHTML = `
+      <div id="btnAlertBarOpenOffline" style="display: flex; align-items: center; gap: 8px; cursor: pointer; flex: 1;">
+        <span style="font-size: 15px;">⚠️</span>
+        <span>目标节点 [<strong>${safePeer}</strong>] 当前离线（点击查看排障指引或切换节点）</span>
+      </div>
+      <button id="btnDismissAlertBar" style="background: none; border: none; color: #8b949e; font-size: 16px; cursor: pointer; padding: 0 8px; line-height: 1;" title="关闭提示">✕</button>
+    `;
+    document.getElementById('btnAlertBarOpenOffline')?.addEventListener('click', () => {
+      this.isOfflineModalDismissed = false;
+      this.showOfflinePrompt(this.peerId, true);
+    });
+    document.getElementById('btnDismissAlertBar')?.addEventListener('click', () => {
+      bar?.remove();
+    });
+  }
+
+  private hideOfflineAlertBar() {
+    const bar = document.getElementById('p2pOfflineAlertBar');
+    if (bar) bar.remove();
+  }
+
+  private showOfflinePrompt(peerId: string, force: boolean = false) {
+    if (this.isOfflineModalDismissed && !force) {
+      this.showOfflineAlertBar(peerId);
+      return;
+    }
+    this.isOfflineModalDismissed = false;
+    this.hideOfflineAlertBar();
+
     let overlay = document.getElementById('p2pOfflineOverlay');
     if (!overlay) {
       overlay = document.createElement('div');
       overlay.id = 'p2pOfflineOverlay';
+      overlay.tabIndex = -1;
       overlay.style.cssText = `
         position: fixed;
         top: 0; left: 0; width: 100vw; height: 100vh;
@@ -2088,41 +2179,74 @@ class PortalApp {
         display: flex; justify-content: center; align-items: center;
         z-index: 15000;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+        outline: none;
       `;
       document.body.appendChild(overlay);
     }
 
     const safePeer = this.escapeHtml(peerId);
-    const safeSignal = this.escapeHtml(this.signalUrl);
+    let safeSignalHost = 'Unknown';
+    try {
+      const u = new URL(this.signalUrl);
+      safeSignalHost = `${u.protocol}//${u.host}${u.pathname}`;
+    } catch {
+      safeSignalHost = this.escapeHtml(this.signalUrl.split('?')[0]);
+    }
 
     overlay.innerHTML = `
-      <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px; max-width: 480px; width: 90%; color: #c9d1d9; box-shadow: 0 16px 40px rgba(0,0,0,0.6); text-align: center;">
-        <div style="font-size: 36px; margin-bottom: 12px;">📡</div>
+      <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; max-width: 480px; width: 90%; color: #c9d1d9; box-shadow: 0 16px 40px rgba(0,0,0,0.6); text-align: center; position: relative;">
+        <button id="btnCloseOffline" title="关闭 (ESC)" style="position: absolute; top: 16px; right: 16px; background: none; border: none; color: #8b949e; font-size: 18px; cursor: pointer; padding: 4px 8px; line-height: 1;">✕</button>
+        <div style="font-size: 36px; margin-bottom: 8px;">📡</div>
         <h2 style="font-size: 18px; color: #f0f6fc; margin-bottom: 8px;">Target Node [${safePeer}] is Offline</h2>
-        <p style="font-size: 13px; color: #8b949e; line-height: 1.6; margin-bottom: 20px;">
+        <p style="font-size: 13px; color: #8b949e; line-height: 1.6; margin-bottom: 16px;">
           The remote agent daemon has not registered with the signaling relay yet. Please verify that <code>agent.exe</code> is running on your server, or switch to another node.
         </p>
-        <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; font-size: 12px; font-family: monospace; color: #58a6ff; margin-bottom: 20px; text-align: left; word-break: break-all;">
-          ./agent.exe -node-id ${safePeer} -signal ${safeSignal}
+        <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; font-size: 12px; font-family: monospace; color: #58a6ff; margin-bottom: 16px; text-align: left; word-break: break-all;">
+          ./agent.exe -node-id ${safePeer} -signal ${safeSignalHost}
         </div>
-        <div style="display: flex; gap: 12px; justify-content: center;">
-          <button id="btnRetryConn" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer;">Retry</button>
-          <button id="btnOpenSettings" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 18px; border-radius: 6px; cursor: pointer;">Switch Node</button>
+        <div style="margin-bottom: 20px;">
+          ${this.getDiagnosticsHtml()}
+        </div>
+        <div style="display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+          <button id="btnRetryConn" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;">Retry</button>
+          <button id="btnOpenSettings" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;">Switch Node</button>
+          <button id="btnDismissOffline" style="background: none; border: 1px solid #30363d; color: #8b949e; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px;">查看控制台 (Dismiss)</button>
         </div>
       </div>
     `;
 
+    overlay.onclick = (e) => {
+      if (e.target === overlay) {
+        this.dismissOfflinePrompt();
+      }
+    };
+    overlay.onkeydown = (e) => {
+      if (e.key === 'Escape') {
+        this.dismissOfflinePrompt();
+      }
+    };
+    overlay.focus();
+
+    document.getElementById('btnCloseOffline')?.addEventListener('click', () => {
+      this.dismissOfflinePrompt();
+    });
+    document.getElementById('btnDismissOffline')?.addEventListener('click', () => {
+      this.dismissOfflinePrompt();
+    });
     document.getElementById('btnRetryConn')?.addEventListener('click', () => {
+      this.hideOfflinePrompt();
       this.reconnect();
     });
     document.getElementById('btnOpenSettings')?.addEventListener('click', () => {
+      this.dismissOfflinePrompt();
       this.openSettingsModal();
     });
   }
 
   private hideOfflinePrompt() {
-    const overlay = document.getElementById('p2pOfflineOverlay');
-    if (overlay) overlay.remove();
+    this.hideOfflineOverlay();
+    this.hideOfflineAlertBar();
+    this.isOfflineModalDismissed = false;
   }
 
   private showAuthPrompt(peerId: string, errorMsg?: string) {
