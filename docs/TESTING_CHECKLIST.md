@@ -503,6 +503,7 @@ tc qdisc del dev eth0 root
 | **维度八** | 跨版本异构互通与安全基线 | 协议断代防线旧版握手全拒，Wire 黄金向量双端对齐，DTLS 指纹防重放 | **涉及协议必测** | 🟢 PASS | 🟢 PASS |
 
 > 归档详情查阅：
+> - [双通道抗队头阻塞与千级并发基准测试报告 (Sprint 2)](file:///docs/BENCHMARKS/DUAL_CHANNEL_HOL_BENCHMARK_REPORT.md)
 > - [v2.3.0 发版全息测试签核报告 (MAJOR)](file:///docs/RELEASE_REPORTS/v2.3.0_TEST_REPORT.md)
 > - [v2.2.0 发版全息测试签核报告 (MAJOR)](file:///docs/RELEASE_REPORTS/v2.2.0_TEST_REPORT.md)
 > - [v2.1.0 发版全息测试签核报告 (MINOR)](file:///docs/RELEASE_REPORTS/v2.1.0_TEST_REPORT.md)

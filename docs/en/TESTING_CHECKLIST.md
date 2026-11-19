@@ -431,6 +431,7 @@ Before every release, the QA Lead signs off based on release tier (MAJOR full pa
 | **Dimension 8** | Cross-Version Interop & Security Baselines | Protocol epoch defense, cross-runtime golden vectors, DTLS anti-replay | **Protocol Mandatory** | 🟢 PASS | 🟢 PASS |
 
 > Archived Reports:
+> - [Dual-Channel Anti-HoL Blocking & 1000-Stream Benchmark Report (Sprint 2)](file:///docs/en/BENCHMARKS/DUAL_CHANNEL_HOL_BENCHMARK_REPORT.md)
 > - [v2.3.0 Release Holographic Test Report (MAJOR)](file:///docs/en/RELEASE_REPORTS/v2.3.0_TEST_REPORT.md)
 > - [v2.2.0 Release Holographic Test Report (MAJOR)](file:///docs/en/RELEASE_REPORTS/v2.2.0_TEST_REPORT.md)
 > - [v2.1.0 Release Holographic Test Report (MINOR)](file:///docs/en/RELEASE_REPORTS/v2.1.0_TEST_REPORT.md)

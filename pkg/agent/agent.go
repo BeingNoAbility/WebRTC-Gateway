@@ -53,7 +53,7 @@ type Agent struct {
 	sessionMu    sync.RWMutex
 	sessions     map[string]*AgentSession
 
-	maxConcurrentStreams int
+	maxConcurrentStreams int64
 	activeStreams        int64
 	streamRejections     uint64
 	rxBytesTotal         uint64
@@ -216,13 +216,13 @@ func (a *Agent) FileProxy() *proxy.FileProxy {
 // SetMaxConcurrentStreams sets the maximum number of concurrent multiplexed streams (default 512).
 func (a *Agent) SetMaxConcurrentStreams(limit int) {
 	if limit > 0 {
-		a.maxConcurrentStreams = limit
+		atomic.StoreInt64(&a.maxConcurrentStreams, int64(limit))
 	}
 }
 
 // MaxConcurrentStreams returns the configured concurrent streams limit.
 func (a *Agent) MaxConcurrentStreams() int {
-	return a.maxConcurrentStreams
+	return int(atomic.LoadInt64(&a.maxConcurrentStreams))
 }
 
 // ActiveStreams returns the current number of active proxy streams.
@@ -259,7 +259,7 @@ func (a *Agent) ExportPrometheusMetrics() string {
 
 	b.WriteString("# HELP webrtc_gateway_max_streams Configured maximum concurrent streams threshold\n")
 	b.WriteString("# TYPE webrtc_gateway_max_streams gauge\n")
-	b.WriteString(fmt.Sprintf("webrtc_gateway_max_streams{node_id=%q} %d\n\n", a.NodeID, a.maxConcurrentStreams))
+	b.WriteString(fmt.Sprintf("webrtc_gateway_max_streams{node_id=%q} %d\n\n", a.NodeID, a.MaxConcurrentStreams()))
 
 	b.WriteString("# HELP webrtc_gateway_stream_rejections_total Total number of streams rejected due to capacity limit\n")
 	b.WriteString("# TYPE webrtc_gateway_stream_rejections_total counter\n")
@@ -988,7 +988,7 @@ func (a *Agent) handleRemoteCandidate(sessionID string, candidate *webrtc.ICECan
 // eliminating the TOCTOU race window under concurrent stream arrival.
 // It returns a sync.Once release closure and true on success, or nil and false if capacity is exceeded.
 func (a *Agent) tryAcquireStream() (func(), bool) {
-	limit := int64(a.maxConcurrentStreams)
+	limit := atomic.LoadInt64(&a.maxConcurrentStreams)
 	if limit <= 0 {
 		limit = 512
 	}
@@ -1021,7 +1021,7 @@ func (a *Agent) streamAcceptLoop(sessionID, cookieSession string, m *mux.Mux) {
 		releaseStream, ok := a.tryAcquireStream()
 		if !ok {
 			atomic.AddUint64(&a.streamRejections, 1)
-			limit := a.maxConcurrentStreams
+			limit := a.MaxConcurrentStreams()
 			if limit <= 0 {
 				limit = 512
 			}

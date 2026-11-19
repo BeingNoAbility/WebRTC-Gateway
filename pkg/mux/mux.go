@@ -23,6 +23,10 @@ const (
 	// DefaultBufferedLowWaterMark is the threshold at which blocked writes resume.
 	DefaultBufferedLowWaterMark uint64 = 64 * 1024
 
+	// DefaultStreamWindow is the sliding window size for ghost stream defense and closed stream pruning.
+	// 65536 IDs comfortably supports high concurrency (up to 32k active concurrent streams) while preventing ghost stream resurrection.
+	DefaultStreamWindow uint32 = 65536
+
 	// DefaultMaxInboundBytes is the global inbound buffer budget for a Mux (128MB).
 	DefaultMaxInboundBytes int64 = 128 * 1024 * 1024
 	// DefaultInboundHighWaterMark is the threshold at which incoming DATA frames wait for consumer drainage (96MB).
@@ -103,7 +107,7 @@ func NewDualMux(controlTransport, dataTransport Transport, isClient bool) *Mux {
 		isClient:              isClient,
 		streams:               make(map[uint32]*Stream),
 		closedStreams:         make(map[uint32]struct{}),
-		acceptCh:              make(chan *Stream, 64),
+		acceptCh:              make(chan *Stream, 1024),
 		closedCh:              make(chan struct{}),
 		maxInboundBytes:       DefaultMaxInboundBytes,
 		inboundHighWaterMark:  DefaultInboundHighWaterMark,
@@ -237,12 +241,11 @@ func (m *Mux) HandleIncomingMessage(data []byte) error {
 		}
 
 		// Ghost stream protection: drop frame if stream was already closed or is older than the high-water mark window.
-		const streamWindow uint32 = 1024
 		if _, isClosed := m.closedStreams[frame.StreamID]; isClosed {
 			m.mu.Unlock()
 			return nil
 		}
-		if m.maxPeerStreamID > streamWindow && frame.StreamID < m.maxPeerStreamID-streamWindow {
+		if m.maxPeerStreamID > DefaultStreamWindow && frame.StreamID < m.maxPeerStreamID-DefaultStreamWindow {
 			m.mu.Unlock()
 			return nil
 		}
@@ -654,9 +657,8 @@ func (m *Mux) removeStream(id uint32) {
 	}
 	m.closedStreams[id] = struct{}{}
 	// Prune old closed streams older than high-water mark window to prevent unbounded memory growth
-	const streamWindow uint32 = 1024
-	if m.maxPeerStreamID > streamWindow {
-		threshold := m.maxPeerStreamID - streamWindow
+	if m.maxPeerStreamID > DefaultStreamWindow {
+		threshold := m.maxPeerStreamID - DefaultStreamWindow
 		for cid := range m.closedStreams {
 			if cid < threshold {
 				delete(m.closedStreams, cid)

@@ -122,8 +122,8 @@ func NewHTTPProxy(targetURLString string, cm *SessionCookieManager) (*HTTPProxy,
 		return &http.Transport{
 			Proxy:               nil, // Cut ambient environment proxy leakage
 			ForceAttemptHTTP2:   true,
-			MaxIdleConns:        512,
-			MaxIdleConnsPerHost: 128,
+			MaxIdleConns:        2048,
+			MaxIdleConnsPerHost: 1024,
 			IdleConnTimeout:     90 * time.Second,
 			DisableCompression:  true, // Decompression handled explicitly
 			TLSClientConfig:     &tls.Config{InsecureSkipVerify: insecure},

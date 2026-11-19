@@ -182,10 +182,28 @@ func (s *Stream) WriteHeaders(payload []byte) error {
 
 // ReadHeaders waits for and returns the HEADERS payload for this stream.
 func (s *Stream) ReadHeaders(ctx context.Context) ([]byte, error) {
+	// Priority check: if headers already arrived, return them directly without race with s.ctx.Done()
+	select {
+	case h, ok := <-s.headersCh:
+		if ok {
+			return h, nil
+		}
+		return nil, ErrStreamClosed
+	default:
+	}
+
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-s.ctx.Done():
+		// Secondary check in case headers arrived concurrently with cancellation
+		select {
+		case h, ok := <-s.headersCh:
+			if ok {
+				return h, nil
+			}
+		default:
+		}
 		return nil, ErrStreamClosed
 	case h, ok := <-s.headersCh:
 		if !ok {
