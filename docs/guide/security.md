@@ -36,9 +36,10 @@ WebRTC Gateway 遵循纵深防御（Defense-in-Depth）的安全设计理念，�
 - **公开免密模式（默认）**：
   - 当 `-access-secret` 留空时，该 Agent 为**真·公开免密节点**；
   - 访客在浏览器打开时直接打洞直连，零弹窗、零密码要求。即使信令服务器开启了严格的集群密钥，访客访问公开节点也畅通无阻；
-- **受保护私有模式**：
-  - 当配置了 `-access-secret` 时，访客进入 Web 门户将弹出暗黑风密码输入弹窗（或通过 URL Hash/Query 传递）；
-  - Agent 在收到 WebRTC 握手 Offer 时进行口令比对，不匹配直接阻断连接，绝不泄露内网服务。
+- **受保护私有模式 (v2.3+ DTLS 证书指纹联合绑定)**：
+  - 当配置了 `-access-secret` 时，访客进入 Web 门户将弹出暗黑风密码输入弹窗；
+  - **单向派生鉴权密钥 (F-02)**：前端通过 `HMAC-SHA256(access_secret, "node-auth:" + nodeId)` 生成单向派生密钥 `authKey`，绝不在网络中明文传输主口令；
+  - **DTLS 证书指纹联合防重放 (F-04)**：客户端生成 WebRTC Offer 时提取本端物理 DTLS 证书指纹，计算 `HMAC-SHA256(authKey, nodeId + ":" + exp + ":" + sdpFingerprint)`。自 v2.3 起彻底出清旧版明文口令握手，即便握手报文在公网遭窃听，攻击者因不同终端物理生成的 DTLS 证书指纹不同而无法跨机重放，连接直接被 100% 拒绝。
 
 ---
 
@@ -47,7 +48,7 @@ WebRTC Gateway 遵循纵深防御（Defense-in-Depth）的安全设计理念，�
 无需任何数据库、无需 Redis 缓存、无需维护撤销黑名单，纯数学方式实现限时安全分享：
 
 ```text
-签名算法：
+基础签名算法：
 signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 ```
 
@@ -67,6 +68,11 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 - 访客点击签名链接后直接进入服务，**无需输入密码**；
 - 访客**无法反推出主口令**；
 - 超过过期时间戳后，Agent 本地以毫秒级时间比对直接判定失效，彻底封死过期访问。
+
+### ④ DTLS 证书指纹联合防窃听重放 (v2.3+)
+- 在 v2.3 及以上版本中，访客端打开安全分享链接发起 WebRTC 建联时，前端提取本端动态生成的 DTLS 证书指纹，在 `sign` 的基础上进一步计算联合签名 `HMAC-SHA256(sign, nodeId + ":" + exp + ":" + sdpFingerprint)`；
+- 彻底防范“攻击者在中间信道窃听到未过期的合法分享链接 URL 后，在第三方设备上冒领建立 P2P 隧道”的重放威胁；
+- 网关强制出清历史技术债务，对未结合指纹签名的旧协议握手实施物理级 100% 阻断。
 
 ---
 

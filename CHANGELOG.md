@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Architecture & Performance (v2.3)
+- **Native Dual-Channel Architecture (`p2pcontrol` + `p2pdata`)**:
+  - Separated WebRTC DataChannels into dedicated orthogonal transports: `p2pcontrol` (handling `TypeHeaders`, `TypePing`, `TypePong`, `TypeRstStream`, and `TypeWindowUpdate`) and `p2pdata` (handling `TypeData` and `TypeWSData`).
+  - Completely bypassed data backpressure delays for control frames, preserving sub-10ms latency even when data channels are saturated with 10GB bulk transfers or experiencing chaos network loss.
+  - Implemented orphan frame buffer pool in `pkg/mux/mux.go` and `web/src/protocol/mux.ts` (64KB per stream, 256KB global cap, 500ms TTL reaper loop) to safely reconcile parallel SCTP stream arrival races without data loss.
+- **1000-Stream High-Concurrency Benchmark Suite**:
+  - Implemented comprehensive benchmark test suites (`test/concurrent_streams_benchmark_test.go` and `test/dual_channel_hol_benchmark_test.go`).
+  - Achieved 100% success rate on 1000 concurrent streams at 2,307.9 streams/s with zero memory leaks and 0 data races under native Linux CGO `-race`.
+  - Published and archived official benchmark report `docs/BENCHMARKS/DUAL_CHANNEL_HOL_BENCHMARK_REPORT.md`.
+
+### Security & Generational Boundary (v2.3)
+- **Mandatory DTLS Certificate Fingerprint Binding (F-04)**:
+  - Purged legacy plaintext tokens and unauthenticated parameters, enforcing strict generational boundaries.
+  - Required all WebRTC connection handshakes to include an HMAC-SHA256 cryptographic signature bound to the visitor's DTLS certificate fingerprint (`sdpFingerprint`), defeating cross-device replay attacks even if share link URLs are eavesdropped.
+- **Signal Server CSWSH Strict Enforcement**:
+  - Enforced default strict non-same-origin blocking (HTTP 403 Forbidden) for browser WebSocket handshakes unless explicitly whitelisted via `-allowed-origins` or `--allow-all-origins`.
+
+### Resilience & Testing (v2.3)
+- **Cloudflare Realtime TURN Anycast Integration**:
+  - Integrated dynamic Cloudflare Realtime TURN credentials and verified 100% forced relay traversal (`typ relay`) in `test/cloudflare_live_e2e_test.go`.
+- **Review Guidelines Cases 9-11 & v2.3.0 Test Report**:
+  - Documented post-mortem Case 9 (Backpressure Timeout Fuse Deadlock), Case 10 (Dual-Channel Cross-Stream Micro-Race), and Case 11 (DTLS Fingerprint Binding).
+  - Signed off and archived `docs/RELEASE_REPORTS/v2.3.0_TEST_REPORT.md` (100% pass rate across all 8 dimensions).
+
 ## [v2.2.0] - 2026-11-19
 
 ### Reliability & Concurrency (Sprint 1)

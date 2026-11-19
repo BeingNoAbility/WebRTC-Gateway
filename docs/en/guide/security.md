@@ -36,9 +36,10 @@ flowchart LR
 - **Public Open Mode (Default)**:
   - When `-access-secret` is empty, the node is a **Public Node**;
   - Visitors establish WebRTC tunnels directly without password prompts. Even if the signaling server enforces a strict cluster registration secret, public nodes remain accessible to external visitors;
-- **Protected Private Mode**:
-  - When `-access-secret` is configured, visitor browsers present a dark-themed password prompt (or accept credentials via URL Hash/Query);
-  - The Agent validates the password upon receiving the WebRTC handshake Offer; invalid passwords terminate the connection without exposing intranet backend endpoints.
+- **Protected Private Mode (v2.3+ DTLS Fingerprint Binding)**:
+  - When `-access-secret` is configured, visitor browsers present a dark-themed password prompt;
+  - **One-Way Derived Auth Key (F-02)**: The frontend computes `authKey = HMAC-SHA256(access_secret, "node-auth:" + nodeId)`, never sending the master secret over the network in plaintext;
+  - **DTLS Certificate Fingerprint Anti-Replay (F-04)**: During WebRTC Offer generation, the client extracts its physical DTLS certificate fingerprint and computes `HMAC-SHA256(authKey, nodeId + ":" + exp + ":" + sdpFingerprint)`. Starting in v2.3, legacy plaintext secret handshakes are completely purged. Even if the handshake payload is eavesdropped on public networks, replay attacks from other devices fail 100% due to mismatched DTLS certificate fingerprints.
 
 ---
 
@@ -47,7 +48,7 @@ flowchart LR
 Stateless temporary sharing requires no database, no Redis cache, and no revocation list:
 
 ```text
-Signature Algorithm:
+Base Signature Algorithm:
 signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 ```
 
@@ -67,6 +68,11 @@ Open any connected private node, click the settings gear icon in the top right, 
 - Visitors access the service directly with **zero password prompts**;
 - Visitors **cannot deduce the master password** from the signature;
 - Once expired, the Agent rejects the signature locally via millisecond-level timestamp comparison.
+
+### ④ DTLS Certificate Fingerprint Anti-Replay Protection (v2.3+)
+- Starting in v2.3, when a visitor connects via an expiring share link, the frontend extracts its dynamically generated DTLS certificate fingerprint and computes a bound secondary signature `HMAC-SHA256(sign, nodeId + ":" + exp + ":" + sdpFingerprint)`;
+- Eliminates replay threats where an eavesdropped unexpired share link URL is claimed on a third-party unauthorized device;
+- The gateway enforces a strict generational boundary, rejecting all legacy handshakes lacking DTLS fingerprint signatures.
 
 ---
 

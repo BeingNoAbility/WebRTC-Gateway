@@ -26,26 +26,36 @@ sequenceDiagram
     Note over Visitor,Agent: Phase 1 complete: Signaling server exits data transmission path
 
     Visitor<<->>Agent: WebRTC STUN/ICE NAT traversal & punching
-    Visitor<<->>Agent: Establish end-to-end encrypted DataChannel (SCTP: "p2pmux")
+    Visitor<<->>Agent: Establish end-to-end encrypted dual DataChannels (SCTP: "p2pcontrol" + "p2pdata")
     Note over Visitor,Agent: Phase 2 complete: Direct P2P tunnel established (DTLS 1.2 / SRTP)
 
     Note over Visitor: Service Worker intercepts page HTTP/WS requests
-    Visitor->>Agent: Frame into P2PMux binary streams (TypeHeaders + TypeData)
+    Visitor->>Agent: Demuxed routing: Control metadata via p2pcontrol, bulk body via p2pdata
     Agent->>Target: Reverse-proxy HTTP/WS request (injects authoritative client IP)
     Target-->>Agent: Local service response (HTTP status, headers, chunked body)
-    Agent-->>Visitor: Return P2PMux response frames (chunked, HTTP 206 Range supported)
+    Agent-->>Visitor: Split framed response (Headers & streaming data concurrent over wire)
     Note over Visitor: Service Worker streams ReadableStream to DOM renderer
 ```
 
 ---
 
-## 2. P2PMux v1 Binary Multiplexing Protocol Specification
+## 2. Native Dual-Channel Architecture & P2PMux Wire Specification
 
-To concurrently handle hundreds of independent HTTP requests, large file downloads, and full-duplex WebSocket connections across a single WebRTC `RTCDataChannel` while preventing slow streams from starving critical APIs (eliminating application-level write starvation, though single ordered channels remain constrained by SCTP transport-layer retransmission latency under physical packet loss), the gateway utilizes the **P2PMux v1** binary multiplexing protocol.
+To eliminate Head-of-Line (HoL) blocking between large bulk file streaming and critical interactive API control traffic when handling hundreds of concurrent streams, the gateway formally introduces the **Native Dual-Channel Architecture** starting in **v2.3.0**.
 
-For the formal mathematical and byte-level specification, consult the [P2PMux Wire Protocol Specification](./protocol-specification).
+For formal byte-level mathematical specifications and high-concurrency benchmarks, consult:
+- [P2PMux Wire Protocol Specification](./protocol-specification)
+- [Dual-Channel Anti-HoL & 1000-Stream Benchmark Report](../BENCHMARKS/DUAL_CHANNEL_HOL_BENCHMARK_REPORT)
 
-### Binary Frame Layout (10-Byte Fixed Header)
+### ① Dual-Channel Demuxing & Anti-Head-of-Line (HoL) Mitigation
+- **`p2pcontrol` (Dedicated Control Channel)**: Exclusively carries `TypeHeaders` (HTTP metadata and URL routing), `TypePing` / `TypePong` (millisecond RTT latency probes and keepalive), `TypeRstStream` (per-stream resets), and `TypeWindowUpdate`. This channel **completely bypasses bulk data backpressure delays**, maintaining single-digit millisecond responsiveness even when data channels are saturated with 10GB transfers or experiencing packet loss;
+- **`p2pdata` (High-Throughput Data Channel)**: Exclusively carries `TypeData` (HTTP bodies and file streams) and `TypeWSData` (native WebSocket frames). Governed by the 128MB global inbound memory budget and 96MB/64MB dual-watermark backpressure, closely linked with physical SCTP receive window (`a_rwnd`) throttling;
+- **Orphan Frame Reconciliation & 500ms Reaper Fuse**:
+  - Across independent parallel SCTP transport streams, network scheduling may cause `TypeData` chunks to arrive slightly before the corresponding `TypeHeaders` frame;
+  - The Mux maintains an internal orphan buffer with **64KB per stream, 256KB global cap** limits;
+  - Early-arriving `TypeData` frames are safely buffered and flushed immediately in order when `TypeHeaders` arrives on `p2pcontrol`. If no header arrives within 500ms, the background Reaper cleans the orphaned buffers and emits `RST_STREAM`, balancing out-of-order tolerance with anti-DoS memory boundaries.
+
+### ② Binary Frame Layout (10-Byte Fixed Header)
 
 ```text
  0                   1                   2                   3

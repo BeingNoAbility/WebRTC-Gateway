@@ -1,8 +1,8 @@
 # P2PMux Wire Protocol Specification
 
-> **Version**: v2.2.0 (Sprint 3 Formalization)  
+> **Version**: v2.3.0 (Sprint 2 Native Dual-Channel Formalization)  
 > **Underlying Transport**: IETF RFC 8831 (WebRTC DataChannel / SCTP)  
-> **Design Goal**: A lightweight, deterministic, deadlock-free full-duplex binary multiplexing protocol tailored for browser sandboxes and intranet daemons, natively aligned with Go and V8 runtime memory allocation classes.
+> **Design Goal**: A lightweight, deterministic, deadlock-free full-duplex binary multiplexing protocol tailored for browser sandboxes and intranet daemons, completely eliminating Head-of-Line blocking and natively aligned with Go and V8 runtime memory allocation classes.
 
 ---
 
@@ -12,21 +12,24 @@
 flowchart LR
     subgraph Browser_Sandbox["Browser Sandbox"]
         SW["Service Worker Interceptor"]
-        TSMux["TypeScript P2PMux (Web Streams API)"]
+        TSMux["TypeScript P2PMux (DualChannel)"]
     end
 
     subgraph Transport_Layer["Physical Transport (RFC 8831)"]
-        SCTP["WebRTC DataChannel (SCTP over DTLS)"]
+        ControlDC["p2pcontrol (Control Channel)"]
+        DataDC["p2pdata (Bulk Data Channel)"]
     end
 
     subgraph Agent_Daemon["Intranet Agent Daemon"]
-        GoMux["Go P2PMux (io.ReadWriteCloser)"]
+        GoMux["Go P2PMux (DualMux)"]
         Proxy["HTTP / WebSocket / File Proxy"]
     end
 
     SW <--> TSMux
-    TSMux <== "10-Byte Header P2PMux Wire Frames" ==> SCTP
-    SCTP <== "10-Byte Header P2PMux Wire Frames" ==> GoMux
+    TSMux <== "Headers / Ping / Pong / RST" ==> ControlDC
+    TSMux <== "Data / WSData" ==> DataDC
+    ControlDC <== "Headers / Ping / Pong / RST" ==> GoMux
+    DataDC <== "Data / WSData" ==> GoMux
     GoMux <--> Proxy
 ```
 
@@ -232,7 +235,52 @@ flowchart TD
 
 ---
 
-## 7. Cross-Runtime Golden Test Vectors
+## 7. Native Dual-Channel Routing & Orphan Frame Reconciliation Invariant
+
+Starting in **v2.3.0**, the gateway upgrades its transport architecture from a single DataChannel to an **orthogonally isolated Dual-DataChannel pipeline**:
+
+### 1. Channel Allocation & Routing Responsibilities
+
+| Channel Label | Assigned Frame Types | Backpressure Strategy | Architectural Objective |
+| :--- | :--- | :--- | :--- |
+| **`p2pcontrol`** | • `0x02 TypeHeaders`<br/>• `0x03 TypeRstStream`<br/>• `0x04 TypeWindowUpdate`<br/>• `0x05 TypePing`<br/>• `0x06 TypePong` | **Zero Backpressure Delay** (Completely Bypasses Flow Control) | Ensures routing metadata, RTT latency probes, keepalive heartbeats, and stream resets arrive in single-digit milliseconds, eliminating HoL starvation. |
+| **`p2pdata`** | • `0x01 TypeData`<br/>• `0x10 TypeWSConnect`<br/>• `0x11 TypeWSData`<br/>• `0x12 TypeWSClose` | **Dual-Watermark & SCTP a_rwnd Governed** (128MB Budget) | Manages high-throughput file downloads and application payloads with controlled backpressure throttling to prevent OOM crashes. |
+
+### 2. Cross-Channel Races & Orphan Frame Buffering (Orphan Frame Invariant)
+
+Because WebRTC allocates an independent SCTP transport stream for each DataChannel, high-concurrency micro-scheduling may cause a stream's initial `DATA` frame on `p2pdata` to arrive before the `HEADERS` frame arrives on `p2pcontrol`:
+
+```mermaid
+flowchart TD
+    subgraph DataChannel_Arrival["Cross-Channel Frame Arrival Timeline"]
+        D1["p2pdata: DATA (Stream 1) arrives first"]
+        D2["p2pcontrol: HEADERS (Stream 1) arrives slightly later"]
+    end
+
+    subgraph Orphan_Engine["Mux Orphan Frame Reconciliation"]
+        Q1{"Stream 1 created?"}
+        B1["Buffer in pendingOrphans pool<br/>(64KB per stream / 256KB global cap)"]
+        F1["HEADERS arrives, creates Stream 1<br/>Trigger takeOrphanFrames(1) flush"]
+        T1{"500ms elapsed without HEADERS?"}
+        R1["Reaper times out, frees memory<br/>Emits RST_STREAM to peer"]
+    end
+
+    D1 --> Q1
+    Q1 -- "No (Orphan Frame)" --> B1
+    B1 --> T1
+    T1 -- "Timeout" --> R1
+    D2 --> F1
+    B1 -. "Claim & Flush" .-> F1
+```
+
+- **Per-Stream Memory Cap**: `DefaultMaxOrphanBytesPerStream = 64KB`. Excess orphan frames are discarded;
+- **Global Memory Cap**: `DefaultMaxGlobalOrphanBytes = 256KB`. Prevents memory exhaustion attacks across concurrent streams;
+- **500ms Timeout Fuse**: `DefaultOrphanFrameTTL = 500ms`. Expired orphan frames are purged, triggering an automatic `RST_STREAM` to release resources;
+- **Zero-Loss Ordered Flushing**: When `TypeHeaders` arrives and creates the stream, buffered orphan frames are flushed immediately in byte-identical order to downstream readers.
+
+---
+
+## 8. Cross-Runtime Golden Test Vectors
 
 To guarantee binary compatibility across heterogeneous platforms (Go CLI Agent, TypeScript Web Portal, Cloudflare Worker DO), the project formalizes cross-runtime golden vectors in `test/fixtures/protocol_golden_vectors.json`, validated across continuous integration suites:
 

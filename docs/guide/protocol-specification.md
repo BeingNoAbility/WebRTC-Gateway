@@ -1,8 +1,8 @@
 # P2PMux 传输层多路复用协议形式化规范 (P2PMux Wire Protocol Specification)
 
-> **版本**：v2.2.0 (Sprint 3 Formalization)  
+> **版本**：v2.3.0 (Sprint 2 Native Dual-Channel Formalization)  
 > **底层承载**：IETF RFC 8831 (WebRTC DataChannel / SCTP)  
-> **设计目标**：在零客户端浏览器沙箱与内网守护进程之间，提供极轻量、确定性、防死锁且天然契合 Go/V8 内存阶梯的高性能全双工二进制复用传输协议。
+> **设计目标**：在零客户端浏览器沙箱与内网守护进程之间，提供极轻量、确定性、防死锁、彻底消除队头阻塞且天然契合 Go/V8 内存阶梯的高性能全双工二进制复用传输协议。
 
 ---
 
@@ -12,21 +12,24 @@
 flowchart LR
     subgraph Browser_Sandbox["浏览器环境 (Browser Sandbox)"]
         SW["Service Worker 拦截器"]
-        TSMux["TypeScript P2PMux (Web Streams API)"]
+        TSMux["TypeScript P2PMux (DualChannel)"]
     end
 
     subgraph Transport_Layer["物理传输层 (RFC 8831)"]
-        SCTP["WebRTC DataChannel (SCTP over DTLS)"]
+        ControlDC["p2pcontrol (控制专线通道)"]
+        DataDC["p2pdata (大吞吐数据通道)"]
     end
 
     subgraph Agent_Daemon["内网端 (Agent Daemon)"]
-        GoMux["Go P2PMux (io.ReadWriteCloser)"]
+        GoMux["Go P2PMux (DualMux)"]
         Proxy["HTTP / WebSocket / File Proxy"]
     end
 
     SW <--> TSMux
-    TSMux <== "10-Byte Header P2PMux Wire Frames" ==> SCTP
-    SCTP <== "10-Byte Header P2PMux Wire Frames" ==> GoMux
+    TSMux <== "Headers / Ping / Pong / RST" ==> ControlDC
+    TSMux <== "Data / WSData" ==> DataDC
+    ControlDC <== "Headers / Ping / Pong / RST" ==> GoMux
+    DataDC <== "Data / WSData" ==> GoMux
     GoMux <--> Proxy
 ```
 
@@ -232,7 +235,52 @@ flowchart TD
 
 ---
 
-## 七、 跨语言黄金测试向量规约 (Golden Test Vectors)
+## 七、 原生双物理通道分流与孤儿帧仲裁规约 (Dual-Channel Routing & Orphan Frame Reconciliation)
+
+自 **v2.3.0** 起，网关在物理传输层由单一 DataChannel 升级为**正交隔离的双 DataChannel 架构**，并在分帧层引入状态感知路由：
+
+### 1. 物理信道职责分工表
+
+| 物理通道标识符 | 承载帧类型 (Frame Types) | 背压控制策略 | 核心设计目标 |
+| :--- | :--- | :--- | :--- |
+| **`p2pcontrol`** | • `0x02 TypeHeaders`<br/>• `0x03 TypeRstStream`<br/>• `0x04 TypeWindowUpdate`<br/>• `0x05 TypePing`<br/>• `0x06 TypePong` | **完全旁路背压** (Zero Backpressure Delay) | 保证交互路由元数据、毫秒级延迟测量、心跳保活与流熔断重置指令即刻送达，彻底消除队头饥饿。 |
+| **`p2pdata`** | • `0x01 TypeData`<br/>• `0x10 TypeWSConnect`<br/>• `0x11 TypeWSData`<br/>• `0x12 TypeWSClose` | **双水位与 SCTP a_rwnd 物理受控** (128MB 预算) | 承载大吞吐文件流与应用载荷，在积压时受控流控降速，杜绝内存 OOM。 |
+
+### 2. 跨信道竞态与孤儿帧缓冲机制 (Orphan Frame Reconciliation Invariant)
+
+由于 WebRTC 底层为每个 DataChannel 分配独立的 SCTP 流，高并发下 `p2pdata` 的首包 `DATA` 帧可能在微观调度上先于 `p2pcontrol` 的 `HEADERS` 帧抵达接收端对等实体：
+
+```mermaid
+flowchart TD
+    subgraph DataChannel_Arrival["数据包跨通道到达时序"]
+        D1["p2pdata: DATA (Stream 1) 先到达"]
+        D2["p2pcontrol: HEADERS (Stream 1) 稍后到达"]
+    end
+
+    subgraph Orphan_Engine["Mux 孤儿帧仲裁引擎"]
+        Q1{"Stream 1 已创建？"}
+        B1["暂存入 pendingOrphans 缓冲池<br/>(单流上限 64KB / 全局上限 256KB)"]
+        F1["HEADERS 抵达，创建 Stream 1<br/>触发 takeOrphanFrames(1) 立即冲刷"]
+        T1{"500ms 内未见 HEADERS？"}
+        R1["Reaper 超时收割，释放内存<br/>向对端发送 RST_STREAM 熔断"]
+    end
+
+    D1 --> Q1
+    Q1 -- "否 (孤儿帧)" --> B1
+    B1 --> T1
+    T1 -- "超时" --> R1
+    D2 --> F1
+    B1 -. "认领冲刷" .-> F1
+```
+
+- **单流孤儿内存硬顶**：`DefaultMaxOrphanBytesPerStream = 64KB`，超过限制直接丢弃新孤儿帧；
+- **全局孤儿内存硬顶**：`DefaultMaxGlobalOrphanBytes = 256KB`，防止多流恶意并发堆积孤儿帧攻击宿主机；
+- **500ms 超时熔断**：`DefaultOrphanFrameTTL = 500ms`，后台定时器扫描超时孤儿帧，丢弃缓冲并下发 `RST_STREAM`；
+- **零丢失冲刷**：合法流在 `TypeHeaders` 抵达创建后，瞬间将积压的孤儿帧以原样二进制顺序写入下游 Reader，保障 HTTP/WebSocket 数据完整性 100% 对齐。
+
+---
+
+## 八、 跨语言黄金测试向量规约 (Golden Test Vectors)
 
 为了保障异构平台（Go CLI Agent、TypeScript Web Portal、Cloudflare Worker DO）的实现保持严格二进制一致性，项目在 `test/fixtures/protocol_golden_vectors.json` 固化了跨语言共享黄金测试向量，并由两端自动化 CI 强制断言：
 

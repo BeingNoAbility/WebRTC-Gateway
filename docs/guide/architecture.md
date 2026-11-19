@@ -26,24 +26,35 @@ sequenceDiagram
     Note over Visitor,Agent: 阶段一完成：信令服务器退出后续数据传输链路
 
     Visitor<<->>Agent: WebRTC STUN/ICE NAT 打洞协商
-    Visitor<<->>Agent: 建立端到端加密 DataChannel (SCTP: "p2pmux")
+    Visitor<<->>Agent: 建立端到端加密双通道 (SCTP: "p2pcontrol" + "p2pdata")
     Note over Visitor,Agent: 阶段二完成：P2P 直连通道建立 (DTLS 1.2 / SRTP)
 
     Note over Visitor: Service Worker 拦截页面 HTTP/WS 请求
-    Visitor->>Agent: 封装为 P2PMux 二进制流帧 (TypeHeaders + TypeData)
+    Visitor->>Agent: 分离路由：控制元数据经 p2pcontrol，大容量 Body 经 p2pdata
     Agent->>Target: 本地反向代理 HTTP/WS 请求 (注入权威客户端真实 IP)
     Target-->>Agent: 本地服务响应 (HTTP 状态码、响应头、流式 Body)
-    Agent-->>Visitor: 封装为 P2PMux 响应帧 (分块传输，支持 206 Range)
+    Agent-->>Visitor: 分离路由响应帧 (头帧与流式数据并发回传)
     Note over Visitor: Service Worker 以 ReadableStream 注入渲染
 ```
 
 ---
 
-## 2. P2PMux v1 二进制流式多路复用协议规范
+## 2. P2PMux 原生双物理通道与二进制多路复用协议规范 (Native Dual-Channel Architecture)
 
-为了在单个 WebRTC `RTCDataChannel` 上并发承载成百上千个独立的 HTTP 请求、大文件下载与 WebSocket 连接，且避免单个大文件的慢传输饿死关键 API（消除应用层发送队头饥饿 Application-Level Write Starvation，单有序通道在物理网络丢包下仍受 SCTP 传输层重传延迟约束），网关设计了轻量级二进制多路复用协议 **P2PMux v1**。
+为了在并发承载成百上千个独立的 HTTP 请求、超大文件下载与 WebSocket 连接时，彻底消除大文件高吞吐对关键 API 控制流的队头阻塞（Head-of-Line Blocking, HoL），网关自 **v2.3.0** 起全面引入**原生双物理通道架构**与轻量级二进制分帧协议 **P2PMux**。
 
-### 协议帧结构 (10 字节固定头部)：
+相关形式化协议数学规约与高压测试实测数据，详见：
+- [P2PMux 协议形式化规约](./protocol-specification)
+- [双通道抗队头阻塞与千级并发基准测试报告](../BENCHMARKS/DUAL_CHANNEL_HOL_BENCHMARK_REPORT)
+
+### ① 双物理通道分流与抗队头阻塞机制
+- **`p2pcontrol` (控制专线通道)**：专载 `TypeHeaders` (HTTP 请求/响应元数据)、`TypePing` / `TypePong` (毫秒级时延探针与保活心跳)、`TypeRstStream` (单流熔断重置) 及 `TypeWindowUpdate`。该通道**完全绕过大容量数据缓冲区的背压等待**，即便数据通道处于 10GB 饱和传输或物理弱网丢包状态，控制帧与健康心跳仍保持单位数毫秒级即刻送达；
+- **`p2pdata` (大吞吐数据通道)**：专载 `TypeData` (HTTP Body / 文件流) 与 `TypeWSData` (原生 WebSocket 帧)。受 128MB 全局内存预算与 96MB/64MB 双水位背压控制，与物理传输层 SCTP 接收通告窗口（`a_rwnd`）深度联动；
+- **跨通道孤儿帧缓冲与 500ms 熔断收割 (Orphan Frame Reconciliation)**：
+  - 针对并行 SCTP 通道在微观网络调度下可能发生的“数据帧先于头帧到达”竞态，Mux 内部设立**单流 64KB / 全局 256KB** 的内存保护缓冲池；
+  - 提前到达的 `TypeData` 帧被安全暂存入池，待 `p2pcontrol` 抵达 `TypeHeaders` 创流后立即按序冲刷消费；若 500ms 内头帧失联，后台 Reaper 定时器自动清退孤儿缓冲并下发 `RST_STREAM` 熔断，兼顾乱序容忍与防 DoS 内存安全性。
+
+### ② 协议帧结构 (10 字节固定头部)
 
 ```text
  0                   1                   2                   3

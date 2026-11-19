@@ -95,14 +95,14 @@ sequenceDiagram
     Note over Visitor,Agent: Phase 1: Signaling handshake complete - broker exits data path
 
     Visitor<<->>Agent: WebRTC STUN/ICE NAT traversal
-    Visitor<<->>Agent: Establish end-to-end encrypted DataChannel (SCTP: "p2pmux")
+    Visitor<<->>Agent: Establish end-to-end encrypted dual DataChannels (SCTP: "p2pcontrol" + "p2pdata")
     Note over Visitor,Agent: Phase 2: Direct P2P tunnel established (DTLS 1.2 / SRTP)
 
     Note over Visitor: Service Worker intercepts in-page HTTP/WS requests
-    Visitor->>Agent: Pack into P2PMux binary stream frames (TypeHeaders + TypeData)
+    Visitor->>Agent: Split routing: Control metadata via p2pcontrol, bulk payloads via p2pdata
     Agent->>Target: Reverse-proxy request locally (injecting authoritative client IP)
     Target-->>Agent: Local service response (Status, Headers, streaming Body)
-    Agent-->>Visitor: Stream P2PMux response frames (chunked, 206 Range supported)
+    Agent-->>Visitor: Concurrent response frames (Orthogonal channels eliminating HoL blocking)
     Note over Visitor: Service Worker feeds ReadableStream into page runtime
 ```
 
@@ -114,14 +114,15 @@ Comprehensive implementation details, architectural deep dives, and production o
 
 | Documentation Topic | Overview | Link |
 | :--- | :--- | :--- |
-| **Architecture & Protocol Specifications** | P2PMux v1 binary framing, Service Worker transparent fetch interception, DOM virtualization patches, and CookieJar isolation | [Architecture & Design](./docs/en/guide/architecture.md) |
-| **P2PMux Wire Protocol Specification** | 10-byte fixed header, stream parity invariants, state machine, 32KB runtime memory alignment, and SCTP backpressure | [Protocol Specification](./docs/en/guide/protocol-specification.md) |
+| **Architecture & Protocol Specifications** | Native dual-channel architecture, Service Worker fetch interception, DOM virtualization, and CookieJar isolation | [Architecture & Design](./docs/en/guide/architecture.md) |
+| **P2PMux Wire Protocol Specification** | 10-byte fixed header, dual-channel routing, orphan frame buffering, 32KB alignment, and SCTP backpressure | [Protocol Specification](./docs/en/guide/protocol-specification.md) |
 | **Production Deployment Manual** | Cloudflare Workers edge deployment, standalone Linux/Windows daemons, Docker Compose orchestration, and non-root hardening | [Production Deployment](./docs/en/guide/deployment.md) |
 | **Configuration Reference** | Full 40+ CLI flags, environment variables, precedence rules, and YAML/JSON templates | [Configuration Reference](./docs/en/guide/agent-configuration.md) |
-| **Security & Access Control** | Control vs data plane secret decoupling, HMAC-SHA256 time-limited links, path traversal sandbox defense, and authoritative IP propagation | [Security & Access Control](./docs/en/guide/security.md) |
+| **Security & Access Control** | Control vs data plane secret decoupling, DTLS fingerprint binding, expiring share links, and authoritative IP propagation | [Security & Access Control](./docs/en/guide/security.md) |
 | **P2P File & Directory Server** | Zero-port in-memory file sharing, HTTP 206 Range resumption, and dark-themed directory browsing | [File & Directory Server](./docs/en/guide/file-server.md) |
 | **Browser Compatibility Matrix** | Tier 1 vs Tier 2 browser support, iOS Safari / WebKit background hibernation, and re-attachment self-healing | [Browser Compatibility](./docs/en/guide/browser-compatibility.md) |
-| **Troubleshooting & FAQ** | Symmetric NAT (NAT 4) diagnostics, TURN fallback relay configuration, auto-TLS SAN generation, and roaming self-healing FAQ | [Troubleshooting & FAQ](./docs/en/guide/troubleshooting.md) |
+| **Troubleshooting & FAQ** | Symmetric NAT (NAT 4) diagnostics, Cloudflare Anycast TURN relay configuration, auto-TLS, and roaming self-healing FAQ | [Troubleshooting & FAQ](./docs/en/guide/troubleshooting.md) |
+| **Dual-Channel Benchmark Report** | Native dual-channel isolation, 10GB streaming vs API HoL mitigation, and 1000-stream high-concurrency benchmarks | [Benchmark Report](./docs/en/BENCHMARKS/DUAL_CHANNEL_HOL_BENCHMARK_REPORT.md) |
 | **Engineering Specifications** | Documentation style guide, dialectical review guidelines (5 invariants), Checklist 2.0 real-world testbed, and release quality gates | [Engineering Specifications](./docs/en/STYLE_GUIDE.md) |
 
 ---

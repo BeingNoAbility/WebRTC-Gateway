@@ -95,14 +95,14 @@ sequenceDiagram
     Note over Visitor,Agent: 阶段一：信令撮合完成，信令端退出后续数据路径
 
     Visitor<<->>Agent: WebRTC STUN/ICE NAT 打洞协商
-    Visitor<<->>Agent: 建立端到端加密 DataChannel (SCTP: "p2pmux")
+    Visitor<<->>Agent: 建立端到端加密双通道 (SCTP: "p2pcontrol" + "p2pdata")
     Note over Visitor,Agent: 阶段二：P2P 直连通道建立 (DTLS 1.2 / SRTP)
 
     Note over Visitor: Service Worker 拦截页面 HTTP/WS 请求
-    Visitor->>Agent: 封装为 P2PMux 二进制流帧 (TypeHeaders + TypeData)
+    Visitor->>Agent: 智能分流：控制元数据走 p2pcontrol，大容量载荷走 p2pdata
     Agent->>Target: 本地反向代理 HTTP/WS 请求 (注入权威客户端真实 IP)
     Target-->>Agent: 本地服务响应 (HTTP 状态码、响应头、流式 Body)
-    Agent-->>Visitor: 封装为 P2PMux 响应帧 (分块传输，支持 206 Range)
+    Agent-->>Visitor: 并发回传响应帧 (头帧与流式数据正交并发，彻底消除队头阻塞)
     Note over Visitor: Service Worker 以 ReadableStream 注入渲染
 ```
 
@@ -114,14 +114,15 @@ sequenceDiagram
 
 | 专题模块 | 核心内容概述 | 快速链接 |
 | :--- | :--- | :--- |
-| **系统架构与协议原理** | 深入理解 P2PMux v1 二进制分帧协议、浏览器 Service Worker 透明拦截、DOM 虚拟化补丁与独立 CookieJar 机制 | [架构与设计原理](./docs/guide/architecture.md) |
-| **P2PMux 协议形式化规约** | 10 字节定长帧头、奇偶流分配律、状态机模型、32KB 内存阶梯对齐、SCTP 接收窗口背压与跨端测试向量 | [协议形式化规约](./docs/guide/protocol-specification.md) |
+| **系统架构与协议原理** | 深入理解原生双通道架构、Service Worker 透明拦截、DOM 虚拟化补丁与独立 CookieJar 机制 | [架构与设计原理](./docs/guide/architecture.md) |
+| **P2PMux 协议形式化规约** | 10 字节定长帧头、双通道分流路由、孤儿帧缓冲收割、32KB 阶梯对齐与跨端测试向量 | [协议形式化规约](./docs/guide/protocol-specification.md) |
 | **生产部署完全手册** | Cloudflare Workers 边缘免服务器部署、自建 Linux/Windows 单二进制守护进程、Docker Compose 编排与非特权容器加固 | [生产部署指南](./docs/guide/deployment.md) |
 | **配置参数完全字典** | Agent 与 Signal 全量 40+ 命令行参数、环境变量、配置优先级机制与 YAML/JSON 模板 | [配置完全手册](./docs/guide/agent-configuration.md) |
-| **安全机制与访问控制** | 控制面与数据面密钥物理隔离、HMAC-SHA256 无状态时效安全分享、路径穿越防御与真实客户端 IP 透传 | [安全与权限控制](./docs/guide/security.md) |
+| **安全机制与访问控制** | 控制面与数据面密钥物理隔离、DTLS 证书指纹联合防重放、时效安全分享与客户端真实 IP 透传 | [安全与权限控制](./docs/guide/security.md) |
 | **P2P 文件与目录服务** | 纯内存零端口监听文件分发、大文件流式断点续传与现代化暗黑风文件树只读托管 | [文件与目录服务](./docs/guide/file-server.md) |
 | **跨浏览器兼容性矩阵** | Chrome、Edge、Firefox (Tier 1) 与 iOS Safari/WebKit (Tier 2) 深度适配说明与后台挂起自愈流水线 | [浏览器兼容性矩阵](./docs/guide/browser-compatibility.md) |
-| **故障排查与常见问题** | 对称型 NAT (NAT 4) 穿透诊断、TURN 降级中继配置、自签 HTTPS 证书与移动漫游排障 FAQ | [故障排查与 FAQ](./docs/guide/troubleshooting.md) |
+| **故障排查与常见问题** | 对称型 NAT (NAT 4) 穿透诊断、Cloudflare Anycast TURN 中继配置、自签 HTTPS 证书与移动漫游排障 FAQ | [故障排查与 FAQ](./docs/guide/troubleshooting.md) |
+| **双通道性能基准测试** | 原生双物理通道正交隔离、10GB 大文件与小 API 混跑抗队头阻塞、千级并发高压实测数据 | [双通道基准测试报告](./docs/BENCHMARKS/DUAL_CHANNEL_HOL_BENCHMARK_REPORT.md) |
 | **工程规范与审计门禁** | 文档与文案工程规范、辩证审查 5 大不变量、全息实战发版测试清单 (Checklist 2.0)、正式发版核验红线 | [工程规范与门禁清单](./docs/STYLE_GUIDE.md) |
 
 ---
