@@ -178,6 +178,16 @@ func (a *Agent) SetTURN(turnURL, turnUser, turnPass string) {
 	log.Printf("[Agent] Configured TURN relay: %s (user: %s)", turnURL, turnUser)
 }
 
+// SetICEServers directly configures the full list of ICE servers (STUN/TURN).
+func (a *Agent) SetICEServers(servers []webrtc.ICEServer) {
+	a.webrtcConfig.ICEServers = servers
+}
+
+// SetICETransportPolicy configures the ICE transport policy (e.g. webrtc.ICETransportPolicyRelay).
+func (a *Agent) SetICETransportPolicy(policy webrtc.ICETransportPolicy) {
+	a.webrtcConfig.ICETransportPolicy = policy
+}
+
 // SetSingleFile configures the agent to serve a single file directly in memory over WebRTC DataChannels.
 func (a *Agent) SetSingleFile(filePath string) error {
 	fp, err := proxy.NewSingleFileProxy(filePath)
