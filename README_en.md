@@ -154,6 +154,12 @@ webrtc-gateway/
 
 ---
 
+## Ecosystem & Related Projects
+
+- **[WebRTC-Gateway-GUI](https://github.com/BeingNoAbility/WebRTC-Gateway-GUI)**: An experimental desktop GUI prototype (rapidly assembled and untested; independent project outside the scope of this repository's core maintenance and management).
+
+---
+
 ## License & Acknowledgments
 
 This project is open-source under the [MIT License](LICENSE). Core WebRTC capabilities are powered by the pure-Go [Pion WebRTC](https://github.com/pion/webrtc) protocol stack.

@@ -22,6 +22,10 @@ The Agent client daemon supports three mutually exclusive operational modes:
 | **Mode B: Directory & Static Site** | `-dir` / `DIR_PATH` | Host a local folder as a read-only static site or directory tree with index.html fallback. | Documentation sites, frontend build artifacts (`dist`), public download directories. |
 | **Mode C: Single File Sharing** | `-file` / `FILE_PATH` | Share a single local file with HTTP 206 Partial Content (Range seeking) support. | Private Wormhole-style distribution for ISOs, media files, and system logs. |
 
+> [!NOTE]
+> **Desktop Graphical User Interface (GUI) Note**:
+> The core Agent is designed as a lightweight, headless command-line daemon. If you need a desktop graphical interface, refer to the experimental prototype [WebRTC-Gateway-GUI](https://github.com/BeingNoAbility/WebRTC-Gateway-GUI). Note that this GUI is a rapidly assembled prototype that is untested and outside the core management and support scope of this project.
+
 ---
 
 ## 2. Agent CLI Flags & Environment Variables

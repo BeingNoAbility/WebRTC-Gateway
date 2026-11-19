@@ -55,3 +55,9 @@
 ```
 
 :::
+
+---
+
+## 周边生态与实验工具 (Ecosystem & Experimental Tools)
+
+- **[WebRTC-Gateway-GUI](https://github.com/BeingNoAbility/WebRTC-Gateway-GUI)**：实验性桌面图形界面客户端原型。需要注意，该 GUI 为快速搭建的原型工程，尚未经过完整测试验证，不在本项目的核心维护与支持范围内。

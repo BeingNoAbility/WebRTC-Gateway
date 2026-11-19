@@ -55,3 +55,9 @@ Enjoy peer-to-peer end-to-end direct connection immediately!
 ```
 
 :::
+
+---
+
+## Ecosystem & Experimental Tools
+
+- **[WebRTC-Gateway-GUI](https://github.com/BeingNoAbility/WebRTC-Gateway-GUI)**: An experimental desktop GUI prototype. Note that this GUI is a rapidly assembled prototype, has not undergone comprehensive test verification, and is outside the core maintenance and support scope of this project.

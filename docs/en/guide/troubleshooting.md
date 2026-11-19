@@ -125,3 +125,6 @@
 2. **Check Password & Expiration**: If the node is password-protected, verify the password entered in the prompt. If using a shared link, check whether the expiration window has passed;
 3. **Verify Restrictive Network Environments**: If accessing from a locked-down corporate network, direct peer-to-peer punching may be blocked by strict firewalls. Configuring a free TURN relay server on the Agent or server resolves this;
 4. **Trigger Manual Reconnect**: Click the floating Smart Pill in the bottom-right corner and tap "Reconnect" or "Trigger ICE Restart" to re-establish the connection.
+
+### Q: Is there a graphical desktop client (GUI) available?
+**A:** The core project focuses on lightweight headless command-line daemons (Agent CLI) and zero-client browser Web portals. For desktop interface needs, an experimental prototype is available at [WebRTC-Gateway-GUI](https://github.com/BeingNoAbility/WebRTC-Gateway-GUI). Note that this GUI is an independent, rapidly assembled prototype that is untested and outside the core management and support scope of this project.

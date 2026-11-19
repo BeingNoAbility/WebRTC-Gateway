@@ -154,6 +154,12 @@ webrtc-gateway/
 
 ---
 
+## 周边项目与生态
+
+- **[WebRTC-Gateway-GUI](https://github.com/BeingNoAbility/WebRTC-Gateway-GUI)**：实验性桌面图形界面客户端原型（快速搭建且未经测试，不在本项目核心管理与维护范围内）。
+
+---
+
 ## 开源协议与致谢
 
 本项目基于 [MIT License](LICENSE) 开源。核心网络穿透能力依托于纯 Go 实现的 [Pion WebRTC](https://github.com/pion/webrtc) 协议栈。
