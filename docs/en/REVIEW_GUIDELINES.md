@@ -157,6 +157,13 @@ flowchart TD
   - *Core Question*: Are containers and daemons restricted to minimal required permissions?
   - *Pass Criteria*: Production Docker images run as non-root (UID 10001), with privileged port binding (:443/:80) granted exclusively via Linux Capabilities (`cap_net_bind_service`).
 
+- [ ] **3.4 Zero Private Data & Anonymization Invariant**
+  - *Core Question*: Do codebase files, unit tests, configurations, documentation, release notes, or Git commit logs contain real private domains, production IPs, non-standard private ports, node IDs, or secrets?
+  - *Dialectical Reflection*: When reproducing user issues or providing documentation, developers often copy-paste verbatim domains, ports, or node IDs from user reports, inadvertently exposing private user infrastructure on public repositories.
+  - *Pass Criteria*:
+    1. **Strict Test & Example Conventions**: All unit tests and documentation examples MUST strictly use RFC 2606 / RFC 6761 reserved domains (`example.com`, `test.pages.dev`), RFC 5737 documentation IPs (`192.0.2.1`, `198.51.100.1`, `203.0.113.1`), and standard test ports (`80`, `443`, `8080`, `8443`, `9000`);
+    2. **Immediate Redaction & Scrubbing**: Scrutinize all PR diffs for sensitive strings before merge; any leakage must be purged from Git commit history immediately (via `git commit --amend` or history rewriting) rather than masked with superficial subsequent commits.
+
 ---
 
 ### Dimension 4: Adversarial Falsification & Testing

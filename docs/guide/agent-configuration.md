@@ -59,7 +59,8 @@ Agent 支持三种核心运行模式，三者在业务上严格三选一（互�
 | :--- | :--- | :--- | :--- |
 | `-addr` | `ADDR` / `PORT` | `:8888` | 服务端 HTTP/HTTPS 与 WebSocket 监听端口及地址 |
 | `-config` | `CONFIG_FILE` / `CONFIG` | `""` | 可选的 YAML / JSON 配置文件路径（默认自动探测 `./server.yaml`、`./server.yml`、`./server.json`） |
-| `-allowed-origins` | `SIGNAL_ALLOWED_ORIGINS` / `ALLOWED_ORIGINS` | `""` (允许同源/默认告警放行) | 允许通过 WebSocket 握手的浏览器 Origin 白名单（支持逗号分隔、子域通配 `*.pages.dev` 及端口通配 `localhost:*`） |
+| `-allowed-origins` | `SIGNAL_ALLOWED_ORIGINS` / `ALLOWED_ORIGINS` | `""` (严格模式：同源允许/跨域阻断) | 允许通过 WebSocket 握手的浏览器 Origin 白名单（支持逗号分隔、子域通配 `*.pages.dev` 及端口通配 `localhost:*`） |
+| `-allow-all-origins` | `SIGNAL_ALLOW_ALL_ORIGINS` / `ALLOW_ALL_ORIGINS` | `false` | 是否放行所有跨域 WebSocket 信令连接（测试/开发模式，生产环境慎用） |
 | `-signal-secret` | `SIGNAL_SECRET` | `""` | 可选的服务端全局集群准入密钥，仅允许匹配口令的 Agent 注册（-secret 已废弃并阻断） |
 | `-tls-cert` | `TLS_CERT` | `""` | 加载的 TLS 证书 PEM 文件路径（如 fullchain.pem，开启原生 HTTPS） |
 | `-tls-key` | `TLS_KEY` | `""` | 加载的 TLS 私钥 PEM 文件路径（如 privkey.pem，开启原生 HTTPS） |

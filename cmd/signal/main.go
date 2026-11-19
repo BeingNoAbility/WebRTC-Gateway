@@ -115,39 +115,68 @@ func matchOriginPattern(pattern, origin string, parsedOrigin *url.URL) bool {
 	}
 
 	patternHost = strings.TrimRight(patternHost, "/")
-
-	return matchHostPattern(patternHost, parsedOrigin.Host) || matchHostPattern(patternHost, parsedOrigin.Hostname())
+	return matchHostPattern(patternHost, parsedOrigin)
 }
 
-func matchHostPattern(pattern, host string) bool {
-	if pattern == "*" {
+func matchHostPattern(patternHost string, parsedOrigin *url.URL) bool {
+	if patternHost == "*" {
 		return true
 	}
-	if strings.EqualFold(pattern, host) {
+
+	// 1. Separate domain and port from patternHost
+	patDomain := patternHost
+	patPort := ""
+
+	if strings.HasSuffix(patternHost, ":*") {
+		patDomain = strings.TrimSuffix(patternHost, ":*")
+		patPort = "*"
+	} else if h, p, err := net.SplitHostPort(patternHost); err == nil {
+		patDomain = h
+		patPort = p
+	}
+
+	// Strip IPv6 brackets if present, e.g. "[::1]" -> "::1"
+	if strings.HasPrefix(patDomain, "[") && strings.HasSuffix(patDomain, "]") {
+		patDomain = strings.Trim(patDomain, "[]")
+	}
+
+	originHost := parsedOrigin.Hostname()
+	originPort := parsedOrigin.Port()
+
+	// 2. Port validation if pattern specified a port
+	if patPort != "" && patPort != "*" {
+		effectiveOriginPort := originPort
+		if effectiveOriginPort == "" {
+			if strings.EqualFold(parsedOrigin.Scheme, "https") {
+				effectiveOriginPort = "443"
+			} else if strings.EqualFold(parsedOrigin.Scheme, "http") {
+				effectiveOriginPort = "80"
+			}
+		}
+		if patPort != effectiveOriginPort {
+			return false
+		}
+	}
+
+	// 3. Domain / Hostname validation
+	if patDomain == "*" {
 		return true
 	}
-	// Check port wildcard, e.g. "localhost:*"
-	if strings.Contains(pattern, ":*") {
-		patHost := strings.TrimSuffix(pattern, ":*")
-		h, _, err := net.SplitHostPort(host)
-		if err == nil && strings.EqualFold(patHost, h) {
-			return true
-		}
-		if strings.EqualFold(patHost, host) {
-			return true
-		}
+	if strings.EqualFold(patDomain, originHost) {
+		return true
 	}
-	// Check wildcard subdomain, e.g. "*.pages.dev" or "https://*.pages.dev"
-	if strings.HasPrefix(pattern, "*.") {
-		suffix := strings.ToLower(strings.TrimPrefix(pattern, "*."))
-		h := strings.ToLower(host)
-		if hHost, _, err := net.SplitHostPort(h); err == nil {
-			h = hHost
+	if strings.HasPrefix(patDomain, "*.") {
+		// Strict Security: IP addresses must never match wildcard subdomain patterns
+		if net.ParseIP(originHost) != nil {
+			return false
 		}
+		suffix := strings.ToLower(strings.TrimPrefix(patDomain, "*."))
+		h := strings.ToLower(originHost)
 		if h == suffix || strings.HasSuffix(h, "."+suffix) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -1008,7 +1037,7 @@ func runHealthCheck(addr string, preferTLS bool, customURL string) int {
 }
 
 // Version represents the current release version of WebRTC Gateway Signal Server.
-var Version = "v2.3.0"
+var Version = "v2.3.1"
 
 func printSignalUsage(out io.Writer) {
 	fmt.Fprintf(out, "WebRTC Gateway Signal (%s)\n", Version)
@@ -1097,6 +1126,7 @@ func main() {
 	// 1. Defaults (Tier 1: Defaults)
 	cfgAddr := ":8888"
 	cfgAllowedOrigins := ""
+	cfgAllowAllOrigins := false
 	cfgStatic := "./web/dist"
 	cfgTLSCert := ""
 	cfgTLSKey := ""
@@ -1123,6 +1153,9 @@ func main() {
 		}
 		if fileCfg.AllowedOrigins != "" {
 			cfgAllowedOrigins = fileCfg.AllowedOrigins
+		}
+		if fileCfg.AllowAllOrigins != nil {
+			cfgAllowAllOrigins = *fileCfg.AllowAllOrigins
 		}
 		if fileCfg.SignalSecret != "" {
 			cfgSignalSecret = fileCfg.SignalSecret
@@ -1176,6 +1209,11 @@ func main() {
 	} else if env := os.Getenv("ALLOWED_ORIGINS"); env != "" {
 		cfgAllowedOrigins = env
 	}
+	if env := os.Getenv("SIGNAL_ALLOW_ALL_ORIGINS"); env == "true" || env == "1" {
+		cfgAllowAllOrigins = true
+	} else if env := os.Getenv("ALLOW_ALL_ORIGINS"); env == "true" || env == "1" {
+		cfgAllowAllOrigins = true
+	}
 	if env := os.Getenv("MAX_IP_CONNS"); env != "" {
 		if v, err := strconv.Atoi(env); err == nil && v > 0 {
 			cfgMaxIPConns = v
@@ -1196,7 +1234,7 @@ func main() {
 	tlsAuto := flag.Bool("tls-auto", cfgTLSAuto, "Automatically generate in-memory self-signed ECDSA certificate for local/LAN HTTPS Secure Context (env: TLS_AUTO)")
 	signalSecret := flag.String("signal-secret", cfgSignalSecret, "Server-wide pre-shared secret for agent registration & anti-hijacking (env: SIGNAL_SECRET)")
 	allowedOrigins := flag.String("allowed-origins", cfgAllowedOrigins, "Comma-separated allowed origins for browser WebSocket signaling (supports wildcards, env: SIGNAL_ALLOWED_ORIGINS)")
-	allowAllOrigins := flag.Bool("allow-all-origins", os.Getenv("SIGNAL_ALLOW_ALL_ORIGINS") == "true", "Allow all cross-origin WebSocket signaling connections without whitelist (dev/test only, env: SIGNAL_ALLOW_ALL_ORIGINS)")
+	allowAllOrigins := flag.Bool("allow-all-origins", cfgAllowAllOrigins, "Allow all cross-origin WebSocket signaling connections without whitelist (dev/test only, env: SIGNAL_ALLOW_ALL_ORIGINS)")
 	configFlag := flag.String("config", "", "Path to configuration file (.yaml, .yml, or .json, env: CONFIG_FILE)")
 	maxIPConns := flag.Int("max-ip-conns", cfgMaxIPConns, "Maximum concurrent WebSocket connections per client IP (env: MAX_IP_CONNS)")
 	trustedProxies := flag.String("trusted-proxies", cfgTrustedProxies, "Comma-separated trusted proxy CIDRs/IPs for real client IP extraction (env: TRUSTED_PROXIES)")
@@ -1608,10 +1646,10 @@ func main() {
 	}
 
 	originsStr := "Strict (Same-Origin Only / Cross-Origin Blocked)"
-	if *allowedOrigins != "" {
-		originsStr = *allowedOrigins
-	} else if *allowAllOrigins {
+	if *allowAllOrigins {
 		originsStr = "All (Permissive / Warning)"
+	} else if *allowedOrigins != "" {
+		originsStr = *allowedOrigins
 	}
 
 	log.Printf("==================================================")

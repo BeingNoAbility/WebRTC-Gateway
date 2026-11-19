@@ -11,16 +11,17 @@ import (
 
 // ServerConfigFile represents the deserialized structure of a signaling server configuration file (YAML or JSON).
 type ServerConfigFile struct {
-	Addr           string `json:"addr" yaml:"addr"`
-	AllowedOrigins string `json:"allowed_origins" yaml:"allowed_origins"`
-	SignalSecret   string `json:"signal_secret" yaml:"signal_secret"`
-	StaticDir      string `json:"static" yaml:"static"`
-	TLSCert        string `json:"tls_cert" yaml:"tls_cert"`
-	TLSKey         string `json:"tls_key" yaml:"tls_key"`
-	TLSAuto        *bool  `json:"tls_auto" yaml:"tls_auto"`
-	MaxIPConns     int    `json:"max_ip_conns" yaml:"max_ip_conns"`
-	TrustedProxies string `json:"trusted_proxies" yaml:"trusted_proxies"`
-	MetricsAddr    string `json:"metrics_addr" yaml:"metrics_addr"`
+	Addr            string `json:"addr" yaml:"addr"`
+	AllowedOrigins  string `json:"allowed_origins" yaml:"allowed_origins"`
+	AllowAllOrigins *bool  `json:"allow_all_origins" yaml:"allow_all_origins"`
+	SignalSecret    string `json:"signal_secret" yaml:"signal_secret"`
+	StaticDir       string `json:"static" yaml:"static"`
+	TLSCert         string `json:"tls_cert" yaml:"tls_cert"`
+	TLSKey          string `json:"tls_key" yaml:"tls_key"`
+	TLSAuto         *bool  `json:"tls_auto" yaml:"tls_auto"`
+	MaxIPConns      int    `json:"max_ip_conns" yaml:"max_ip_conns"`
+	TrustedProxies  string `json:"trusted_proxies" yaml:"trusted_proxies"`
+	MetricsAddr     string `json:"metrics_addr" yaml:"metrics_addr"`
 }
 
 // LoadServerConfigFile parses a signaling server configuration file (YAML or JSON).

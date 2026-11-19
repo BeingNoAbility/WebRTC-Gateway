@@ -11,8 +11,10 @@ addr: ":8888"
 # Allowed browser origins for WebSocket signaling (anti-CSWSH protection)
 # Supports comma-separated list of origins, ports, and wildcards (e.g. "https://*.pages.dev,http://localhost:*").
 # Same-origin requests (Origin matching Host) and Native CLI Agents (no Origin header) are always allowed.
-# Leave empty to allow all origins with a warning (development / backward-compatibility mode).
+# By default (empty), strict same-origin only is enforced; cross-origin requests are blocked.
+# Set allow_all_origins: true (or SIGNAL_ALLOW_ALL_ORIGINS=true) to permit all cross-origin requests.
 allowed_origins: ""
+allow_all_origins: false
 
 # Signaling cluster admission secret (Control Plane)
 # Must match the -signal-secret configured on connecting agents.

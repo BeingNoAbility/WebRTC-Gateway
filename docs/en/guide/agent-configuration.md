@@ -59,7 +59,8 @@ The Agent client daemon supports three mutually exclusive operational modes:
 | :--- | :--- | :---: | :--- |
 | `-addr` | `ADDR` / `PORT` | `:8888` | Address and port to bind HTTP/HTTPS and WebSocket listener on. |
 | `-config` | `CONFIG_FILE` / `CONFIG` | `""` | Path to YAML/JSON config file (auto-detects `./server.yaml`, `./server.yml`, `./server.json`). |
-| `-allowed-origins` | `SIGNAL_ALLOWED_ORIGINS` / `ALLOWED_ORIGINS` | `""` (allow same-origin / warning) | Whitelist of allowed browser Origins for WebSocket handshakes (comma-separated, wildcard subdomains `*.pages.dev`, port wildcards `localhost:*`). |
+| `-allowed-origins` | `SIGNAL_ALLOWED_ORIGINS` / `ALLOWED_ORIGINS` | `""` (strict: same-origin only) | Whitelist of allowed browser Origins for WebSocket handshakes (comma-separated, wildcard subdomains `*.pages.dev`, port wildcards `localhost:*`). |
+| `-allow-all-origins` | `SIGNAL_ALLOW_ALL_ORIGINS` / `ALLOW_ALL_ORIGINS` | `false` | Permit all cross-origin WebSocket signaling requests without whitelist (dev/test only). |
 | `-signal-secret` | `SIGNAL_SECRET` | `""` | Cluster signaling authorization secret (-secret is fully deprecated and blocked). |
 | `-tls-cert` | `TLS_CERT` | `""` | Path to TLS certificate PEM file (e.g. fullchain.pem for native HTTPS). |
 | `-tls-key` | `TLS_KEY` | `""` | Path to TLS private key PEM file (e.g. privkey.pem for native HTTPS). |

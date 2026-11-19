@@ -194,6 +194,9 @@ func ValidateTrustedOrigin(rawOrigin, rootDomain string, targetURL *url.URL) boo
 
 	// 2. Suffix / Subdomain matching with rootDomain
 	if rootDomain != "" {
+		if net.ParseIP(host) != nil {
+			return false
+		}
 		root := strings.ToLower(rootDomain)
 		if host == root || strings.HasSuffix(host, "."+root) {
 			return true

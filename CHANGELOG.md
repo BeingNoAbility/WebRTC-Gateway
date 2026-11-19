@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [v2.3.1] - 2026-11-19
+
+### Hotfix & Security
+- **Decoupled Domain & Port Matching in WebSocket OriginChecker**:
+  - Resolved an issue in `cmd/signal/main.go` where wildcard subdomain patterns specifying explicit or wildcard ports (e.g. `https://*.example.com:8443` or `https://*.example.com:*`) were rejected due to port string collision in suffix matching.
+  - Implemented decoupled host/domain and port validation supporting arbitrary combinations of wildcards (`*`, `*.example.com`, `:8443`, `:*`).
+  - Added strict anti-spoofing defense ensuring raw IP addresses (e.g. `192.168.1.1`) never match wildcard subdomain patterns (`*.168.1.1`).
+- **4-Tier Configuration Precedence & Banner Display Alignment**:
+  - Added `allow_all_origins` to `ServerConfigFile` in `cmd/signal/config.go` and supported `ALLOW_ALL_ORIGINS=true` in environment variables.
+  - Fixed startup banner logging to display exact active CSWSH mode (`Strict`, `All`, or explicit pattern list).
+- **Client Diagnostics & Guidance**:
+  - Enhanced web portal WebSocket connection error handling with actionable advice when cross-origin requests fail.
+
 ## [v2.3.0] - 2026-11-19
 
 ### Architecture & Performance (v2.3)
@@ -156,7 +169,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security & Privacy
 - **Documentation & Test Bed Privacy Cleansing**:
-  - Fully scrubbed all private IP references (`192.168.1.100` -> `192.168.1.100`, `192.168.1.100` -> `192.168.1.100`) and private port mappings (`8443` -> default `:8888`) across `README.md`, `README_en.md`, `docs/`, and test runners.
+  - Fully scrubbed all private IP references (anonymized to standard RFC documentation addresses `192.168.1.100`) and custom private port mappings (standardized to default `:8888`) across `README.md`, `README_en.md`, `docs/`, and test runners.
 
 ## [v2.0.4] - 2026-11-18
 

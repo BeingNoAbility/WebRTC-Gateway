@@ -880,6 +880,126 @@ func TestSignal_OriginFiltering_BrowserVsCLI(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
+func TestSignal_OriginMatching_Patterns(t *testing.T) {
+	testCases := []struct {
+		name     string
+		pattern  string
+		origin   string
+		expected bool
+	}{
+		// 1. Wildcard subdomain with explicit port
+		{
+			name:     "Wildcard subdomain with matching explicit port",
+			pattern:  "https://*.example.com:8443",
+			origin:   "https://node1.example.com:8443",
+			expected: true,
+		},
+		{
+			name:     "Wildcard subdomain with port wildcard :*",
+			pattern:  "https://*.example.com:*",
+			origin:   "https://node1.example.com:8443",
+			expected: true,
+		},
+		{
+			name:     "Wildcard subdomain without port constraint matches custom port",
+			pattern:  "https://*.example.com",
+			origin:   "https://node1.example.com:8443",
+			expected: true,
+		},
+		{
+			name:     "Wildcard subdomain matches root domain itself",
+			pattern:  "https://*.example.com:8443",
+			origin:   "https://example.com:8443",
+			expected: true,
+		},
+		{
+			name:     "Wildcard subdomain with port mismatch",
+			pattern:  "https://*.example.com:8080",
+			origin:   "https://node1.example.com:8443",
+			expected: false,
+		},
+		// 2. Exact domain matching
+		{
+			name:     "Exact domain and port match",
+			pattern:  "https://example.com:8443",
+			origin:   "https://example.com:8443",
+			expected: true,
+		},
+		{
+			name:     "Exact domain does not match unlisted subdomain",
+			pattern:  "https://example.com:8443",
+			origin:   "https://node1.example.com:8443",
+			expected: false,
+		},
+		// 3. Localhost & port wildcard
+		{
+			name:     "Localhost with port wildcard",
+			pattern:  "http://localhost:*",
+			origin:   "http://localhost:5173",
+			expected: true,
+		},
+		{
+			name:     "Localhost with port mismatch",
+			pattern:  "http://localhost:3000",
+			origin:   "http://localhost:5173",
+			expected: false,
+		},
+		// 4. Scheme validation
+		{
+			name:     "Scheme mismatch http vs https",
+			pattern:  "https://*.pages.dev",
+			origin:   "http://my-portal.pages.dev",
+			expected: false,
+		},
+		// 5. Security & anti-spoofing
+		{
+			name:     "Subdomain escape attack attempt",
+			pattern:  "https://*.pages.dev",
+			origin:   "https://evil-pages.dev",
+			expected: false,
+		},
+		{
+			name:     "IP address must not match wildcard subdomain",
+			pattern:  "http://*.168.1.1:8080",
+			origin:   "http://192.168.1.1:8080",
+			expected: false,
+		},
+		// 6. Universal wildcard
+		{
+			name:     "Universal wildcard * matches any origin",
+			pattern:  "*",
+			origin:   "https://any-domain.example.com:9999",
+			expected: true,
+		},
+		// 7. IPv6 support
+		{
+			name:     "IPv6 with port wildcard",
+			pattern:  "http://[::1]:*",
+			origin:   "http://[::1]:8888",
+			expected: true,
+		},
+		{
+			name:     "IPv6 with explicit port",
+			pattern:  "http://[::1]:8888",
+			origin:   "http://[::1]:8888",
+			expected: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(tc.origin)
+			if err != nil {
+				t.Fatalf("Failed to parse test origin %q: %v", tc.origin, err)
+			}
+			matched := matchOriginPattern(tc.pattern, tc.origin, u)
+			if matched != tc.expected {
+				t.Errorf("Pattern %q matching origin %q: expected %v, got %v", tc.pattern, tc.origin, tc.expected, matched)
+			}
+		})
+	}
+}
+
 // 2. Task 9 (N 项): Candidate Flood (32 limit) & Waiting Queue Cap (128 limit)
 func TestSignal_CandidateFloodAndWaitingQueueCap(t *testing.T) {
 	broker := NewSignalBroker("")

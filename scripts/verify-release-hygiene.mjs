@@ -113,6 +113,45 @@ check(
   `CHANGELOG.md contains historical entry for ## [${expectedTag}]`
 );
 
+// 9. Privacy & Anonymization Audit (Zero Private Data Invariant)
+const decodeB64 = (s) => Buffer.from(s, 'base64').toString('utf8');
+const sensitivePatterns = [
+  { name: 'Private domain', pattern: new RegExp(decodeB64('bG9saVwuZm8='), 'i') },
+  { name: 'Private IP prefix', pattern: new RegExp(decodeB64('MjdcLjQwXC4='), 'i') },
+  { name: 'Private node identifier', pattern: new RegExp(decodeB64('c3lubzE2OA=='), 'i') },
+  { name: 'Private IP 192.168.1.100', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjY1'), 'i') },
+  { name: 'Private IP 192.168.1.100', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjlcLjQw'), 'i') },
+  { name: 'Private IP 192.168.1.100', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjIyMg=='), 'i') },
+  { name: 'Private IP 192.168.1.100', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjM0'), 'i') },
+  { name: 'Private IP 192.168.1.100', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjk5'), 'i') },
+  { name: 'Private port 8443', pattern: new RegExp(decodeB64('MjIzNTU='), 'i') },
+];
+
+let leakCount = 0;
+const filesToScan = [
+  'cmd/signal/main.go',
+  'cmd/signal/broker_test.go',
+  'cmd/agent/main.go',
+  'web/src/portal/app.ts',
+  'docs/RELEASE_NOTES.md',
+  'CHANGELOG.md',
+  'configs/server.example.yaml',
+];
+
+for (const relFile of filesToScan) {
+  const fullPath = path.join(rootDir, relFile);
+  if (fs.existsSync(fullPath)) {
+    const content = fs.readFileSync(fullPath, 'utf8');
+    for (const { name, pattern } of sensitivePatterns) {
+      if (pattern.test(content)) {
+        errors.push(`Privacy leak detected: ${name} matched pattern ${pattern} in ${relFile}`);
+        leakCount++;
+      }
+    }
+  }
+}
+check(leakCount === 0, `Zero Private Data Invariant: No sensitive personal domains/IPs/nodes in core files`);
+
 console.log('\n-------------------------------------------------------------');
 if (errors.length > 0) {
   console.error(`💥 Release hygiene verification FAILED with ${errors.length} error(s).`);

@@ -641,7 +641,14 @@ class PortalApp {
     };
 
     this.ws.onerror = () => {
-      this.log('Signaling WebSocket error.');
+      let crossOriginHint = '';
+      try {
+        const u = new URL(wsUrl);
+        if (window.location.host && u.host !== window.location.host) {
+          crossOriginHint = ' (Tip: Cross-origin signaling requires SIGNAL_ALLOWED_ORIGINS or SIGNAL_ALLOW_ALL_ORIGINS on the server, or use same-origin /ws)';
+        }
+      } catch {}
+      this.log(`Signaling WebSocket error.${crossOriginHint}`);
       this.signalVal.textContent = 'Error';
     };
 
@@ -2107,7 +2114,7 @@ class PortalApp {
   }
 
   private getDiagnosticsHtml(): string {
-    const portalVer = 'v2.3.0';
+    const portalVer = 'v2.3.1';
     const wireSpec = 'P2PMux v2.3 Dual-Channel (10-byte Header / 32KB Frame)';
     let signalHost = 'Unknown';
     try {
