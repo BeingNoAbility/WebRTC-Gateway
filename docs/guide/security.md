@@ -142,7 +142,8 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 - **浏览器环境强制校验**：针对携带 `Origin` 请求头的浏览器客户端（Web Portal / 访客），信令服务端通过 `-allowed-origins` / `SIGNAL_ALLOWED_ORIGINS` 配置严格白名单。支持通配符子域（如 `https://*.pages.dev`）与端口通配（如 `http://localhost:*`），非法来源立即返回 `HTTP 403 Forbidden`；
 - **同源自动信任**：默认信任当前信令服务主机同源（`Origin` 主机与 `Host` 一致），避免合法部署产生误报；
 - **Native / CLI 链路独立放行**：Go CLI Agent、curl 或原生非浏览器客户端不携带 `Origin` 请求头，系统智能识别并放行 WebSocket Upgrade，随后在信令消息层通过 `SIGNAL_SECRET` / HMAC 防重放机制进行强鉴权，绝不因跨域策略阻断命令行守护进程；
-- **向下兼容安全阀**：未显式配置白名单时，保持放行并输出安全提示，防止存量无配置环境升级后服务中断。
+- **严格默认阻断 (Strict CSWSH Enforcement, v2.3+)**：未显式配置白名单时，默认采用严格同源模式（Strict Same-Origin Only），跨域 WebSocket 请求一律阻断（返回 HTTP 403 Forbidden），仅在显式配置 `--allow-all-origins`（或环境变量 `ALLOW_ALL_ORIGINS=true`）时才放行无白名单跨域请求（测试/开发模式）；
+- **解耦域名与端口匹配 (v2.3.1)**：支持任意组合的子域与端口通配符（如 `https://*.pages.dev`、`http://localhost:*`、`https://*.example.com:8443`），并内建 IP 防欺骗校验，原生 IP（如 `192.168.1.1`）绝不会被子域通配符误匹配。
 
 ### ② 控制面会话配额与频控防 DoS (Control Plane Quotas & Janitor)
 - **单会话 Candidate 转发限额**：单 Session ICE Candidate 转发上限限制为 **32 条**，与 Agent 端 `MaxCandidatesPerSession = 32` 形成端到端双重拦截闭环，超出限制立即丢弃并记录限频日志；
