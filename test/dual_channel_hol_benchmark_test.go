@@ -343,10 +343,16 @@ func TestDualChannel_AntiHoL_NormalBaseline(t *testing.T) {
 }
 
 func TestDualChannel_AntiHoL_30PercentChaos(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 30% chaos benchmark in short mode")
+	}
 	runHoLBenchmark(t, 30)
 }
 
 func TestDualChannel_AntiHoL_FullComparison(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping full chaos comparison matrix in short mode")
+	}
 	lossTiers := []int{0, 5, 15, 30}
 	results := make([]HoLBenchmarkResult, 0, len(lossTiers))
 

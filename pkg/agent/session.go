@@ -104,6 +104,8 @@ func (s *AgentSession) Destroy() {
 	m := s.Mux
 	s.PC = nil
 	s.Mux = nil
+	s.controlDC = nil
+	s.dataDC = nil
 	s.pendingCandidates = nil
 	s.mu.Unlock()
 

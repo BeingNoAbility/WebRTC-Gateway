@@ -25,6 +25,9 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Verify Release Hygiene & Version Parity Machine Gate
+        run: node scripts/verify-release-hygiene.mjs
+
       - name: Verify Web Frontend Build & Embedded Asset Cleanliness
         working-directory: ./web
         run: |
@@ -42,7 +45,10 @@ jobs:
           npm --prefix docs run docs:build
 
       - name: Run Go Unit & Integration Tests
-        run: go test -v ./...
+        run: go test -v -short ./...
+
+      - name: Verify Benchmarks Compile
+        run: go test -c -o /dev/null ./test
 
       - name: Build Agent & Server Binaries
         run: |

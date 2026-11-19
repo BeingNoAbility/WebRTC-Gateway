@@ -54,8 +54,10 @@ flowchart LR
         M1["TypeScript: tsc --noEmit (零类型错误)"]
         M2["Go 静态分析: go vet & go fmt (代码规范)"]
         M3["嵌入产物一致性: git diff --exit-code web/dist"]
-        M4["自动化测试: go test -race & npm test"]
-        M5["多平台交叉编译: Linux/macOS/Windows Smoke"]
+        M4["发版卫生强校验: node scripts/verify-release-hygiene.mjs (版本对齐/Notes纯净)"]
+        M5["自动化测试与短模式: go test -v -short & npm test"]
+        M6["重负载基准隔离: go test -c -o /dev/null ./test (编译无损/按需触发)"]
+        M7["多平台交叉编译: Linux/macOS/Windows Smoke"]
     end
 
     subgraph Human_Gate["🧠 人类审查认知防线 (对抗性思维实验)"]
@@ -98,6 +100,13 @@ flowchart LR
   - **根本追问**：本次改动若涉及任何 CLI 参数新增/变更、默认值微调、环境变量更名、网络协议标头或报错码调整：
   - **辩证反思**：代码是否已经更新，但文档和示例配置文件依然陈旧，导致生产环境按照文档配置发生报错或产生安全误区？
   - **合格判定**：PR 必须同步更新对应主题技术指南（`docs/guide/`）、中英文 `README`、CLI 帮助文档以及示例配置文件（`configs/*.example.yaml`）。
+
+- [ ] **1.5 版本一致性与发版卫生机器防线 (Automated Release Hygiene & Version Parity Gate)**
+  - **根本追问**：版本号升级与发版资产（Release Notes）是否仍依赖人类肉眼逐个比对与人工记忆？
+  - **机器化转移（Machine Gate Transfer）**：
+    - **全端版本对齐断言**：`cmd/agent/main.go`、`cmd/signal/main.go`、`web/src/portal/app.ts`、`web/package.json`、`docs/package.json` 全量由 `node scripts/verify-release-hygiene.mjs` 在 CI 第一道防线进行确定性校验；
+    - **Release Notes 纯净度断言**：`docs/RELEASE_NOTES.md` 作为 GitHub Release 的 `body_path`，强制约束**仅且只能包含当前最新版本的发布说明**，绝对严禁残留历史版本（全量历史移交 `CHANGELOG.md` 统一维护），由脚本自动解析二级标题数量实施零容忍熔断；
+    - **基准测试与日常回归解耦**：千级并发与混沌弱网基准测试受 `-short` 保护并由 `go test -c -o /dev/null ./test` 实施编译不断裂防线，日常 CI 单元与集成测试以轻量高效为第一要务，杜绝 CI 端口耗尽与超时伪死。
 
 ---
 

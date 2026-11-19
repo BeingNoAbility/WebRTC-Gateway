@@ -111,7 +111,16 @@ func CreateSafeDialContext(target *url.URL) func(ctx context.Context, network, a
 
 		// Direct access to target backend itself is always permitted
 		if IsTargetHost(host, port, target) {
-			return dialer.DialContext(ctx, network, addr)
+			for attempt := 0; attempt < 3; attempt++ {
+				conn, err := dialer.DialContext(ctx, network, addr)
+				if err == nil {
+					return conn, nil
+				}
+				if attempt == 2 || ctx.Err() != nil {
+					return nil, err
+				}
+				time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+			}
 		}
 
 		// If host is an IP literal

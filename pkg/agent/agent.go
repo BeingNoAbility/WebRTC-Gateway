@@ -777,6 +777,8 @@ func (a *Agent) handleOffer(sess *AgentSession, sdp *webrtc.SessionDescription, 
 	oldPC := sess.PC
 	sess.Mux = nil
 	sess.PC = nil
+	sess.controlDC = nil
+	sess.dataDC = nil
 	sess.mu.Unlock()
 
 	if oldMux != nil {

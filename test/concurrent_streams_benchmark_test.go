@@ -218,14 +218,23 @@ func TestBenchmark_ConcurrentStreams_100(t *testing.T) {
 }
 
 func TestBenchmark_ConcurrentStreams_500(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 500-stream benchmark in short mode")
+	}
 	runConcurrentStreamsBenchmark(t, 500)
 }
 
 func TestBenchmark_ConcurrentStreams_1000(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 1000-stream benchmark in short mode")
+	}
 	runConcurrentStreamsBenchmark(t, 1000)
 }
 
 func TestBenchmark_ConcurrentStreams_Matrix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping stream benchmark matrix in short mode")
+	}
 	c100 := runConcurrentStreamsBenchmark(t, 100)
 	c500 := runConcurrentStreamsBenchmark(t, 500)
 	c1000 := runConcurrentStreamsBenchmark(t, 1000)
