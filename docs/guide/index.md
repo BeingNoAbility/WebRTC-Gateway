@@ -19,7 +19,8 @@
 
 | 专题模块 | 核心内容概述 | 推荐阅读对象 |
 | :--- | :--- | :--- |
-| **[架构与设计原理](./architecture)** | 深入了解 P2PMux v1 二进制分帧协议、浏览器端 Service Worker 透明拦截、DOM/XHR 虚拟化猴子补丁与独立 CookieJar 机制。 | 架构师 / 核心开发者 |
+| **[架构与设计原理](./architecture)** | 深入了解 P2PMux 二进制分帧协议、浏览器端 Service Worker 透明拦截、DOM/XHR 虚拟化猴子补丁与独立 CookieJar 机制。 | 架构师 / 核心开发者 |
+| **[P2PMux 协议形式化规约](./protocol-specification)** | 10 字节定长帧头规范、奇偶流分配律、状态机模型、32KB 内存阶梯对齐、SCTP 接收窗口物理背压与跨端黄金测试向量。 | 协议开发者 / 核心实现人员 |
 | **[生产部署指南](./deployment)** | 详尽指导 Cloudflare Workers 边缘部署、一体化自包含 Go 二进制单文件运行、Docker / Docker Compose 容器编排。 | 运维工程师 / 自建用户 |
 | **[Agent 配置指南](./agent-configuration)** | Agent 与信令服务全量 CLI 命令行参数、环境变量、YAML/JSON 配置文件结构与优先级机制。 | 全体使用者 / NAS 管理员 |
 | **[P2P 文件与目录服务](./file-server)** | 探索基于内存映射的文件分发、轻量安全分享与静态目录在线托管特性。 | 开发者 / 交付协作人员 |

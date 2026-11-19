@@ -44,6 +44,7 @@ export default withMermaid(
               items: [
                 { text: '文档概览', link: '/guide/' },
                 { text: '架构与设计原理', link: '/guide/architecture' },
+                { text: 'P2PMux 协议形式化规约', link: '/guide/protocol-specification' },
                 { text: '浏览器兼容性矩阵', link: '/guide/browser-compatibility' },
               ],
             },
@@ -112,6 +113,7 @@ export default withMermaid(
               items: [
                 { text: 'Overview & Quickstart', link: '/en/guide/' },
                 { text: 'Architecture & Design', link: '/en/guide/architecture' },
+                { text: 'P2PMux Wire Protocol Specification', link: '/guide/protocol-specification' },
                 { text: 'Browser Compatibility', link: '/en/guide/browser-compatibility' },
               ],
             },

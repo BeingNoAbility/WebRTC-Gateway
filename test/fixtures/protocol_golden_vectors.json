@@ -1,0 +1,161 @@
+{
+  "description": "P2PMux Wire Protocol Golden Test Vectors for Cross-Runtime Parity (v2.2 Sprint 3)",
+  "version": "2.2.0",
+  "header_size": 10,
+  "recommended_chunk_size": 32758,
+  "max_payload_size": 65536,
+  "valid_vectors": [
+    {
+      "name": "zero_payload_fin",
+      "description": "Zero-payload DATA frame with FIN flag (clean half-close)",
+      "stream_id": 1,
+      "type": 1,
+      "type_name": "DATA",
+      "flags": 1,
+      "flags_name": "FIN",
+      "length": 0,
+      "payload_hex": "",
+      "wire_hex": "00000001010100000000"
+    },
+    {
+      "name": "zero_payload_rst",
+      "description": "Zero-payload RST_STREAM frame (abort stream immediately)",
+      "stream_id": 2,
+      "type": 3,
+      "type_name": "RST_STREAM",
+      "flags": 0,
+      "flags_name": "NONE",
+      "length": 0,
+      "payload_hex": "",
+      "wire_hex": "00000002030000000000"
+    },
+    {
+      "name": "ping_with_seq_8bytes",
+      "description": "PING frame with 8-byte uint64 sequence ID",
+      "stream_id": 0,
+      "type": 5,
+      "type_name": "PING",
+      "flags": 0,
+      "flags_name": "NONE",
+      "length": 8,
+      "payload_hex": "0102030405060708",
+      "wire_hex": "000000000500000000080102030405060708"
+    },
+    {
+      "name": "pong_with_seq_8bytes",
+      "description": "PONG frame mirroring 8-byte uint64 sequence ID",
+      "stream_id": 0,
+      "type": 6,
+      "type_name": "PONG",
+      "flags": 0,
+      "flags_name": "NONE",
+      "length": 8,
+      "payload_hex": "0102030405060708",
+      "wire_hex": "000000000600000000080102030405060708"
+    },
+    {
+      "name": "headers_json_payload",
+      "description": "HEADERS frame carrying HTTP request metadata",
+      "stream_id": 3,
+      "type": 2,
+      "type_name": "HEADERS",
+      "flags": 0,
+      "flags_name": "NONE",
+      "length": 37,
+      "payload_hex": "7b226d6574686f64223a22474554222c2270617468223a222f696e6465782e68746d6c227d",
+      "wire_hex": "000000030200000000257b226d6574686f64223a22474554222c2270617468223a222f696e6465782e68746d6c227d"
+    },
+    {
+      "name": "data_ascii_payload",
+      "description": "DATA frame with ASCII payload 'Hello WebRTC!'",
+      "stream_id": 5,
+      "type": 1,
+      "type_name": "DATA",
+      "flags": 0,
+      "flags_name": "NONE",
+      "length": 13,
+      "payload_hex": "48656c6c6f2057656252544321",
+      "wire_hex": "0000000501000000000d48656c6c6f2057656252544321"
+    },
+    {
+      "name": "data_fin_payload",
+      "description": "DATA frame with payload 'EOF reached' and FIN flag set",
+      "stream_id": 4,
+      "type": 1,
+      "type_name": "DATA",
+      "flags": 1,
+      "flags_name": "FIN",
+      "length": 11,
+      "payload_hex": "454f462072656163686564",
+      "wire_hex": "0000000401010000000b454f462072656163686564"
+    },
+    {
+      "name": "window_update_4bytes",
+      "description": "WINDOW_UPDATE frame incrementing credit by 65536 bytes",
+      "stream_id": 7,
+      "type": 4,
+      "type_name": "WINDOW_UPDATE",
+      "flags": 0,
+      "flags_name": "NONE",
+      "length": 4,
+      "payload_hex": "00010000",
+      "wire_hex": "0000000704000000000400010000"
+    },
+    {
+      "name": "ws_connect_json",
+      "description": "WS_CONNECT frame initiating WebSocket tunnel",
+      "stream_id": 9,
+      "type": 16,
+      "type_name": "WS_CONNECT",
+      "flags": 0,
+      "flags_name": "NONE",
+      "length": 13,
+      "payload_hex": "7b2275726c223a222f7773227d",
+      "wire_hex": "0000000910000000000d7b2275726c223a222f7773227d"
+    },
+    {
+      "name": "ws_data_text",
+      "description": "WS_DATA frame carrying 'ping' payload",
+      "stream_id": 9,
+      "type": 17,
+      "type_name": "WS_DATA",
+      "flags": 0,
+      "flags_name": "NONE",
+      "length": 4,
+      "payload_hex": "70696e67",
+      "wire_hex": "0000000911000000000470696e67"
+    },
+    {
+      "name": "ws_close_fin",
+      "description": "WS_CLOSE frame with FIN flag",
+      "stream_id": 9,
+      "type": 18,
+      "type_name": "WS_CLOSE",
+      "flags": 1,
+      "flags_name": "FIN",
+      "length": 0,
+      "payload_hex": "",
+      "wire_hex": "00000009120100000000"
+    }
+  ],
+  "error_vectors": [
+    {
+      "name": "truncated_header_5bytes",
+      "description": "Buffer has only 5 bytes, less than 10-byte HeaderSize",
+      "wire_hex": "0000000101",
+      "expected_error": "buffer too short"
+    },
+    {
+      "name": "truncated_payload_declared_10_actual_4",
+      "description": "Declared payload length 10 bytes, but wire packet provides only 4 bytes",
+      "wire_hex": "0000000101000000000a01020304",
+      "expected_error": "mismatch"
+    },
+    {
+      "name": "exceeds_max_payload_size_70000",
+      "description": "Declared length 70000 exceeds MaxPayloadSize (65536)",
+      "wire_hex": "00000001010000011170",
+      "expected_error": "exceeds maximum size"
+    }
+  ]
+}
