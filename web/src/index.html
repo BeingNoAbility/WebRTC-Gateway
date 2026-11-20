@@ -60,56 +60,59 @@
         <h1>P2P WebRTC Gateway (Zero-Client)</h1>
         <span class="badge" style="background: #21262d; border: 1px solid var(--border); color: #58a6ff; font-size: 11px; margin-left: 2px;">v2.3.2</span>
       </div>
-      <div style="display: flex; gap: 10px; align-items: center;">
-        <button id="btnHeaderSettings" class="btn" style="background: #21262d; border: 1px solid var(--border); color: #c9d1d9; font-size: 13px; display: flex; align-items: center; gap: 6px; cursor: pointer;">
-          ⚙ 节点与信令设置 (Settings)
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <button id="btnHeaderLang" class="btn" style="background: #21262d; border: 1px solid var(--border); color: #c9d1d9; font-size: 13px; display: flex; align-items: center; gap: 4px; cursor: pointer; padding: 6px 12px; white-space: nowrap;">
+          🌐 EN
         </button>
-        <span id="connBadge" class="badge disconnected">DISCONNECTED</span>
+        <button id="btnHeaderSettings" class="btn" style="background: #21262d; border: 1px solid var(--border); color: #c9d1d9; font-size: 13px; display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 6px 12px; white-space: nowrap;" data-i18n="header_settings">
+          ⚙ 节点与信令设置
+        </button>
+        <span id="connBadge" class="badge disconnected" data-i18n="badge_disconnected">未连接</span>
       </div>
     </header>
 
     <div class="grid">
-      <div class="card" id="cardPeer" style="cursor: pointer;" title="点击修改目标节点 ID / Click to configure Node ID">
+      <div class="card" id="cardPeer" style="cursor: pointer;" data-i18n-title="card_peer_tip" title="点击修改目标节点 ID">
         <div class="card-title" style="display: flex; justify-content: space-between;">
-          <span>Target Node ID</span>
-          <span style="font-size: 11px; color: var(--primary);">✎ 修改</span>
+          <span data-i18n="card_peer_title">目标节点 ID</span>
+          <span style="font-size: 11px; color: var(--primary);" data-i18n="card_edit">✎ 修改</span>
         </div>
         <div id="peerVal" class="card-val">-</div>
       </div>
-      <div class="card" id="cardSignal" style="cursor: pointer;" title="点击修改信令服务端 / Click to configure Signal Server">
+      <div class="card" id="cardSignal" style="cursor: pointer;" data-i18n-title="card_signal_tip" title="点击修改信令服务端">
         <div class="card-title" style="display: flex; justify-content: space-between;">
-          <span>Signaling Server</span>
-          <span style="font-size: 11px; color: var(--primary);">✎ 修改</span>
+          <span data-i18n="card_signal_title">信令服务端</span>
+          <span style="font-size: 11px; color: var(--primary);" data-i18n="card_edit">✎ 修改</span>
         </div>
         <div id="signalVal" class="card-val">Connecting...</div>
       </div>
       <div class="card">
-        <div class="card-title">P2P Latency (RTT)</div>
+        <div class="card-title" data-i18n="card_rtt_title">往返网络延迟 (RTT)</div>
         <div id="rttVal" class="card-val">-</div>
       </div>
       <div class="card">
-        <div class="card-title">Mux Streams</div>
-        <div id="streamsVal" class="card-val">0 Active</div>
+        <div class="card-title" data-i18n="card_streams_title">多路复用流</div>
+        <div id="streamsVal" class="card-val">-</div>
       </div>
     </div>
 
     <div class="panel">
       <div class="panel-header">
-        <h3>MVP Connectivity Controls</h3>
+        <h3 data-i18n="panel_mvp_title">连通性快速测试</h3>
         <div>
-          <button id="btnPing" class="btn" disabled>Ping Test</button>
-          <button id="btnEcho" class="btn" disabled style="margin-left: 8px;">Run Echo Stream</button>
+          <button id="btnPing" class="btn" disabled data-i18n="btn_ping">Ping 测试</button>
+          <button id="btnEcho" class="btn" disabled style="margin-left: 8px;" data-i18n="btn_echo">回显流测试</button>
         </div>
       </div>
-      <div id="testOutput" style="font-size: 13px; color: var(--text-dim); margin-top: 8px;">
-        Ready to test multiplexed P2P data flow.
+      <div id="testOutput" style="font-size: 13px; color: var(--text-dim); margin-top: 8px;" data-i18n="test_output_ready">
+        准备测试多路复用 P2P 数据流。
       </div>
     </div>
 
     <div class="panel">
       <div class="panel-header">
-        <h3>Realtime Event Log</h3>
-        <button id="btnClearLog" style="background: none; border: none; color: var(--text-dim); cursor: pointer;">Clear</button>
+        <h3 data-i18n="panel_log_title">实时事件日志</h3>
+        <button id="btnClearLog" style="background: none; border: none; color: var(--text-dim); cursor: pointer;" data-i18n="btn_clear_log">清空</button>
       </div>
       <div id="logBox"></div>
     </div>

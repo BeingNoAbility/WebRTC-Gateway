@@ -12,12 +12,14 @@ console.log('=== Verifying P2P File Vault & Action Hub Architecture ===\n');
 
 const portalJsPath = path.resolve(__dirname, '../web/dist/portal.js');
 const portalTsPath = path.resolve(__dirname, '../web/src/portal/app.ts');
+const i18nTsPath = path.resolve(__dirname, '../web/src/portal/i18n.ts');
 
 assert(fs.existsSync(portalJsPath), 'web/dist/portal.js must exist');
 assert(fs.existsSync(portalTsPath), 'web/src/portal/app.ts must exist');
 
 const portalTs = fs.readFileSync(portalTsPath, 'utf8');
 const portalJs = fs.readFileSync(portalJsPath, 'utf8');
+const i18nTs = fs.existsSync(i18nTsPath) ? fs.readFileSync(i18nTsPath, 'utf8') : '';
 
 // 1. Verify elimination of unsafe <a download> referencing network URL
 assert(!portalTs.includes('a.href = viewUrl;\n      a.download = opts.fileName'),
@@ -50,7 +52,7 @@ assert(portalTs.includes('activeVaultAbortController.abort()'),
 console.log('✔ [PASS] Verified AbortController cancellation on close/back navigation');
 
 // 7. Verify explicit "Cancel Download" button (btnVaultCancel)
-assert(portalTs.includes('btnVaultCancel') && portalTs.includes('⏹ 终止下载'),
+assert(portalTs.includes('btnVaultCancel') && (portalTs.includes('⏹ 终止下载') || i18nTs.includes('⏹ 终止下载')),
   'File Hub must provide explicit Cancel Download button to allow users to abort in-progress transfers');
 console.log('✔ [PASS] Verified explicit [ ⏹ 终止下载 (Cancel) ] button implementation');
 

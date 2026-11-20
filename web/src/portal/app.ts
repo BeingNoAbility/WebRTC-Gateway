@@ -1,4 +1,5 @@
 import { P2PMux, P2PStream } from '../protocol/mux';
+import { i18n, t, Locale } from './i18n';
 
 const DEFAULT_NODE_ID = 'myhome';
 const DEFAULT_SIGNAL_URL = (typeof window !== 'undefined' && window.location && window.location.host)
@@ -490,6 +491,35 @@ class PortalApp {
       };
     }
 
+    // Apply initial i18n translations to DOM
+    i18n.applyI18nToDOM();
+
+    // Portal header language toggle
+    const btnHeaderLang = document.getElementById('btnHeaderLang');
+    const updateLangBtn = () => {
+      if (btnHeaderLang) {
+        btnHeaderLang.textContent = i18n.getLocale() === 'zh-CN' ? '🌐 EN' : '🌐 简中';
+      }
+    };
+    updateLangBtn();
+    btnHeaderLang?.addEventListener('click', () => {
+      i18n.toggleLocale();
+    });
+
+    i18n.subscribe(() => {
+      updateLangBtn();
+      i18n.applyI18nToDOM();
+      this.updateConnState(this.lastConnState);
+      if (this.streamsVal) {
+        this.streamsVal.textContent = t('card_streams_active', { count: this.activeStreamsCount });
+      }
+      this.updateHUDUI();
+      const settingsModal = document.getElementById('p2pSettingsModal');
+      if (settingsModal && settingsModal.style.display !== 'none') {
+        this.openSettingsModal();
+      }
+    });
+
     // Portal header & card direct settings trigger
     document.getElementById('btnHeaderSettings')?.addEventListener('click', () => {
       this.openSettingsModal();
@@ -710,8 +740,8 @@ class PortalApp {
           if (this.signalVal) this.signalVal.textContent = 'Auth Failed (401)';
           this.updateConnState('disconnected');
           const promptMsg = this.shareSign
-            ? '分享链接已失效或签名不匹配，请输入访问口令'
-            : '访问口令不正确或缺失，请重新输入';
+            ? t('auth_err_expired')
+            : t('auth_err_invalid');
           this.showAuthPrompt(this.peerId, promptMsg);
         }
         break;
@@ -909,10 +939,16 @@ class PortalApp {
     };
   }
 
+  private lastConnState: 'connected' | 'connecting' | 'disconnected' = 'disconnected';
+
   private updateConnState(state: 'connected' | 'connecting' | 'disconnected') {
+    this.lastConnState = state;
     if (this.connBadge) {
       this.connBadge.className = `badge ${state}`;
-      this.connBadge.textContent = state.toUpperCase();
+      let textKey = 'badge_disconnected';
+      if (state === 'connected') textKey = 'badge_connected';
+      else if (state === 'connecting') textKey = 'badge_connecting';
+      this.connBadge.textContent = t(textKey);
     }
   }
 
@@ -1027,28 +1063,25 @@ class PortalApp {
         <span style="font-size: 26px; line-height: 1;">⚠️</span>
         <div style="flex: 1;">
           <h4 style="font-size: 15px; font-weight: 600; color: #e3b341; margin-bottom: 6px;">
-            当前处于非安全上下文（Insecure Context），已暂停加载目标网页
+            ${t('insecure_title')}
           </h4>
           <p style="color: #c9d1d9; margin-bottom: 10px;">
-            根据 W3C Web 标准与现代浏览器安全规范：在非 HTTPS 且非 localhost 的局域网纯 HTTP IP（如 <code>${safeOrigin}</code>）下，<strong>Service Worker 将被强制禁用</strong>。本网关依赖 Service Worker 虚拟化拦截和转发请求，请选择以下任一方式使用：
+            ${t('insecure_desc', { origin: safeOrigin })}
           </p>
           <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-bottom: 10px;">
             <div style="margin-bottom: 8px;">
-              <span style="color: #58a6ff; font-weight: 600;">方案 1（本机访问，最快）</span>：若浏览器与信令服务运行在同一台设备，请直接在地址栏打开 
-              <a href="http://localhost:${curPort}/#${safePeer}" style="color: #388bfd; text-decoration: underline;">http://localhost:${curPort}/#${safePeer}</a> 或 <code>http://127.0.0.1:${curPort}/#${safePeer}</code>（localhost 属于标准安全上下文）。
+              <span style="color: #58a6ff; font-weight: 600;">${t('insecure_opt1_title')}</span>：${t('insecure_opt1_desc', { port: curPort, node: safePeer })}
             </div>
             <div style="margin-bottom: 8px;">
-              <span style="color: #3fb950; font-weight: 600;">方案 2（生产推荐，零配置）</span>：部署在支持 HTTPS 的域名或免费部署至 Cloudflare Workers（如 <code>https://p2p.yourdomain.com/#${safePeer}</code>）。
+              <span style="color: #3fb950; font-weight: 600;">${t('insecure_opt2_title')}</span>：${t('insecure_opt2_desc', { node: safePeer })}
             </div>
             <div>
-              <span style="color: #d29922; font-weight: 600;">方案 3（局域网跨设备 HTTP 免证书测试）</span>：在 Chrome/Edge 浏览器地址栏打开：<br/>
-              <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>（Edge 为 <code>edge://flags/...</code>）<br/>
-              将 <code>http://${curHost}</code> 填入白名单输入框，并在右侧下拉框选择 <strong>Enabled</strong>，点击 <strong>Relaunch</strong> 重启浏览器即可！
+              <span style="color: #d29922; font-weight: 600;">${t('insecure_opt3_title')}</span>：${t('insecure_opt3_desc', { host: curHost })}
             </div>
           </div>
           <div style="display: flex; justify-content: flex-end;">
             <button id="btnCloseInsecureBanner" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer;">
-              保留在控制台调试视图
+              ${t('btn_stay_debug')}
             </button>
           </div>
         </div>
@@ -1214,52 +1247,52 @@ class PortalApp {
         <!-- Section 1: Route & Mode -->
         <div style="background: #0d1117; border: 1px solid #21262d; border-radius: 10px; padding: 14px; margin-bottom: 16px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-            <span style="font-size: 12px; color: #8b949e; text-transform: uppercase; font-weight: 600;">传输连接模式 (Transport Mode)</span>
-            <span id="hudBadge" style="display: inline-flex; align-items: center; gap: 4px; font-weight: 700; padding: 3px 10px; border-radius: 12px; font-size: 12px; background: #238636; color: #ffffff;">⚡ P2P Direct 直连</span>
+            <span style="font-size: 12px; color: #8b949e; text-transform: uppercase; font-weight: 600;">${t('hud_transport_mode')}</span>
+            <span id="hudBadge" style="display: inline-flex; align-items: center; gap: 4px; font-weight: 700; padding: 3px 10px; border-radius: 12px; font-size: 12px; background: #238636; color: #ffffff;">${t('hud_direct')}</span>
           </div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; font-size: 12px;">
             <div>
-              <div style="color: #8b949e; font-size: 11px;">本地节点候选 (Local)</div>
+              <div style="color: #8b949e; font-size: 11px;">${t('hud_local_candidate')}</div>
               <div id="hudLocalCand" style="color: #f0f6fc; font-family: monospace; font-size: 11px; margin-top: 2px;">--</div>
             </div>
             <div>
-              <div style="color: #8b949e; font-size: 11px;">远端穿透目标 (Remote)</div>
+              <div style="color: #8b949e; font-size: 11px;">${t('hud_remote_candidate')}</div>
               <div id="hudRemoteCand" style="color: #f0f6fc; font-family: monospace; font-size: 11px; margin-top: 2px;">--</div>
             </div>
           </div>
           <div style="display: flex; gap: 16px; margin-top: 10px; padding-top: 8px; border-top: 1px solid #21262d; font-size: 11px; color: #8b949e;">
-            <span>协议: <strong id="hudProto" style="color: #58a6ff;">UDP</strong></span>
-            <span>ICE 状态: <strong id="hudIceState" style="color: #3fb950;">connected</strong></span>
-            <span>节点: <strong id="hudNodeId" style="color: #f0f6fc;">${this.peerId}</strong></span>
+            <span>${t('hud_protocol')}: <strong id="hudProto" style="color: #58a6ff;">UDP</strong></span>
+            <span>${t('hud_ice_state')}: <strong id="hudIceState" style="color: #3fb950;">connected</strong></span>
+            <span>${t('hud_node')}: <strong id="hudNodeId" style="color: #f0f6fc;">${this.peerId}</strong></span>
           </div>
         </div>
 
         <!-- Section 2: Realtime Metrics Cards -->
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px;">
           <div style="background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 12px;">
-            <div style="font-size: 11px; color: #8b949e;">往返网络延迟 (RTT)</div>
+            <div style="font-size: 11px; color: #8b949e;">${t('hud_rtt')}</div>
             <div id="hudRtt" style="font-size: 20px; font-weight: 700; color: #58a6ff; font-family: monospace; margin-top: 4px;">-- ms</div>
           </div>
           <div style="background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 12px;">
-            <div style="font-size: 11px; color: #8b949e;">瞬时下载速率 (Downlink)</div>
+            <div style="font-size: 11px; color: #8b949e;">${t('hud_downlink')}</div>
             <div id="hudRxRate" style="font-size: 20px; font-weight: 700; color: #3fb950; font-family: monospace; margin-top: 4px;">0 KB/s</div>
-            <div id="hudTotalRx" style="font-size: 10px; color: #8b949e; margin-top: 2px;">累计: 0 MB</div>
+            <div id="hudTotalRx" style="font-size: 10px; color: #8b949e; margin-top: 2px;">${t('hud_total_rx', { size: 0 })}</div>
           </div>
           <div style="background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 12px;">
-            <div style="font-size: 11px; color: #8b949e;">瞬时上传速率 (Uplink)</div>
+            <div style="font-size: 11px; color: #8b949e;">${t('hud_uplink')}</div>
             <div id="hudTxRate" style="font-size: 20px; font-weight: 700; color: #d29922; font-family: monospace; margin-top: 4px;">0 KB/s</div>
-            <div id="hudTotalTx" style="font-size: 10px; color: #8b949e; margin-top: 2px;">累计: 0 MB</div>
+            <div id="hudTotalTx" style="font-size: 10px; color: #8b949e; margin-top: 2px;">${t('hud_total_tx', { size: 0 })}</div>
           </div>
           <div style="background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 12px;">
-            <div style="font-size: 11px; color: #8b949e;">丢包统计 (Packet Loss)</div>
+            <div style="font-size: 11px; color: #8b949e;">${t('hud_packet_loss')}</div>
             <div id="hudPacketsLost" style="font-size: 20px; font-weight: 700; color: #f0f6fc; font-family: monospace; margin-top: 4px;">0 pkts</div>
           </div>
         </div>
 
         <!-- Section 3: Actions -->
         <div style="display: flex; gap: 10px;">
-          <button id="btnHudIceRestart" style="flex: 1; padding: 10px 14px; background: #21262d; border: 1px solid #30363d; color: #58a6ff; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s;">🔄 测试 ICE Restart (切网自愈)</button>
-          <button id="btnHudOpenSettings" style="padding: 10px 14px; background: #238636; border: none; color: #ffffff; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;">⚙ 连接设置</button>
+          <button id="btnHudIceRestart" style="flex: 1; padding: 10px 14px; background: #21262d; border: 1px solid #30363d; color: #58a6ff; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s;">${t('hud_btn_ice_restart')}</button>
+          <button id="btnHudOpenSettings" style="padding: 10px 14px; background: #238636; border: none; color: #ffffff; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;">${t('hud_btn_settings')}</button>
         </div>
         <div id="hudActionFeedback" style="font-size: 11px; color: #3fb950; margin-top: 8px; text-align: center; display: none;"></div>
       </div>
@@ -1277,19 +1310,19 @@ class PortalApp {
       if (fb) {
         fb.style.display = 'block';
         fb.style.color = '#58a6ff';
-        fb.textContent = '🔄 正在触发 WebRTC 原地 ICE Restart 重协商...';
+        fb.textContent = t('hud_ice_restarting');
       }
       try {
         await this.triggerIceRestart();
         if (fb) {
           fb.style.color = '#3fb950';
-          fb.textContent = '✅ ICE Restart 重协商成功，数据通道与会话无感保持！';
+          fb.textContent = t('hud_ice_success');
           setTimeout(() => { if (fb) fb.style.display = 'none'; }, 4000);
         }
       } catch (err: any) {
         if (fb) {
           fb.style.color = '#f85149';
-          fb.textContent = `❌ ICE Restart 失败: ${err?.message || err}`;
+          fb.textContent = t('hud_ice_failed', { error: err?.message || err });
         }
       }
     });
@@ -1357,10 +1390,10 @@ class PortalApp {
     const hudBadge = document.getElementById('hudBadge');
     if (hudBadge) {
       if (isRelay) {
-        hudBadge.textContent = '🛡️ TURN RELAY (加密中继)';
+        hudBadge.textContent = t('hud_relay');
         hudBadge.style.background = '#d29922';
       } else {
-        hudBadge.textContent = '⚡ P2P DIRECT (打洞直连)';
+        hudBadge.textContent = t('hud_direct');
         hudBadge.style.background = '#238636';
       }
     }
@@ -1387,13 +1420,13 @@ class PortalApp {
     if (hudRxRate) hudRxRate.textContent = `${this.hudInfo.rxRateKB} KB/s`;
 
     const hudTotalRx = document.getElementById('hudTotalRx');
-    if (hudTotalRx) hudTotalRx.textContent = `累计: ${this.hudInfo.totalRxMB} MB`;
+    if (hudTotalRx) hudTotalRx.textContent = t('hud_total_rx', { size: this.hudInfo.totalRxMB });
 
     const hudTxRate = document.getElementById('hudTxRate');
     if (hudTxRate) hudTxRate.textContent = `${this.hudInfo.txRateKB} KB/s`;
 
     const hudTotalTx = document.getElementById('hudTotalTx');
-    if (hudTotalTx) hudTotalTx.textContent = `累计: ${this.hudInfo.totalTxMB} MB`;
+    if (hudTotalTx) hudTotalTx.textContent = t('hud_total_tx', { size: this.hudInfo.totalTxMB });
 
     const hudPacketsLost = document.getElementById('hudPacketsLost');
     if (hudPacketsLost) hudPacketsLost.textContent = `${this.hudInfo.packetsLost} pkts`;
@@ -1413,7 +1446,7 @@ class PortalApp {
       pill.style.width = '28px';
       pill.style.height = '28px';
       pill.style.justifyContent = 'center';
-      pill.title = 'WebRTC 状态指示 (点击展开 / 拖拽移动)';
+      pill.title = t('pill_title');
     } else {
       if (exp) exp.style.display = 'flex';
       if (col) col.style.display = 'none';
@@ -1599,7 +1632,7 @@ class PortalApp {
 
     pill.innerHTML = `
       <div id="pillExpandedContent" style="display: flex; align-items: center; gap: 8px; white-space: nowrap;">
-        <span id="pillCollapseBtn" style="cursor: pointer; opacity: 0.7; font-size: 11px; padding: 3px 6px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; transition: opacity 0.2s, background 0.2s; position: relative; z-index: 2;" title="收起为小圆点 (Collapse to Mini Dot)">▶</span>
+        <span id="pillCollapseBtn" style="cursor: pointer; opacity: 0.7; font-size: 11px; padding: 3px 6px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; transition: opacity 0.2s, background 0.2s; position: relative; z-index: 2;" title="${t('pill_collapse_btn_title')}">▶</span>
         <span id="pillModeBadge" style="display:inline-flex; align-items:center; gap:3px; font-weight:700; padding:2px 7px; border-radius:10px; font-size:11px; background:#238636; color:#ffffff; letter-spacing:0.5px;">⚡ P2P</span>
         <span id="pillNode" style="font-weight:500; font-size:12px; max-width:120px; overflow:hidden; text-overflow:ellipsis;" title="Click to open WebRTC HUD">P2P: ${this.escapeHtml(this.peerId)}</span>
         <span id="pillRtt" style="color:#58a6ff; font-family:monospace; font-size:12px;">-- ms</span>
@@ -1607,7 +1640,7 @@ class PortalApp {
         <span id="pillGear" style="cursor:pointer; opacity:0.75; font-size:13px; margin-left:2px; padding: 3px 5px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; position: relative; z-index: 2;" title="Connection Settings">⚙</span>
       </div>
       <div id="pillCollapsedContent" style="display: none; width: 100%; height: 100%; align-items: center; justify-content: center; position: relative; cursor: pointer;">
-        <span id="pillDot" style="display: inline-flex; align-items: center; justify-content: center; font-size: 13px; pointer-events: none;" title="WebRTC 状态指示 - 点击展开">⚡</span>
+        <span id="pillDot" style="display: inline-flex; align-items: center; justify-content: center; font-size: 13px; pointer-events: none;" title="${t('pill_dot_title')}">⚡</span>
       </div>
     `;
 
@@ -1826,8 +1859,11 @@ class PortalApp {
   }
 
   private createSettingsModal() {
-    if (document.getElementById('p2pSettingsModal')) return;
-    const modal = document.createElement('div');
+    let modal = document.getElementById('p2pSettingsModal');
+    if (modal) {
+      modal.remove();
+    }
+    modal = document.createElement('div');
     modal.id = 'p2pSettingsModal';
     modal.style.cssText = `
       position: fixed;
@@ -1841,73 +1877,67 @@ class PortalApp {
     modal.innerHTML = `
       <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; max-width: 440px; width: 90%; color: #c9d1d9; box-shadow: 0 16px 40px rgba(0,0,0,0.6);">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-          <h3 style="font-size: 16px; color: #f0f6fc; font-weight: 600;">⚙ P2P Gateway Settings</h3>
+          <h3 style="font-size: 16px; color: #f0f6fc; font-weight: 600;">${t('settings_title')}</h3>
           <button id="btnCloseSettings" style="background: none; border: none; color: #8b949e; font-size: 18px; cursor: pointer;">✕</button>
         </div>
         <div style="margin-bottom: 16px;">
-          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">目标节点 ID (Target Node ID)</label>
-          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">支持二级/三级子域名（如 <code>bili.p2p.example.com</code>）、URL Hash（#nodeId）或手动指定。</div>
-          <input id="inputNodeId" type="text" placeholder="e.g. myhome" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 14px; font-family: monospace;" />
-          <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;" id="nodeChips">
-            <span class="node-chip" data-node="librespeed" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">librespeed</span>
-            <span class="node-chip" data-node="vaultwarden" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">vaultwarden</span>
-            <span class="node-chip" data-node="immich" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">immich</span>
-            <span class="node-chip" data-node="jellyfin" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">jellyfin</span>
-            <span class="node-chip" data-node="openlist" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">openlist</span>
-            <span class="node-chip" data-node="portainer" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">portainer</span>
-            <span class="node-chip" data-node="bili" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">bilibili</span>
-          </div>
+          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">${t('settings_node_label')}</label>
+          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">${t('settings_node_desc')}</div>
+          <input id="inputNodeId" type="text" placeholder="${t('settings_node_placeholder')}" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 14px; font-family: monospace;" />
         </div>
         <div style="margin-bottom: 20px;">
-          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">信令服务端地址 (Signaling Server URL)</label>
-          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">设置 WebRTC 握手撮合信令服务器 WebSocket 地址。</div>
-          <input id="inputSignalUrl" type="text" placeholder="wss://..." style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;" />
-          <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;" id="signalChips">
-            <span class="signal-chip" data-signal="current" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">当前同源信令 (Same-Origin /ws)</span>
-            <span class="signal-chip" data-signal="ws://127.0.0.1:8888/ws" style="cursor: pointer; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: #21262d; border: 1px solid #30363d; color: #58a6ff;">本地信令 (localhost:8888)</span>
-          </div>
+          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">${t('settings_signal_label')}</label>
+          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">${t('settings_signal_desc')}</div>
+          <input id="inputSignalUrl" type="text" placeholder="${t('settings_signal_placeholder')}" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;" />
         </div>
         <div style="margin-bottom: 20px;">
-          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">访问口令 / 密钥 (Secret Token - 可选)</label>
-          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">若目标节点开启了 <code>-secret</code> 保护，请输入匹配的口令；留空表示公开访问。</div>
-          <input id="inputSecret" type="password" placeholder="Optional Secret Token" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;" />
+          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">${t('settings_secret_label')}</label>
+          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">${t('settings_secret_desc')}</div>
+          <input id="inputSecret" type="password" placeholder="${t('settings_secret_placeholder')}" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-family: monospace;" />
         </div>
         <div style="margin-bottom: 20px;">
-          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">TURN 中继穿透 (Symmetric NAT Relay - 可选)</label>
-          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">在严格对称型 NAT（企业网/校园网/移动网络）打洞失败时无缝降级走中继。</div>
-          <input id="inputTurnUrl" type="text" placeholder="turn:turn.domain.com:3478" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-family: monospace; margin-bottom: 6px;" />
+          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">${t('settings_turn_label')}</label>
+          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">${t('settings_turn_desc')}</div>
+          <input id="inputTurnUrl" type="text" placeholder="${t('settings_turn_url_placeholder')}" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-family: monospace; margin-bottom: 6px;" />
           <div style="display: flex; gap: 8px;">
-            <input id="inputTurnUser" type="text" placeholder="Username" style="flex: 1; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-family: monospace;" />
-            <input id="inputTurnPass" type="password" placeholder="Password" style="flex: 1; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-family: monospace;" />
+            <input id="inputTurnUser" type="text" placeholder="${t('settings_turn_user_placeholder')}" style="flex: 1; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-family: monospace;" />
+            <input id="inputTurnPass" type="password" placeholder="${t('settings_turn_pass_placeholder')}" style="flex: 1; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 10px; border-radius: 6px; font-size: 12px; font-family: monospace;" />
           </div>
         </div>
         <div style="margin-bottom: 20px; border-top: 1px solid #30363d; padding-top: 16px;">
-          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">🔗 限时安全分享链接 (Stateless Signed Share Link)</label>
-          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">基于 HMAC-SHA256 纯数学时效签名，无需对方输入密钥，到期自动失效。</div>
+          <label style="display: block; font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 4px; font-weight: 600;">${t('settings_share_label')}</label>
+          <div style="font-size: 11px; color: #8b949e; margin-bottom: 8px;">${t('settings_share_desc')}</div>
           <div style="display: flex; gap: 8px; margin-bottom: 8px;">
             <select id="selShareDuration" style="flex: 1; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 6px 10px; border-radius: 6px; font-size: 12px;">
-              <option value="3600">有效 1 小时 (1 Hour)</option>
-              <option value="21600">有效 6 小时 (6 Hours)</option>
-              <option value="86400" selected>有效 24 小时 (1 Day)</option>
-              <option value="604800">有效 7 天 (7 Days)</option>
-              <option value="2592000">有效 30 天 (30 Days)</option>
+              <option value="3600">${t('duration_1h')}</option>
+              <option value="21600">${t('duration_6h')}</option>
+              <option value="86400" selected>${t('duration_24h')}</option>
+              <option value="604800">${t('duration_7d')}</option>
+              <option value="2592000">${t('duration_30d')}</option>
             </select>
-            <button id="btnGenShareLink" type="button" style="background: #238636; color: #ffffff; border: none; padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;">生成链接</button>
+            <button id="btnGenShareLink" type="button" style="background: #238636; color: #ffffff; border: none; padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;">${t('btn_gen_share_link')}</button>
           </div>
           <div id="shareLinkContainer" style="display: none; flex-direction: column; gap: 6px;">
             <div style="display: flex; gap: 6px;">
               <input id="inputShareLink" type="text" readonly style="flex: 1; background: #0d1117; border: 1px solid #238636; color: #7ee787; padding: 6px 10px; border-radius: 6px; font-size: 11px; font-family: monospace;" />
-              <button id="btnCopyShareLink" type="button" style="background: #21262d; border: 1px solid #30363d; color: #58a6ff; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;">复制</button>
+              <button id="btnCopyShareLink" type="button" style="background: #21262d; border: 1px solid #30363d; color: #58a6ff; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;">${t('btn_copy')}</button>
             </div>
-            <div id="shareCopyTip" style="font-size: 11px; color: #3fb950; display: none;">✓ 已复制到剪贴板！可以直接发送给他人访问。</div>
+            <div id="shareCopyTip" style="font-size: 11px; color: #3fb950; display: none;">${t('tip_copied')}</div>
+          </div>
+        </div>
+        <div style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px;">
+          <label style="font-size: 12px; color: #8b949e; text-transform: uppercase; font-weight: 600;">${t('settings_lang_label')}</label>
+          <div style="display: flex; gap: 6px;">
+            <button id="btnModalLangZh" type="button" style="background: ${i18n.getLocale() === 'zh-CN' ? '#238636' : '#21262d'}; border: 1px solid #30363d; color: #ffffff; padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;">简体中文</button>
+            <button id="btnModalLangEn" type="button" style="background: ${i18n.getLocale() === 'en-US' ? '#238636' : '#21262d'}; border: 1px solid #30363d; color: #ffffff; padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;">English</button>
           </div>
         </div>
         <div id="settingsDiagnosticsContainer" style="margin-bottom: 20px;">
           ${this.getDiagnosticsHtml()}
         </div>
         <div style="display: flex; gap: 10px; justify-content: flex-end;">
-          <button id="btnToggleDebugView" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 14px; border-radius: 6px; font-size: 13px; cursor: pointer;">Toggle Debug View</button>
-          <button id="btnSaveReconnect" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;">Save & Connect</button>
+          <button id="btnToggleDebugView" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 14px; border-radius: 6px; font-size: 13px; cursor: pointer;">${t('btn_toggle_debug')}</button>
+          <button id="btnSaveReconnect" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;">${t('btn_save_connect')}</button>
         </div>
       </div>
     `;
@@ -1920,28 +1950,11 @@ class PortalApp {
     const initSecret = document.getElementById('inputSecret') as HTMLInputElement;
     if (initSecret) initSecret.value = '';
 
-    document.querySelectorAll('.node-chip').forEach((chip) => {
-      chip.addEventListener('click', () => {
-        const targetNode = chip.getAttribute('data-node');
-        const inputNode = document.getElementById('inputNodeId') as HTMLInputElement;
-        if (targetNode && inputNode) {
-          inputNode.value = targetNode;
-        }
-      });
+    document.getElementById('btnModalLangZh')?.addEventListener('click', () => {
+      i18n.setLocale('zh-CN');
     });
-
-    document.querySelectorAll('.signal-chip').forEach((chip) => {
-      chip.addEventListener('click', () => {
-        let targetSignal = chip.getAttribute('data-signal');
-        if (targetSignal === 'current') {
-          const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-          targetSignal = `${proto}//${window.location.host}/ws`;
-        }
-        const inputSignal = document.getElementById('inputSignalUrl') as HTMLInputElement;
-        if (targetSignal && inputSignal) {
-          inputSignal.value = targetSignal;
-        }
-      });
+    document.getElementById('btnModalLangEn')?.addEventListener('click', () => {
+      i18n.setLocale('en-US');
     });
 
     document.getElementById('btnCloseSettings')?.addEventListener('click', () => {
@@ -2041,7 +2054,7 @@ class PortalApp {
           if (container) container.style.display = 'flex';
           return;
         } else {
-          alert('请在上方“访问口令 / 密钥”输入框中输入口令以生成签名分享链接。');
+          alert(t('alert_enter_secret'));
           return;
         }
       }
@@ -2063,7 +2076,7 @@ class PortalApp {
           tip.style.display = 'none';
         }
       } catch (err: any) {
-        alert('生成签名链接失败: ' + err.message);
+        alert(t('alert_gen_failed', { error: err.message }));
       }
     });
 
@@ -2094,15 +2107,22 @@ class PortalApp {
   }
 
   public openSettingsModal() {
+    const currentModal = document.getElementById('p2pSettingsModal');
+    const isAlreadyOpen = currentModal && currentModal.style.display !== 'none';
+    const existingNode = isAlreadyOpen ? (document.getElementById('inputNodeId') as HTMLInputElement)?.value : undefined;
+    const existingSignal = isAlreadyOpen ? (document.getElementById('inputSignalUrl') as HTMLInputElement)?.value : undefined;
+    const existingSecret = isAlreadyOpen ? (document.getElementById('inputSecret') as HTMLInputElement)?.value : undefined;
+
+    this.createSettingsModal();
     const modal = document.getElementById('p2pSettingsModal');
     if (modal) {
       modal.style.display = 'flex';
       const inputNode = document.getElementById('inputNodeId') as HTMLInputElement;
-      if (inputNode) inputNode.value = this.peerId;
+      if (inputNode) inputNode.value = existingNode !== undefined ? existingNode : this.peerId;
       const inputSignal = document.getElementById('inputSignalUrl') as HTMLInputElement;
-      if (inputSignal) inputSignal.value = this.signalUrl;
+      if (inputSignal) inputSignal.value = existingSignal !== undefined ? existingSignal : this.signalUrl;
       const inputSecret = document.getElementById('inputSecret') as HTMLInputElement;
-      if (inputSecret) inputSecret.value = '';
+      if (inputSecret) inputSecret.value = existingSecret !== undefined ? existingSecret : '';
 
       const inputTurnUrl = document.getElementById('inputTurnUrl') as HTMLInputElement;
       if (inputTurnUrl) inputTurnUrl.value = localStorage.getItem('p2p_turn_url') || '';
@@ -2132,7 +2152,7 @@ class PortalApp {
     return `
       <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px 12px; font-size: 11px; color: #8b949e; line-height: 1.6; text-align: left; font-family: monospace;">
         <div style="font-weight: 600; color: #c9d1d9; margin-bottom: 4px; display: flex; justify-content: space-between;">
-          <span>📋 客户端排障与运行环境 (Diagnostics)</span>
+          <span>${t('diagnostics_title')}</span>
           <span style="color: #58a6ff;">${portalVer}</span>
         </div>
         <div>• <strong>Portal Version</strong>: <span style="color: #79c0ff;">${portalVer}</span></div>
@@ -2174,9 +2194,9 @@ class PortalApp {
     bar.innerHTML = `
       <div id="btnAlertBarOpenOffline" style="display: flex; align-items: center; gap: 8px; cursor: pointer; flex: 1;">
         <span style="font-size: 15px;">⚠️</span>
-        <span>目标节点 [<strong>${safePeer}</strong>] 当前离线（点击查看排障指引或切换节点）</span>
+        <span>${t('alert_bar_offline', { node: safePeer })}</span>
       </div>
-      <button id="btnDismissAlertBar" style="background: none; border: none; color: #8b949e; font-size: 16px; cursor: pointer; padding: 0 8px; line-height: 1;" title="关闭提示">✕</button>
+      <button id="btnDismissAlertBar" style="background: none; border: none; color: #8b949e; font-size: 16px; cursor: pointer; padding: 0 8px; line-height: 1;" title="${t('btn_dismiss_alert')}">✕</button>
     `;
     document.getElementById('btnAlertBarOpenOffline')?.addEventListener('click', () => {
       this.isOfflineModalDismissed = false;
@@ -2229,11 +2249,11 @@ class PortalApp {
 
     overlay.innerHTML = `
       <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; max-width: 480px; width: 90%; color: #c9d1d9; box-shadow: 0 16px 40px rgba(0,0,0,0.6); text-align: center; position: relative;">
-        <button id="btnCloseOffline" title="关闭 (ESC)" style="position: absolute; top: 16px; right: 16px; background: none; border: none; color: #8b949e; font-size: 18px; cursor: pointer; padding: 4px 8px; line-height: 1;">✕</button>
+        <button id="btnCloseOffline" title="${t('btn_dismiss_alert')} (ESC)" style="position: absolute; top: 16px; right: 16px; background: none; border: none; color: #8b949e; font-size: 18px; cursor: pointer; padding: 4px 8px; line-height: 1;">✕</button>
         <div style="font-size: 36px; margin-bottom: 8px;">📡</div>
-        <h2 style="font-size: 18px; color: #f0f6fc; margin-bottom: 8px;">Target Node [${safePeer}] is Offline</h2>
+        <h2 style="font-size: 18px; color: #f0f6fc; margin-bottom: 8px;">${t('offline_title')}</h2>
         <p style="font-size: 13px; color: #8b949e; line-height: 1.6; margin-bottom: 16px;">
-          The remote agent daemon has not registered with the signaling relay yet. Please verify that <code>agent.exe</code> is running on your server, or switch to another node.
+          ${t('offline_desc', { node: safePeer })}
         </p>
         <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; font-size: 12px; font-family: monospace; color: #58a6ff; margin-bottom: 16px; text-align: left; word-break: break-all;">
           ./agent.exe -node-id ${safePeer} -signal ${safeSignalHost}
@@ -2242,9 +2262,9 @@ class PortalApp {
           ${this.getDiagnosticsHtml()}
         </div>
         <div style="display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
-          <button id="btnRetryConn" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;">Retry</button>
-          <button id="btnOpenSettings" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;">Switch Node</button>
-          <button id="btnDismissOffline" style="background: none; border: 1px solid #30363d; color: #8b949e; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px;">查看控制台 (Dismiss)</button>
+          <button id="btnRetryConn" style="background: #58a6ff; color: #0d1117; font-weight: 600; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;">${t('btn_retry_conn')}</button>
+          <button id="btnOpenSettings" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;">${t('btn_switch_node')}</button>
+          <button id="btnDismissOffline" style="background: none; border: 1px solid #30363d; color: #8b949e; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px;">${t('btn_dismiss_offline')}</button>
         </div>
       </div>
     `;
@@ -2306,9 +2326,9 @@ class PortalApp {
     overlay.innerHTML = `
       <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px; max-width: 440px; width: 90%; color: #c9d1d9; box-shadow: 0 16px 40px rgba(0,0,0,0.6); text-align: center;">
         <div style="font-size: 36px; margin-bottom: 12px;">🔐</div>
-        <h2 style="font-size: 18px; color: #f0f6fc; margin-bottom: 8px;">访问口令鉴权 (Auth Required)</h2>
+        <h2 style="font-size: 18px; color: #f0f6fc; margin-bottom: 8px;">${t('auth_title')}</h2>
         <p style="font-size: 13px; color: #8b949e; line-height: 1.6; margin-bottom: 16px;">
-          目标节点 <code style="color: #58a6ff; font-weight: 600;">[${safePeer}]</code> 已开启访问保护，请输入访问密钥：
+          ${t('auth_desc', { node: safePeer })}
         </p>
         ${
           safeError
@@ -2316,15 +2336,15 @@ class PortalApp {
             : ''
         }
         <div style="margin-bottom: 16px; text-align: left;">
-          <input id="inputAuthSecret" type="password" placeholder="请输入口令 / Secret Token..." style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 10px 12px; border-radius: 6px; font-size: 14px; font-family: monospace;" />
+          <input id="inputAuthSecret" type="password" placeholder="${t('auth_input_placeholder')}" style="width: 100%; box-sizing: border-box; background: #0d1117; border: 1px solid #30363d; color: #f0f6fc; padding: 10px 12px; border-radius: 6px; font-size: 14px; font-family: monospace;" />
         </div>
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 20px; font-size: 12px; color: #8b949e; cursor: pointer;">
           <input type="checkbox" id="chkRememberSecret" checked style="cursor: pointer;" />
-          <label for="chkRememberSecret" style="cursor: pointer;">记住此节点的访问口令 (Remember)</label>
+          <label for="chkRememberSecret" style="cursor: pointer;">${t('auth_remember')}</label>
         </div>
         <div style="display: flex; gap: 12px; justify-content: center;">
-          <button id="btnSubmitAuth" style="background: #238636; color: #ffffff; font-weight: 600; border: none; padding: 9px 22px; border-radius: 6px; cursor: pointer; font-size: 13px;">验证并连接</button>
-          <button id="btnAuthSwitchNode" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;">切换节点</button>
+          <button id="btnSubmitAuth" style="background: #238636; color: #ffffff; font-weight: 600; border: none; padding: 9px 22px; border-radius: 6px; cursor: pointer; font-size: 13px;">${t('btn_verify_connect')}</button>
+          <button id="btnAuthSwitchNode" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;">${t('btn_switch_node')}</button>
         </div>
       </div>
     `;
@@ -3001,12 +3021,12 @@ class PortalApp {
         <div style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px;">
           ${isMedia ? `
           <button id="btnVaultPlay" style="background: #1f6feb; color: #ffffff; border: 1px solid rgba(240, 246, 252, 0.1); border-radius: 6px; padding: 12px 20px; font-size: 15px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s;">
-            ▶ 立即在线播放 (Play Online)
+            ${t('vault_play_online')}
           </button>
           ` : ''}
 
           <button id="btnVaultDownload" style="background: #238636; color: #ffffff; border: 1px solid rgba(240, 246, 252, 0.1); border-radius: 6px; padding: 12px 20px; font-size: 15px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s;">
-            ⚡ 极速 P2P 下载 (Download)
+            ${t('vault_download')}
           </button>
 
           <div id="vaultProgressBar" style="display: none; background: #21262d; border-radius: 6px; overflow: hidden; height: 8px; width: 100%; border: 1px solid #30363d; margin-top: -4px;">
@@ -3015,31 +3035,31 @@ class PortalApp {
           <div id="vaultStatusText" style="display: none; font-size: 12px; color: #8b949e; text-align: center; margin-top: -6px; word-break: break-all;"></div>
 
           <button id="btnVaultCancel" style="display: none; background: #21262d; color: #f85149; border: 1px solid rgba(248, 81, 73, 0.3); border-radius: 6px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; align-items: center; justify-content: center; gap: 6px; transition: 0.2s;">
-            ⏹ 终止下载 (Cancel)
+            ${t('vault_cancel')}
           </button>
 
           ${isPdf ? `
           <button id="btnVaultPreview" style="background: #21262d; border: 1px solid #30363d; color: #58a6ff; border-radius: 6px; padding: 10px 20px; font-size: 14px; font-weight: 500; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s;">
-            📑 在新标签页打开原生预览 (Open in New Tab)
+            ${t('vault_open_tab')}
           </button>
           ` : ''}
 
           ${opts.isDir ? `
           <button id="btnVaultBack" style="background: transparent; border: 1px solid #30363d; color: #8b949e; border-radius: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer; transition: 0.2s;">
-            ⬅ 返回文件目录 (Back to Directory)
+            ${t('vault_back_dir')}
           </button>
           ` : ''}
         </div>
 
         ${isPdf ? `
         <p style="font-size: 12px; color: #8b949e; line-height: 1.5; margin: 0; text-align: left; background: #0d1117; padding: 10px 14px; border-radius: 6px; border: 1px solid #21262d;">
-          💡 <strong>预览提示</strong>：由于浏览器安全沙箱限制，内嵌沙箱环境已禁用 PDF 插件。桌面端请点击<strong>【在新标签页打开原生预览】</strong>；移动端推荐点击<strong>【极速 P2P 下载】</strong>使用系统阅读器浏览。
+          ${t('vault_pdf_tip')}
         </p>
         ` : ''}
 
         ${isMedia ? `
         <p style="font-size: 12px; color: #8b949e; line-height: 1.5; margin: 0; text-align: left; background: #0d1117; padding: 10px 14px; border-radius: 6px; border: 1px solid #21262d;">
-          💡 <strong>媒体提示</strong>：点击<strong>【立即在线播放】</strong>使用浏览器原生播放器（支持全屏、倍速与画中画）；点击<strong>【极速 P2P 下载】</strong>将原片高速直存至本地设备。
+          ${t('vault_media_tip')}
         </p>
         ` : ''}
       </div>
@@ -3083,7 +3103,7 @@ class PortalApp {
           btnDownload.disabled = false;
           btnDownload.style.opacity = '1';
           btnDownload.style.cursor = 'pointer';
-          btnDownload.innerText = '⚡ 极速 P2P 下载 (Download)';
+          btnDownload.innerText = t('vault_download');
         }
         if (btnPlay) btnPlay.style.display = 'flex';
         if (btnPreview) btnPreview.style.display = 'flex';
@@ -3117,14 +3137,14 @@ class PortalApp {
       btnDownload.disabled = true;
       btnDownload.style.opacity = '0.7';
       btnDownload.style.cursor = 'not-allowed';
-      btnDownload.innerText = '⚡ 正在建立 P2P 传输...';
+      btnDownload.innerText = t('vault_connecting');
       if (btnPlay) btnPlay.style.display = 'none';
       if (btnPreview) btnPreview.style.display = 'none';
       if (btnCancel) btnCancel.style.display = 'flex';
       if (progressBar) progressBar.style.display = 'block';
       if (statusText) {
         statusText.style.display = 'block';
-        statusText.innerText = '正在通过 WebRTC DataChannel 发起请求...';
+        statusText.innerText = t('vault_requesting');
       }
 
       const abortController = new AbortController();
@@ -3144,7 +3164,7 @@ class PortalApp {
         if (!reader) {
           const blob = await response.blob();
           this.triggerBlobDownload(blob, opts.fileName);
-          btnDownload.innerText = '✅ 下载完成';
+          btnDownload.innerText = t('vault_complete_btn');
           if (btnCancel) btnCancel.style.display = 'none';
           setTimeout(resetUI, 2500);
           return;
@@ -3177,12 +3197,12 @@ class PortalApp {
 
               if (totalBytes > 0) {
                 const pct = Math.min(100, Math.round((receivedBytes / totalBytes) * 100));
-                btnDownload.innerText = `📥 正在接收: ${pct}% (${speedStr})`;
+                btnDownload.innerText = t('vault_receiving_pct', { pct, speed: speedStr });
                 if (progressFill) progressFill.style.width = `${pct}%`;
-                if (statusText) statusText.innerText = `已传输 ${receivedStr} / ${totalStr} · 速度 ${speedStr}`;
+                if (statusText) statusText.innerText = t('vault_transferred_of', { received: receivedStr, total: totalStr, speed: speedStr });
               } else {
-                btnDownload.innerText = `📥 已接收 ${receivedStr} (${speedStr})`;
-                if (statusText) statusText.innerText = `已传输 ${receivedStr} · 速度 ${speedStr}`;
+                btnDownload.innerText = t('vault_receiving_raw', { received: receivedStr, speed: speedStr });
+                if (statusText) statusText.innerText = t('vault_transferred_raw', { received: receivedStr, speed: speedStr });
               }
             }
           }
@@ -3196,10 +3216,10 @@ class PortalApp {
           this.triggerBlobDownload(finalBlob, opts.fileName);
         }
 
-        btnDownload.innerText = '✅ 下载完成';
+        btnDownload.innerText = t('vault_complete_btn');
         if (btnCancel) btnCancel.style.display = 'none';
         if (progressFill) progressFill.style.width = '100%';
-        if (statusText) statusText.innerText = `🎉 传输完毕，共 ${this.formatFileSize(receivedBytes)}`;
+        if (statusText) statusText.innerText = t('vault_complete_status', { size: this.formatFileSize(receivedBytes) });
         setTimeout(resetUI, 2500);
       } catch (err: any) {
         if (fileStream) {
@@ -3208,12 +3228,12 @@ class PortalApp {
         }
         if (btnCancel) btnCancel.style.display = 'none';
         if (err.name === 'AbortError') {
-          btnDownload.innerText = '⚠️ 下载已取消';
-          if (statusText) statusText.innerText = '用户中断了传输';
+          btnDownload.innerText = t('vault_cancelled_btn');
+          if (statusText) statusText.innerText = t('vault_cancelled_status');
         } else {
           this.log(`Vault download error: ${err.message}`);
-          btnDownload.innerText = '❌ 下载失败';
-          if (statusText) statusText.innerText = `传输失败: ${err.message || '网络连接异常'}`;
+          btnDownload.innerText = t('vault_failed_btn');
+          if (statusText) statusText.innerText = t('vault_failed_status', { error: err.message || 'Error' });
         }
         setTimeout(resetUI, 1500);
       } finally {
