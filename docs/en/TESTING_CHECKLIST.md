@@ -9,28 +9,12 @@
 
 ## 1. Release-Tiered Gate Protocol
 
-In accordance with [docs/en/REVIEW_GUIDELINES.md](file:///docs/en/REVIEW_GUIDELINES.md) and [docs/en/RELEASE_CHECKLIST.md](file:///docs/en/RELEASE_CHECKLIST.md), the project rejects mechanical over-testing for trivial patches as well as premature sign-offs for architectural refactorings. A three-tiered release gate protocol is enforced:
+Release gate classification adheres to the overarching policies defined in [docs/en/RELEASE_CHECKLIST.md](file:///docs/en/RELEASE_CHECKLIST.md) and [docs/en/REVIEW_GUIDELINES.md](file:///docs/en/REVIEW_GUIDELINES.md). Verification is strictly tiered to prevent mechanical over-testing for routine patches while enforcing rigorous gates for major refactoring:
+- **Major Release (`vX+1.0.0`)**: Mandatory 100% pass across all 8 dimensions with a formal signed Release Test Report;
+- **Minor Release (`vX.Y+1.0`)**: Level 1 CDP automated suite 100% PASS, plus targeted testbed dimensions based on the **Blast-Radius Driven Sampling Matrix** below, alongside backward compatibility validation;
+- **Patch Release (`vX.Y.Z+1`)**: Full automated CI pipeline PASS and local Level 1 CDP browser smoke validation for rapid delivery.
 
-```mermaid
-flowchart TD
-    ReleaseType{"SemVer Release Tier"}
-
-    ReleaseType -->|"MAJOR (vX+1.0.0)<br/>Protocol Wire Changes / Core Architecture"| MajorGate["🔴 MAJOR Mandatory Full Gate<br/>- 100% full pass across all 8 dimensions<br/>- Cross-version backward compatibility assertion<br/>- Real bare-metal & multi-browser verification<br/>- Formal Release Test Report archived"]
-    
-    ReleaseType -->|"MINOR (vX.Y+1.0)<br/>New Operational Modes / CLI / Compatible Features"| MinorGate["🟡 MINOR Blast-Radius Sampling Gate<br/>- Level 1 Automated CDP Matrix 100% PASS<br/>- Targeted sampling based on blast-radius matrix<br/>- Backward compatibility (legacy Agent on new hub)<br/>- Verification logs attached to PR"]
-    
-    ReleaseType -->|"PATCH (vX.Y.Z+1)<br/>Race Fixes / Boundary Defenses / UI Fixes"| PatchGate["🟢 PATCH Fast-Delivery Gate<br/>- Full CI suite PASS (Unit + Race + Typecheck)<br/>- Level 1 Automated CDP smoke regression<br/>- Local container smoke test PASS"]
-```
-
-### 1. Release Gate Criteria
-
-| Release Tier | Versioning Format | Core Verification Focus | Mandatory Passing Criteria | Sign-off & Archiving Requirement |
-| :--- | :---: | :--- | :--- | :--- |
-| **Major** | `vX+1.0.0` | Wire protocol evolution, security auth model, extreme backpressure, chaos network resilience. | **Mandatory 100% pass across all 8 dimensions**; zero skips or compromises. | Formal Release Test Report signed off by QA Lead, archived under `docs/RELEASE_REPORTS/`. |
-| **Minor** | `vX.Y+1.0` | New functional modes, CLI flag/env additions, backward-compatible protocol features. | **Level 1 CDP matrix 100% PASS**; targeted verification based on **blast-radius matrix**; legacy Agent interop passed. | Detailed test logs, screenshots, and packet captures attached to PR description. |
-| **Patch** | `vX.Y.Z+1` | Concurrency deadlocks, null-body boundaries, memory leak detox, UI interaction fixes. | Full automated CI pipeline (`tsc`, `go vet`, `go test -race`, `npm test`) and local Level 1 CDP smoke passed. | Negative proof test execution attached to PR. |
-
-### 2. MINOR Releases: Blast-Radius Driven Sampling Matrix
+### MINOR Releases: Blast-Radius Driven Sampling Matrix
 
 For MINOR releases, the QA Lead activates targeted real-world dimensions based on modified packages:
 

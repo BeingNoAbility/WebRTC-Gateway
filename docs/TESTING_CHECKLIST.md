@@ -9,28 +9,12 @@
 
 ## 一、 发版分级准入与测试治理协议 (Release-Tiered Gate Protocol)
 
-依据 [docs/REVIEW_GUIDELINES.md](file:///docs/REVIEW_GUIDELINES.md) 与 [docs/RELEASE_CHECKLIST.md](file:///docs/RELEASE_CHECKLIST.md)，项目坚决反对“小修小补机械全跑”的形式主义与“重大重构侥幸放行”的本位傲慢，实行标准的三级发版准入裁定：
+发版分级准入与门禁裁定总则严格遵循 [docs/RELEASE_CHECKLIST.md](file:///docs/RELEASE_CHECKLIST.md) 与 [docs/REVIEW_GUIDELINES.md](file:///docs/REVIEW_GUIDELINES.md)。项目坚决反对“小修小补机械全跑”的形式主义与“重大重构侥幸放行”的本位傲慢，依据发版类型分级裁定：
+- **主版本 (Major, `vX+1.0.0`)**：强制 100% 逐项跑满本清单全量 8 大维度，并在 PR 中出具归档的正式测试签核报告；
+- **次版本 (Minor, `vX.Y+1.0`)**：Level 1 CDP 自动化矩阵 100% 通过，并依照下述**特征爆炸半径矩阵**必测相关维度，旧版 Agent 互通必须通过；
+- **补丁版本 (Patch, `vX.Y.Z+1`)**：CI 自动化防线全绿，配合本地 Level 1 浏览器冒烟验证即可快速交付。
 
-```mermaid
-flowchart TD
-    ReleaseType{"发版语义定级判定<br/>(SemVer Release Tier)"}
-
-    ReleaseType -->|"MAJOR (vX+1.0.0)<br/>底层协议重构 / 核心架构演进"| MajorGate["🔴 MAJOR 强制全量实战门禁<br/>- 100% 全量跑满 8 大全息维度<br/>- 跨版本异构互通硬隔离断言<br/>- 真实物理机/多端浏览器矩阵实测<br/>- 产出归档 Release Test Report"]
-    
-    ReleaseType -->|"MINOR (vX.Y+1.0)<br/>新增功能模式 / CLI 扩展 / 兼容协议"| MinorGate["🟡 MINOR 特征爆炸半径定向抽样门禁<br/>- Level 1 自动化 CDP 实战矩阵 100% 绿灯<br/>- 依照爆炸半径矩阵定向抽样实网维度<br/>- 严格向下兼容（旧 Agent 连新网必须平滑）<br/>- 证据与拨测日志附于 PR"]
-    
-    ReleaseType -->|"PATCH (vX.Y.Z+1)<br/>竞态修复 / 边界防护 / 体验微调"| PatchGate["🟢 PATCH 快速交付门禁<br/>- CI 机器防线全绿 (Unit + Race + Typecheck)<br/>- Level 1 自动化 CDP 冒烟回归<br/>- 本地容器烟雾验收即可放行"]
-```
-
-### 1. MAJOR 与 MINOR 发版门禁对照
-
-| 发版类型 | 版本位范式 | 核心检验聚焦 | 必备通过条件 | 签核归档要求 |
-| :--- | :---: | :--- | :--- | :--- |
-| **主版本 (Major)** | `vX+1.0.0` | 协议 Wire 格式演进、安全鉴权模型、高并发极限背压、真实网络混沌容灾。 | **强制 100% 逐项通过本清单全量 8 大维度**；零任何维度跳过或妥协。 | 必须在 PR 中出具由测试主管签核的正式完整测试报告，归档至 `docs/`。 |
-| **次版本 (Minor)** | `vX.Y+1.0` | 新功能业务闭环、新增 CLI 参数/环境变量、向后兼容协议扩展。 | **Level 1 CDP 自动化矩阵 100% 通过**；依照**特征爆炸半径矩阵**必测相关维度，且**旧版本 Agent 互通测试必须通过**。 | 在 PR 描述中详细附带定向抽样维度的实操日志、报文截屏或抓包证据。 |
-| **补丁版本 (Patch)** | `vX.Y.Z+1` | 并发死锁、空载荷边界修复、内存泄漏排毒、UI 交互修复。 | 自动化 CI 机器防线（`tsc`, `go vet`, `go test -race`, `npm test`）及本地 Level 1 浏览器冒烟测试通过。 | PR 附带对应 Bug 的反向证伪用例运行证据。 |
-
-### 2. MINOR 发版：特征爆炸半径定向抽样矩阵 (Blast-Radius Driven Sampling Matrix)
+### MINOR 发版：特征爆炸半径定向抽样矩阵 (Blast-Radius Driven Sampling Matrix)
 
 当进行 MINOR 发版时，测试主管依据改动的代码包与影响面，强制激活对应维度的实战拨测：
 
