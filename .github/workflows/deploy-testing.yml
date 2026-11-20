@@ -18,6 +18,7 @@ jobs:
   deploy-testing:
     name: Deploy to Cloudflare (testing.p2p)
     runs-on: ubuntu-latest
+    if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
