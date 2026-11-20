@@ -6,6 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v2.4.0] - 2026-11-20
+
+### Internationalization & UI Refinement
+- **Zero-Dependency Bilingual Web Portal**:
+  - Implemented lightweight, type-safe i18n dictionary and runtime manager (`web/src/portal/i18n.ts`, < 2.5KB bundle overhead) supporting Simplified Chinese (`zh-CN`) and English (`en-US`).
+  - Implemented in-place DOM re-rendering ensuring WebRTC peer connections, DataChannels, media streaming, and Service Worker interception remain 100% uninterrupted during language switching.
+  - Purged hardcoded quick-fill demo chips (`librespeed`, `vaultwarden`, etc.) and event listeners, reclaiming 40% vertical modal height and preventing layout overflow on narrow mobile screens.
+  - Added header language toggle button (`🌐 EN` / `🌐 简中`) and in-modal language selector with typed input value preservation.
+  - Eliminated mixed-language bracket compromises across all user-facing interfaces.
+
+### Security & Subdomain Extraction
+- **PaaS Multi-Tenant Subdomain Traversal Defense**:
+  - Hardened `extractNodeIdFromHostname` in `test/test_subdomain_logic.cjs` to reject multi-level platform suffixes (`.pages.dev`, `.workers.dev`, `.github.io`, `.vercel.app`, etc.) from being falsely identified as root nodes.
+  - Expanded reserved keyword list and added support for multi-segment staging prefixes (e.g. `bili.testing.p2p.example.com`).
+
+### Testing & Verification
+- **1:1 i18n Parity & Attribute Binding Suite**:
+  - Added `test/test_i18n.cjs` verifying 100% translation key completeness, parameter placeholder parity, non-empty values, and HTML `data-i18n` binding validity.
+
 ### CI/CD & Deployment
 - **Cloudflare Workers Dual-Environment & CI Release Automation**:
   - Configured dual-environment deployment in `web/wrangler.toml` separating production (`p2p`) from staging (`testing.p2p`).

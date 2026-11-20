@@ -52,7 +52,7 @@ assert(!portalCode.includes('value="${this.secret}"'), 'portal.js MUST NOT inter
 const indexHtmlPath = path.resolve(__dirname, '../web/dist/index.html');
 assert(fs.existsSync(indexHtmlPath), 'web/dist/index.html exists');
 const indexHtmlCode = fs.readFileSync(indexHtmlPath, 'utf-8');
-assert(indexHtmlCode.includes('v2.3.2'), 'index.html displays v2.3.2 version badge in header');
+assert(indexHtmlCode.includes('v2.4.0'), 'index.html displays v2.4.0 version badge in header');
 assert(portalCode.includes('btnCloseOffline') && portalCode.includes('btnDismissOffline'), 'portal.js provides dismissable offline prompt with close and dismiss controls');
 assert(portalCode.includes('p2pOfflineAlertBar'), 'portal.js degrades to non-blocking offline alert bar on dismiss');
 assert(portalCode.includes('P2PMux v2.3 Dual-Channel (10-byte Header / 32KB Frame)'), 'portal.js displays non-sensitive protocol and runtime diagnostics');
