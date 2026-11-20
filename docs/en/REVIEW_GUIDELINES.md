@@ -270,6 +270,20 @@ flowchart TD
   3. The Agent extracts the peer DTLS certificate fingerprint from the local WebRTC session and enforces verification;
   4. **Adversarial Falsification**: If an attacker intercepts the valid URL and replays it from another machine, their browser's newly generated DTLS certificate fingerprint will physically differ from that of the intended recipient. The computed signature mismatch causes the Agent to **reject the connection 100% of the time**, rendering intercepted URLs useless for replay.
 
+### Case 12: Root Domain Extraction and Multi-Tenant Isolation in External Proxying — [Naive Dot-Splitting vs Mozilla PSL eTLD+1 Defense]
+
+- **Context**: To support rich-media services (e.g. video slice streaming, image CDNs), the gateway provides a `/--p2p-proxy/` outbound proxying mechanism. To prevent malicious actors from exploiting this as an unrestricted open proxy (Open Proxy Abuse), the Agent must extract the target service's "Root Domain" and restrict outbound requests to subdomains belonging strictly to the same root entity (or an explicit whitelist).
+- **Shallow Approach**: Rely on naive string dot-splitting (e.g. `strings.Split(host, ".")` taking the last two labels, or last three if ending in `co.uk`/`com.cn`).
+- **Deep-Water Traps (Multi-Tenant Traversal & Academic Domain Collisions)**:
+  1. **Cross-Tenant Platform Escape**: On multi-tenant serverless or static hosting platforms (`github.io`, `pages.dev`, `workers.dev`), naive dot-splitting incorrectly classifies `github.io` as the root domain for `my-app.github.io`. An adversary registering an arbitrary `attacker.github.io` could bypass proxy checks and traverse sibling tenants through the proxy tunnel;
+  2. **Academic & Complex ccTLD Boundary Failure**: For `oxford.ac.uk` or `tokyo.ac.jp`, naive slicing reduces the root domain to bare `ac.uk`, erroneously granting wildcard trust to distinct institutions (`cambridge.ac.uk`) or arbitrary tenants;
+  3. **IPv6 Address Parsing Malfunctions**: Port-specified IPv6 hosts (e.g. `[::1]:8080`) break under naive colon and dot splits, causing routing anomalies.
+- **Dialectical Solution**: Fully integrate the Mozilla **Public Suffix List (PSL, `golang.org/x/net/publicsuffix`)**:
+  1. **Authoritative eTLD+1 Resolution**: Uses `publicsuffix.EffectiveTLDPlusOne` to derive exact effective root domains. `oxford.ac.uk` is recognized as an isolated root domain, physically decoupled from `cambridge.ac.uk`;
+  2. **Multi-Tenant Private Domain Boundary**: Adheres to PSL Private Domain markers, treating `my-app.github.io` as an isolated tenant boundary that strictly rejects `attacker.github.io`;
+  3. **Bare Public Suffix Wildcard Fuse**: If the target host is itself a bare public suffix (e.g. `github.io`), the root domain evaluates to empty, restricting proxying strictly to exact host matches without wildcard expansion;
+  4. **Standard IPv6 Decoupling**: Implements `net.SplitHostPort` with bracket stripping, cleanly supporting all IPv6 host representations.
+
 ---
 
 ## 4. Sign-off Matrix

@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### CI/CD & Deployment
+- **Cloudflare Workers Dual-Environment & CI Release Automation**:
+  - Configured dual-environment deployment in `web/wrangler.toml` separating production (`p2p`) from staging (`testing.p2p`).
+  - Added `.github/workflows/deploy-testing.yml` for continuous staging deployment on `dev` branch pushes and manual workflow dispatch.
+  - Integrated automated production release deployment into `.github/workflows/release.yml` triggered on semantic version tags.
+  - Introduced `web/scripts/deploy.mjs` with priority loading for gitignored `wrangler.local.toml` and graceful fallback to `wrangler.toml` in CI.
+  - Documented dual-environment workflow, GitHub Secrets setup, and zero-leakage local pre-push hooks in deployment guides.
+
 ## [v2.3.2] - 2026-11-19
 
 ### Security & Hardening

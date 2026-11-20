@@ -122,9 +122,14 @@ Starting with **v1.8.1**, the gateway implements comprehensive defense-in-depth 
 - Removed `window.__P2P_SECRET__` injection into proxied HTML pages, preventing upstream scripts from sniffing credentials;
 - Stripped `?secret=` exposure from URL query parameters, iframe broadcasts, and signaling join handshakes.
 
-### ③ `/--p2p-proxy/` Outbound Proxy Security Convergence
+### ③ `/--p2p-proxy/` Outbound Proxy Security Convergence & Multi-Tenant Isolation
 - Deprecated fuzzy suffix heuristic matching (`.mp4` bypass) in favor of strict origin and subdomain boundary checks;
 - Restricts proxying to same-origin and parent-domain subdomains by default, offering an `-allowed-proxy-domains` wildcard whitelist for legitimate external CDNs;
+- **Mozilla Public Suffix List (PSL) Authoritative Root Domain Extraction (v2.3.2)**:
+  - Integrates `golang.org/x/net/publicsuffix` to compute eTLD+1, resolving security boundary flaws where two-tier ccTLDs (e.g. `oxford.ac.uk`, `tokyo.ac.jp`) were improperly truncated;
+  - **Multi-Tenant Platform Physical Isolation**: On public multi-tenant platforms (such as `*.github.io`, `*.pages.dev`), `my-app.github.io` is strictly isolated as an independent tenant boundary, blocking cross-tenant traversal to `attacker.github.io`;
+  - **Bare Public Suffix Wildcard Fuse**: When the target is a bare public suffix (e.g. `github.io`, `co.uk`), the root domain returns empty, prohibiting wildcard expansion across all sibling tenants;
+  - **Full-Format IPv6 Defensive Decoupling**: Uses `net.SplitHostPort` with bracket stripping to support bare or port-specified IPv6 addresses (`[::1]:8080`, `::1`) without truncation errors;
 - Completely decoupled `-proxy` from the signaling transport to prevent local reverse-proxy pollution.
 
 ### ④ Sliding Window Brute-Force Defense & Endpoint Hardening

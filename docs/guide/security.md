@@ -123,9 +123,14 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 - 物理拔除 Service Worker 对代理 HTML 页面的 `window.__P2P_SECRET__` 注入，目标站点内部任何脚本均无法嗅探口令；
 - 移除 URL Query 中 `?secret=` 的拼接暴露；移除信令 `join` 握手阶段及 iframe 广播的冗余口令字段。
 
-### ③ `/--p2p-proxy/` 外域代发安全收敛
+### ③ `/--p2p-proxy/` 外域代发安全收敛与多租户隔离
 - 彻底废除基于后缀模糊匹配（`.mp4` 参数绕过）及关键字匹配的启发式规则；
 - 默认仅允许同源及根域名子域代理；新增 `-allowed-proxy-domains` 通配符白名单配置，实现通用且安全的外链多媒体与图床直连；
+- **Mozilla Public Suffix List (PSL) 权威根域名识别 (v2.3.2)**：
+  - 引入 `golang.org/x/net/publicsuffix` 权威提取 eTLD+1，彻底解决双层国家代码顶级域（如 `oxford.ac.uk`、`tokyo.ac.jp`）被误切分为根域的安全隐患；
+  - **多租户平台物理隔离**：对 `*.github.io`、`*.pages.dev` 等公共多租户域名，`my-app.github.io` 独立判定为单租户根域，严禁跨租户遍历至 `attacker.github.io`；
+  - **裸公共后缀防泛化熔断**：当反代目标为裸公共后缀（如 `github.io`、`co.uk`）时，根域名置空，仅允许精确主机访问，杜绝通配放行全体同级租户；
+  - **全格式 IPv6 防御性解耦**：采用 `net.SplitHostPort` 配合中括号剥离，原生支持带端口或裸 IPv6 地址（如 `[::1]:8080`、`::1`），杜绝字符串分割越界；
 - `-proxy` 严格解耦于信令外出通道，不污染本地反向代理 Transport。
 
 ### ④ 信令滑动窗口防暴破与敏感端点收敛

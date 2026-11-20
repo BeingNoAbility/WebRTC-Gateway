@@ -283,6 +283,20 @@ flowchart TD
   3. Agent 握手时强制提取 DTLS 握手证书指纹进行二次校验；
   4. **攻击证伪**：攻击者在另一台设备上即便完全窃取到了原始分享 URL，但由于其本地 WebRTC 协商生成的 DTLS 证书指纹与合法访客物理不同，算出的联合签名绝对无法匹配，跨机重放攻击拦截率达到 100%。
 
+### 案例 12：外域代理根域名判定与多租户隔离之辩 ——【朴素点号切分 vs Mozilla PSL eTLD+1 权威防逃逸】
+
+- **背景**：为了支持复杂的富媒体服务（如音视频流切片、图床引用），网关在 Agent 反向代理层提供了 `/--p2p-proxy/` 外域代发机制。为防止被恶意攻击者用作公网无限制开放代理（Open Proxy Abuse），系统必须提取目标服务的“根域名”（Root Domain），仅允许代发属于同一根域名下的合法子域（或白名单域名）。
+- **浅层做法**：采用字符串点号朴素切分（如 `strings.Split(host, ".")` 取最后两段，若遇 `com.cn`、`co.uk` 取最后三段）。
+- **深水区陷阱 (多租户穿越与高校域名穿透)**：
+  1. **多租户平台横向逃逸**：在 `github.io`、`pages.dev` 等现代无服务器/静态托管平台上，朴素切分会将 `my-app.github.io` 的根域名错误判定为 `github.io`。这意味着攻击者只需在同一个平台注册一个恶意站点（如 `attacker.github.io`），就能通过被代理站点的 `/--p2p-proxy/` 通道合法横向穿透访问，造成严重的同根穿透逃逸；
+  2. **学术机构与国家二级域边界失控**：对于 `oxford.ac.uk` 或 `tokyo.ac.jp`，朴素规则将其误判为 `ac.uk`，导致其他同机构顶级域下的站点（如 `cambridge.ac.uk` 甚至恶意第三方）均被误判为“同源子域”；
+  3. **IPv6 地址解析崩溃**：若反代目标是带端口的 IPv6（如 `[::1]:8080`），朴素冒号与点号切分会直接破坏 IPv6 结构导致严重路由错误。
+- **辩证解法**：全面引入 Mozilla 官方维护的 **Public Suffix List (PSL, `golang.org/x/net/publicsuffix`)**：
+  1. **权威 eTLD+1 派生**：通过 `publicsuffix.EffectiveTLDPlusOne` 精准提取有效顶级域名加一级。`oxford.ac.uk` 根域名准确为 `oxford.ac.uk`，与 `cambridge.ac.uk` 物理隔离；
+  2. **多租户私有后缀隔离**：PSL 规范明确标记了 Private Domains，`my-app.github.io` 直接作为独立 eTLD+1 根域，严禁跨租户逃逸；
+  3. **裸公共后缀防泛化熔断**：若目标主机本身就是一个公共后缀（如 `github.io`），根域名强制返回空字符串，仅允许精确主机匹配，禁止任何通配发散；
+  4. **IPv6 标准规范解析**：采用 `net.SplitHostPort` 配合中括号剥离，完美兼容全形态 IPv6 地址。
+
 ---
 
 ## 四、 审查结果定性与签核规范 (Sign-off Matrix)
