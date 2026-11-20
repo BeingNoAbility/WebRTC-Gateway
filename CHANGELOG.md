@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v2.4.1] - 2026-11-20
+
+### Bug Fixes & Hardening
+- **Universal Upload Content-Length Restoration & Nginx 413 Mitigation**:
+  - Injected `x-p2p-body-length` header in `web/src/patch/ws_patch.ts` for both XHR and Fetch upload streams when body length is computable (Blob, ArrayBuffer, View, or string).
+  - Reconstructed exact `req.ContentLength` and restored standard `Content-Length` header in `pkg/proxy/http_proxy.go`, stripping the internal header and preventing `Transfer-Encoding: chunked` fallback.
+  - Eliminated Nginx default 1M `client_max_body_size` 413 Request Entity Too Large errors on large uploads across LibreSpeed, Nextcloud, Alist, and file sharing utilities.
+  - Added targeted end-to-end unit test `TestHTTPProxy_UploadBodyLengthRestoration` in `pkg/proxy/proxy_targeted_test.go`.
+- **Worker Injection Regex & Stream Error Handling**:
+  - Relaxed Worker script detection regex in `web/src/sw/sw.ts` (`/(?:\.worker|_worker|speedtest_worker).*?\.js(?:\?|$)/i`) to ensure minified workers (e.g. `speedtest_worker.min.js`) are properly injected with `patch.js`.
+  - Added `case 'REQ_BODY_ERROR': stream.reset(); break;` in `web/src/portal/app.ts` message handler, ensuring upload streams are cleanly reset on upstream read errors.
+- **Language Indicator UI Consistency**:
+  - Aligned header language button display in `web/src/portal/app.ts` and `web/src/index.html` to reflect the active language (`🌐 简中` / `🌐 EN`) rather than the target language, achieving complete visual consistency with the Settings modal selector.
+
 ## [v2.4.0] - 2026-11-20
 
 ### Internationalization & UI Refinement
