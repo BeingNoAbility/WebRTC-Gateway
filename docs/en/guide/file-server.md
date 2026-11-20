@@ -1,6 +1,6 @@
 # P2P Zero-Port File & Directory Server
 
-Starting with **v1.6.0**, WebRTC Gateway introduces a native **Zero-Listener Port** P2P file distribution and static directory hosting capability.
+WebRTC Gateway introduces a native **Zero-Listener Port** P2P file distribution and static directory hosting capability.
 
 The core value of this feature is: **leveraging WebRTC's zero-client architecture for lightweight in-browser direct file distribution**. Senders do not need to install complex cloud-drive software or open public router ports; receivers simply open any modern web browser to achieve direct P2P downloads.
 

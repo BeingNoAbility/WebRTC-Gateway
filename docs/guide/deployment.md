@@ -159,8 +159,8 @@ server {
 
 ### 3. 跨源 WebSocket 访问控制配置 (CSWSH & Allowed Origins)
 当 Web 门户前端与信令服务部署在不同域名或不同端口时（例如前端托管于 Cloudflare Pages、独立静态站或本地前端开发端口，而信令服务端运行于独立 VPS）：
-- 信令服务端自 v2.3 起默认开启严格同源防御，非同源跨域握手将返回 `HTTP 403 Forbidden`；
-- 通过 `-allowed-origins` 参数或 `SIGNAL_ALLOWED_ORIGINS` 环境变量配置受信来源白名单，支持子域名与端口通配符（v2.3.1 支持域名与端口解耦匹配）：
+- 信令服务端默认开启严格同源防御，非同源跨域握手将返回 `HTTP 403 Forbidden`；
+- 通过 `-allowed-origins` 参数或 `SIGNAL_ALLOWED_ORIGINS` 环境变量配置受信来源白名单，支持子域名与端口通配符（支持域名与端口解耦匹配）：
 ```bash
 # 启动时放行指定前端跨域来源
 ./bin/signal_linux_amd64 -addr :443 \
@@ -201,7 +201,7 @@ docker compose down
 ```
 
 > [!TIP]
-> **容器健康检查机制 (v1.6.2+)**：
+> **容器健康检查机制**：
 > 服务端镜像内置了原生健康探测器（`CMD /app/server -health`），自动适配 HTTP/HTTPS 及自定义端口，支持自签名证书并即刻反馈健康状态（状态流转为 `healthy`），避免 Alpine Busybox wget 参数兼容问题。
 
 ### 3. 经典 NAS / 私有服务器纯 Agent 模式编排

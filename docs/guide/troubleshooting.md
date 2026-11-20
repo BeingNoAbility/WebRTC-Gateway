@@ -33,7 +33,7 @@
 
 ### ③ 移动设备（手机/笔记本）在 Wi-Fi 与 5G 移动蜂窝网络间切换时连接断开
 - **自动自愈机制**：
-  从 **v1.4.0** 起，系统原生内建了**双阶段 WebRTC ICE Restart 韧性流水线**：
+  系统原生内建了**双阶段 WebRTC ICE Restart 韧性流水线**：
   1. 手机切网瞬间底层 TCP/WebSocket 套接字断开，浏览器自动闪连信令并保留原有 PeerConnection；
   2. 触发带有 `iceRestart: true` 的新一轮 Offer 协商；
   3. Agent 具备 5 秒断网宽限保护期，取消提前析构，在新网络建立后无缝继续传输数据；
@@ -50,19 +50,19 @@
 ---
 
 ### ⑤ 提示 401 Unauthorized 或“信令集群准入拒绝”
-- **故障根因**：新旧版本密钥混淆或配置不匹配；
+- **故障根因**：密钥配置缺失或不匹配；
 - **排查清单**：
   1. **检查控制面集群密钥**：确认信令服务端的 `-signal-secret` 与 Agent 启动时的 `-signal-secret` 完全一致；
   2. **检查数据面访客口令**：若 Agent 配置了 `-access-secret`，访客必须在弹窗中输入该口令，或使用对应的 HMAC-SHA256 签名分享链接（`#nodeId?exp=xxx&sign=yyy`）；
-  3. **升级提示**：旧版 `-secret` 与 `SECRET` 已彻底废弃并完全移除，请勿在 Agent 或 Signal 服务端中继续传递 `-secret`，必须使用明确语义的 `-signal-secret`（集群注册）与 `-access-secret`（访客口令）。
+  3. **参数语义规范**：请确认使用语义明确的 `-signal-secret`（集群注册）与 `-access-secret`（访客口令），旧版 `-secret` 别名已不再支持。
 
 ---
 
 ### ⑥ 浏览器控制台报错：WebSocket 连接失败 (403 Forbidden) 或 CSWSH 跨域阻断
-- **故障根因**：网关自 **v2.3** 起全面强化跨站 WebSocket 劫持防御（CSWSH），信令服务端默认启用严格同源检查（Strict Same-Origin Only）。当浏览器 Web 门户的前端地址（`Origin` 标头，如 `https://portal.yourdomain.com`、`https://*.pages.dev` 或本地开发端口 `http://localhost:5173`）与信令服务端的对外域名或端口不一致时，跨域 WebSocket 握手将被服务端直接拦截并返回 `HTTP 403 Forbidden`；
+- **故障根因**：信令服务端默认启用严格同源检查（Strict Same-Origin Only），强化防御跨站 WebSocket 劫持（CSWSH）。当浏览器 Web 门户的前端地址（`Origin` 标头，如 `https://portal.yourdomain.com`、`https://*.pages.dev` 或本地开发端口 `http://localhost:5173`）与信令服务端的对外域名或端口不一致时，跨域 WebSocket 握手将被服务端直接拦截并返回 `HTTP 403 Forbidden`；
 - **排查与解决**：
   1. **配置允许的 Origin 白名单（生产环境推荐）**：
-     在启动信令服务端时添加 `-allowed-origins` 参数，或配置环境变量 `SIGNAL_ALLOWED_ORIGINS`（支持逗号分隔、子域通配符 `*.pages.dev` 与端口通配符 `localhost:*`，v2.3.1 引入域名与端口解耦匹配）：
+     在启动信令服务端时添加 `-allowed-origins` 参数，或配置环境变量 `SIGNAL_ALLOWED_ORIGINS`（支持逗号分隔、子域通配符 `*.pages.dev` 与端口通配符 `localhost:*`，支持域名与端口解耦匹配）：
      ```bash
      ./bin/signal_linux_amd64 -addr :443 \
        -allowed-origins "https://*.pages.dev,https://portal.yourdomain.com,http://localhost:*"

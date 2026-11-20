@@ -33,7 +33,7 @@ export default withMermaid(
             { text: '指南概览', link: '/guide/' },
             { text: '架构与协议', link: '/guide/architecture' },
             { text: '生产部署', link: '/guide/deployment' },
-            { text: '发版门禁清单', link: '/RELEASE_CHECKLIST' },
+            { text: '故障排查与 FAQ', link: '/guide/troubleshooting' },
             { text: 'GitHub 仓库', link: 'https://github.com/BeingNoAbility/WebRTC-Gateway' },
           ],
 
@@ -61,7 +61,7 @@ export default withMermaid(
             },
             {
               text: '工程规范与质检 (Specifications)',
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: '正式发版质量审计清单', link: '/RELEASE_CHECKLIST' },
                 { text: '辩证审查原则与核对清单', link: '/REVIEW_GUIDELINES' },
@@ -103,7 +103,7 @@ export default withMermaid(
             { text: 'Overview', link: '/en/guide/' },
             { text: 'Architecture', link: '/en/guide/architecture' },
             { text: 'Deployment', link: '/en/guide/deployment' },
-            { text: 'Checklist', link: '/en/RELEASE_CHECKLIST' },
+            { text: 'FAQ & Troubleshooting', link: '/en/guide/troubleshooting' },
             { text: 'GitHub', link: 'https://github.com/BeingNoAbility/WebRTC-Gateway' },
           ],
 
@@ -131,7 +131,7 @@ export default withMermaid(
             },
             {
               text: 'Engineering Specifications',
-              collapsed: false,
+              collapsed: true,
               items: [
                 { text: 'Release Quality Checklist', link: '/en/RELEASE_CHECKLIST' },
                 { text: 'Dialectical Review Guidelines', link: '/en/REVIEW_GUIDELINES' },

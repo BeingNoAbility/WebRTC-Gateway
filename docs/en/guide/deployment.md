@@ -114,8 +114,8 @@ server {
 
 ### 3. Cross-Origin WebSocket Access Control (CSWSH & Allowed Origins)
 When the Web portal frontend and the signaling server are hosted on distinct domains or ports (for example, frontend on Cloudflare Pages, S3/CDN, or local development ports while signaling runs on a standalone VPS):
-- The signaling server enforces strict same-origin protection by default in v2.3+, rejecting non-whitelisted cross-origin WebSocket handshakes with `HTTP 403 Forbidden`;
-- Whitelist trusted origins using the `-allowed-origins` CLI flag or `SIGNAL_ALLOWED_ORIGINS` environment variable, which supports decoupled subdomain and port wildcards in v2.3.1:
+- The signaling server enforces strict same-origin protection by default, rejecting non-whitelisted cross-origin WebSocket handshakes with `HTTP 403 Forbidden`;
+- Whitelist trusted origins using the `-allowed-origins` CLI flag or `SIGNAL_ALLOWED_ORIGINS` environment variable, which supports decoupled subdomain and port wildcards:
 ```bash
 # Whitelist trusted frontend origins
 ./bin/signal_linux_amd64 -addr :443 \

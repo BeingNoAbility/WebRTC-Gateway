@@ -41,7 +41,7 @@ sequenceDiagram
 
 ## 2. Native Dual-Channel Architecture & P2PMux Wire Specification
 
-To eliminate Head-of-Line (HoL) blocking between large bulk file streaming and critical interactive API control traffic when handling hundreds of concurrent streams, the gateway formally introduces the **Native Dual-Channel Architecture** starting in **v2.3.0**.
+To eliminate Head-of-Line (HoL) blocking between large bulk file streaming and critical interactive API control traffic when handling hundreds of concurrent streams, the gateway introduces the **Native Dual-Channel Architecture** and lightweight binary framing protocol **P2PMux**.
 
 For formal byte-level mathematical specifications and high-concurrency benchmarks, consult:
 - [P2PMux Wire Protocol Specification](./protocol-specification)
@@ -116,7 +116,7 @@ For formal byte-level mathematical specifications and high-concurrency benchmark
 - **Anti-Hotlinking**: Injects `<meta name="referrer" content="no-referrer">` into HTML responses and rewrites Origin/Referer headers upstream, eliminating 403 Forbidden errors from third-party CDNs;
 - **Window/Tab Persistence**: When opening links in new tabs (`<a target="_blank">` or `window.open`), the Service Worker maintains `activeNodeId` and injects `window.__P2P_NODE_ID__` into HTML streams. `patch.js` rewrites dynamic links to `?peer=${nodeId}#${nodeId}`, preventing new tabs from dropping node context.
 
-### ⑧ Authoritative Client IP Propagation & WAF Synergy (v1.8.0+)
+### ⑧ Authoritative Client IP Propagation & WAF Synergy
 - **Authoritative Signaling Anchor**: When relaying SDP Offers, the signaling server extracts the socket remote IP (or Cloudflare `cf-connecting-ip`) and sets `msg.ClientIP = session.RemoteIP`, discarding forged client headers;
 - **Agent Reverse-Proxy Override**: The Agent forcibly overrides `X-Forwarded-For` and `X-Real-IP` with the authoritative IP before proxying HTTP/WS requests;
 - **WAF Synergy**: Enables SafeLine, Nginx WAF, and ModSecurity to perform per-IP rate limiting, individual IP blocking, and GeoIP logging, while supporting in-place ICE Restart IP updates on mobile network roaming.

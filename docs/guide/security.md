@@ -14,7 +14,7 @@ WebRTC Gateway 遵循纵深防御（Defense-in-Depth）的安全设计理念，�
 
 ## 2. 控制面与数据面密钥解耦体系 (Dual-Secret Decoupling)
 
-从 **v1.5.0** 起，系统彻底重构并解耦了旧版模糊的 `-secret`，划分为**控制面**与**数据面**两套相互独立的密钥系统：
+系统对密钥体系进行了严格分层，解耦为**控制面**与**数据面**两套相互独立的密钥系统：
 
 ```text
                [ 控制面: SIGNAL_SECRET ]
@@ -36,10 +36,10 @@ WebRTC Gateway 遵循纵深防御（Defense-in-Depth）的安全设计理念，�
 - **公开免密模式（默认）**：
   - 当 `-access-secret` 留空时，该 Agent 为**真·公开免密节点**；
   - 访客在浏览器打开时直接打洞直连，零弹窗、零密码要求。即使信令服务器开启了严格的集群密钥，访客访问公开节点也畅通无阻；
-- **受保护私有模式 (v2.3+ DTLS 证书指纹联合绑定)**：
+- **受保护私有模式 (DTLS 证书指纹联合绑定)**：
   - 当配置了 `-access-secret` 时，访客进入 Web 门户将弹出暗黑风密码输入弹窗；
   - **单向派生鉴权密钥 (F-02)**：前端通过 `HMAC-SHA256(access_secret, "node-auth:" + nodeId)` 生成单向派生密钥 `authKey`，绝不在网络中明文传输主口令；
-  - **DTLS 证书指纹联合防重放 (F-04)**：客户端生成 WebRTC Offer 时提取本端物理 DTLS 证书指纹，计算 `HMAC-SHA256(authKey, nodeId + ":" + exp + ":" + sdpFingerprint)`。自 v2.3 起彻底出清旧版明文口令握手，即便握手报文在公网遭窃听，攻击者因不同终端物理生成的 DTLS 证书指纹不同而无法跨机重放，连接直接被 100% 拒绝。
+  - **DTLS 证书指纹联合防重放 (F-04)**：客户端生成 WebRTC Offer 时提取本端物理 DTLS 证书指纹，计算 `HMAC-SHA256(authKey, nodeId + ":" + exp + ":" + sdpFingerprint)`。握手阶段杜绝任何明文口令传输，即便握手报文在公网遭窃听，攻击者因不同终端物理生成的 DTLS 证书指纹不同而无法跨机重放，连接直接被 100% 拒绝。
 
 ---
 
@@ -69,10 +69,10 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 - 访客**无法反推出主口令**；
 - 超过过期时间戳后，Agent 本地以毫秒级时间比对直接判定失效，彻底封死过期访问。
 
-### ④ DTLS 证书指纹联合防窃听重放 (v2.3+)
-- 在 v2.3 及以上版本中，访客端打开安全分享链接发起 WebRTC 建联时，前端提取本端动态生成的 DTLS 证书指纹，在 `sign` 的基础上进一步计算联合签名 `HMAC-SHA256(sign, nodeId + ":" + exp + ":" + sdpFingerprint)`；
+### ④ DTLS 证书指纹联合防窃听重放
+- 访客端打开安全分享链接发起 WebRTC 建联时，前端提取本端动态生成的 DTLS 证书指纹，在 `sign` 的基础上进一步计算联合签名 `HMAC-SHA256(sign, nodeId + ":" + exp + ":" + sdpFingerprint)`；
 - 彻底防范“攻击者在中间信道窃听到未过期的合法分享链接 URL 后，在第三方设备上冒领建立 P2P 隧道”的重放威胁；
-- 网关强制出清历史技术债务，对未结合指纹签名的旧协议握手实施物理级 100% 阻断。
+- 对未结合指纹签名的非认证握手实施物理级 100% 阻断。
 
 ---
 
@@ -94,7 +94,7 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 
 ## 5. 权威真实客户端 IP 穿透与 WAF 协同 (Authoritative Client IP & WAF Integration)
 
-自 **v1.8.0** 起，网关全面支持生产级真实客户端 IP 透传与防伪体系，支持权威客户端 IP 透传 (X-Forwarded-For)，解决穿透场景下目标后端将所有流量误识别为 `127.0.0.1` 的问题：
+网关提供端到端真实客户端 IP 透传与防伪体系，支持权威客户端 IP 透传 (X-Forwarded-For)，解决穿透场景下目标后端将所有流量误识别为 `127.0.0.1` 的问题：
 
 ### ① 权威源头注入与防伪 (Anti-Spoofing Anchor)
 - **信令端物理覆盖**：客户端在发起 WebRTC 握手时，信令服务器权威提取物理套接字 IP（或 Cloudflare / 受信反代源 IP），在转发 Offer 时**强行覆盖 `msg.ClientIP = session.RemoteIP`**，恶意客户端在 JSON 信令中自报的任何伪造 IP 被直接抹除；
@@ -111,9 +111,9 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 
 ---
 
-## 6. 通用防御加固与收敛治理 (v1.8.1 Universal Security Hardening)
+## 6. 传输与应用沙箱纵深防御 (Defense-in-Depth & Sandbox Governance)
 
-网关自 **v1.8.1** 起，建立通用防御闭环：
+网关在各通信阶段建立严密的防御闭环：
 
 ### ① 门户控制台 DOM XSS 防御
 - **正向字符集门禁**：对所有节点 ID（URL Hash、Query、子域名、Storage）实行强制白名单（`/^[a-zA-Z0-9._-]{1,64}$/`），非规范字符直接拒绝并降级兜底；
@@ -126,7 +126,7 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 ### ③ `/--p2p-proxy/` 外域代发安全收敛与多租户隔离
 - 彻底废除基于后缀模糊匹配（`.mp4` 参数绕过）及关键字匹配的启发式规则；
 - 默认仅允许同源及根域名子域代理；新增 `-allowed-proxy-domains` 通配符白名单配置，实现通用且安全的外链多媒体与图床直连；
-- **Mozilla Public Suffix List (PSL) 权威根域名识别 (v2.3.2)**：
+- **Mozilla Public Suffix List (PSL) 权威根域名识别**：
   - 引入 `golang.org/x/net/publicsuffix` 权威提取 eTLD+1，彻底解决双层国家代码顶级域（如 `oxford.ac.uk`、`tokyo.ac.jp`）被误切分为根域的安全隐患；
   - **多租户平台物理隔离**：对 `*.github.io`、`*.pages.dev` 等公共多租户域名，`my-app.github.io` 独立判定为单租户根域，严禁跨租户遍历至 `attacker.github.io`；
   - **裸公共后缀防泛化熔断**：当反代目标为裸公共后缀（如 `github.io`、`co.uk`）时，根域名置空，仅允许精确主机访问，杜绝通配放行全体同级租户；
@@ -139,16 +139,16 @@ signature = HMAC-SHA256(nodeId + ":" + expTimestamp, access_secret)
 
 ---
 
-## 7. 控制面与数据面纵深防御治理 (v2.2 Resource Governance & Defenses)
+## 7. 控制面与数据面资源治理 (Resource Governance & Rate Limiting)
 
-自 **v2.2.0** 起，网关对控制面信令与数据面传输实施更严格的配额治理与防 DoS 加固：
+网关对控制面信令与数据面传输实施严格的配额治理与防 DoS 加固：
 
 ### ① 跨站 WebSocket 劫持防御与分流准入 (CSWSH & Origin Whitelisting)
 - **浏览器环境强制校验**：针对携带 `Origin` 请求头的浏览器客户端（Web Portal / 访客），信令服务端通过 `-allowed-origins` / `SIGNAL_ALLOWED_ORIGINS` 配置严格白名单。支持通配符子域（如 `https://*.pages.dev`）与端口通配（如 `http://localhost:*`），非法来源立即返回 `HTTP 403 Forbidden`；
 - **同源自动信任**：默认信任当前信令服务主机同源（`Origin` 主机与 `Host` 一致），避免合法部署产生误报；
 - **Native / CLI 链路独立放行**：Go CLI Agent、curl 或原生非浏览器客户端不携带 `Origin` 请求头，系统智能识别并放行 WebSocket Upgrade，随后在信令消息层通过 `SIGNAL_SECRET` / HMAC 防重放机制进行强鉴权，绝不因跨域策略阻断命令行守护进程；
-- **严格默认阻断 (Strict CSWSH Enforcement, v2.3+)**：未显式配置白名单时，默认采用严格同源模式（Strict Same-Origin Only），跨域 WebSocket 请求一律阻断（返回 HTTP 403 Forbidden），仅在显式配置 `--allow-all-origins`（或环境变量 `ALLOW_ALL_ORIGINS=true`）时才放行无白名单跨域请求（测试/开发模式）；
-- **解耦域名与端口匹配 (v2.3.1)**：支持任意组合的子域与端口通配符（如 `https://*.pages.dev`、`http://localhost:*`、`https://*.example.com:8443`），并内建 IP 防欺骗校验，原生 IP（如 `192.168.1.1`）绝不会被子域通配符误匹配。
+- **严格默认阻断 (Strict CSWSH Enforcement)**：未显式配置白名单时，默认采用严格同源模式（Strict Same-Origin Only），跨域 WebSocket 请求一律阻断（返回 HTTP 403 Forbidden），仅在显式配置 `--allow-all-origins`（或环境变量 `ALLOW_ALL_ORIGINS=true`）时才放行无白名单跨域请求（测试/开发模式）；
+- **解耦域名与端口匹配**：支持任意组合的子域与端口通配符（如 `https://*.pages.dev`、`http://localhost:*`、`https://*.example.com:8443`），并内建 IP 防欺骗校验，原生 IP（如 `192.168.1.1`）绝不会被子域通配符误匹配。
 
 ### ② 控制面会话配额与频控防 DoS (Control Plane Quotas & Janitor)
 - **单会话 Candidate 转发限额**：单 Session ICE Candidate 转发上限限制为 **32 条**，与 Agent 端 `MaxCandidatesPerSession = 32` 形成端到端双重拦截闭环，超出限制立即丢弃并记录限频日志；

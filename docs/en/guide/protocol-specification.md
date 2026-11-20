@@ -184,7 +184,7 @@ stateDiagram-v2
 
 ## 6. Resource Governance & Physical SCTP Window Backpressure
 
-To eliminate risks where slow consumers deliberately buffer multiple streams and exhaust host memory, P2PMux v2.2 enforces a three-tiered defense architecture:
+To eliminate risks where slow consumers deliberately buffer multiple streams and exhaust host memory, P2PMux enforces a three-tiered defense architecture:
 
 ```mermaid
 flowchart TD
@@ -237,7 +237,7 @@ flowchart TD
 
 ## 7. Native Dual-Channel Routing & Orphan Frame Reconciliation Invariant
 
-Starting in **v2.3.0**, the gateway upgrades its transport architecture from a single DataChannel to an **orthogonally isolated Dual-DataChannel pipeline**:
+The gateway structures its transport architecture around an **orthogonally isolated Dual-DataChannel pipeline**, incorporating state-aware routing at the framing layer:
 
 ### 1. Channel Allocation & Routing Responsibilities
 

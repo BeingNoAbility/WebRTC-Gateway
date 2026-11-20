@@ -1,6 +1,6 @@
 # P2P 零监听端口文件与目录服务 (File & Directory Server)
 
-从 **v1.6.0** 开始，WebRTC Gateway 引入了原生**零监听端口 (Zero-Listener)** 的 P2P 文件分发与静态目录托管能力。
+WebRTC Gateway 具备原生**零监听端口 (Zero-Listener)** 的 P2P 文件分发与静态目录托管能力。
 
 这一特性的核心价值在于：**充分发挥 WebRTC 的免客户端优势，实现基于浏览器的轻量文件直接分发**。发送方无需安装任何复杂的网盘软件或开放公网端口，接收方在任意设备打开现代浏览器即可直连下载。
 
@@ -81,7 +81,7 @@ Expiration: 2026-11-17 18:00:00 CST (Valid for: 24h0m0s)
 
 ---
 
-## 4. 严密的安全沙箱与特殊文件名解析 (v1.7.1 加固)
+## 4. 安全沙箱与文件名解析防护
 
 针对目录托管模式，系统内置了严密的安全与 URL 解码防御流程：
 
@@ -101,11 +101,11 @@ Expiration: 2026-11-17 18:00:00 CST (Valid for: 24h0m0s)
 
 ---
 
-## 5. P2P File Vault 文件舱与原生媒体流 (v1.7.2 加固)
+## 5. P2P File Vault 文件舱与原生媒体流
 
 ### ① P2P File Vault 文件舱 (解决 Edge/Android PDF 沙箱拦截 & 204 截断)
 W3C HTML5 规范规定：带有 `sandbox` 属性的 iframe 强制禁用浏览器扩展插件（包括 Edge/Chromium 内置的 PDFium 插件），导致直接内嵌 PDF 时浏览器提示“此页面已被 Microsoft Edge 阻止”。
-在 v1.7.2 中，门户检测到文档/二进制下载资源时自动激活 **P2P File Vault 文件舱**：
+门户检测到文档/二进制下载资源时自动激活 **P2P File Vault 文件舱**：
 - **极简深色文件卡片**：展示文件名、格式化体积与 `⚡ P2P Direct Tunnel` 零中转直连状态；
 - **204 导航中断与后台流即时截断**：激活文件舱时立即向 iframe 响应 `HTTP 204 No Content` 并重置数据流，消除 Edge 沙箱阻断报错，避免后台产生无效流量；
 - **[ ⚡ P2P 流式下载 ]**：通过 WebRTC DataChannel 流式下载；

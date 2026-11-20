@@ -33,7 +33,7 @@
 
 ### ③ Connection Drops When Mobile Devices Switch Wi-Fi and 5G Cellular
 - **Self-Healing Pipeline**:
-  Starting with **v1.4.0**, the system incorporates a **Dual-Phase ICE Restart Pipeline**:
+  The system incorporates a **Dual-Phase ICE Restart Pipeline**:
   1. The momentary network drop terminates the signaling WebSocket, but the browser retains the existing `RTCPeerConnection` instance;
   2. The browser automatically reconnects to signaling and dispatches a new SDP Offer with `iceRestart: true`;
   3. The Agent applies a 5-second grace window, delaying teardown and seamlessly continuing data streams across the new IP route;
@@ -50,19 +50,19 @@
 ---
 
 ### ⑤ Error: 401 Unauthorized or "Signaling Cluster Admission Rejected"
-- **Root Cause**: Secret mismatch between control plane and data plane;
+- **Root Cause**: Missing or mismatched secrets between control plane and data plane;
 - **Checklist**:
   1. **Control Plane Cluster Secret**: Verify that `-signal-secret` configured on the signaling server matches `-signal-secret` passed to the Agent;
   2. **Data Plane Visitor Password**: If the Agent has `-access-secret` set, visitors must enter the password in the modal, or access via a signed link (`#nodeId?exp=xxx&sign=yyy`);
-  3. **Deprecation Notice**: The legacy `-secret` flag alias has been completely removed. Ensure you use `-signal-secret` for signaling cluster authentication and `-access-secret` for visitor passwords.
+  3. **Configuration Notice**: Ensure you use `-signal-secret` for signaling cluster authentication and `-access-secret` for visitor passwords. Legacy `-secret` aliases are no longer supported.
 
 ---
 
 ### ⑥ Browser Console Error: WebSocket Connection Failed (403 Forbidden) or CSWSH Block
-- **Root Cause**: Starting with **v2.3**, the gateway enforces strict Cross-Site WebSocket Hijacking (CSWSH) protection by default (`Strict Same-Origin Only`). When the browser Web portal frontend origin (`Origin` header, such as `https://portal.yourdomain.com`, `https://*.pages.dev`, or a local development server `http://localhost:5173`) does not match the signaling server origin, the cross-origin WebSocket handshake is rejected by the server with `HTTP 403 Forbidden`;
+- **Root Cause**: The gateway enforces strict Cross-Site WebSocket Hijacking (CSWSH) protection by default (`Strict Same-Origin Only`). When the browser Web portal frontend origin (`Origin` header, such as `https://portal.yourdomain.com`, `https://*.pages.dev`, or a local development server `http://localhost:5173`) does not match the signaling server origin, the cross-origin WebSocket handshake is rejected by the server with `HTTP 403 Forbidden`;
 - **Diagnosis & Resolution**:
   1. **Configure Allowed Origins Whitelist (Recommended for Production)**:
-     Add the `-allowed-origins` CLI flag or set `SIGNAL_ALLOWED_ORIGINS` on the signaling server (supports comma-separated values, wildcard subdomains `*.pages.dev`, and port wildcards `localhost:*`, with decoupled domain/port matching in v2.3.1):
+     Add the `-allowed-origins` CLI flag or set `SIGNAL_ALLOWED_ORIGINS` on the signaling server (supports comma-separated values, wildcard subdomains `*.pages.dev`, and port wildcards `localhost:*`, with decoupled domain/port matching):
      ```bash
      ./bin/signal_linux_amd64 -addr :443 \
        -allowed-origins "https://*.pages.dev,https://portal.yourdomain.com,http://localhost:*"

@@ -184,7 +184,7 @@ stateDiagram-v2
 
 ## 六、 资源配额治理与 SCTP 接收通告窗口物理背压 (Governance & Backpressure)
 
-为了彻底根除恶意慢速消费客户端故意积压多个流引发宿主机 OOM 崩溃的风险，P2PMux 在 v2.2 正式构筑了三层立体防御体系：
+为了彻底根除恶意慢速消费客户端故意积压多个流引发宿主机 OOM 崩溃的风险，P2PMux 构筑了三层立体防御体系：
 
 ```mermaid
 flowchart TD
@@ -237,7 +237,7 @@ flowchart TD
 
 ## 七、 原生双物理通道分流与孤儿帧仲裁规约 (Dual-Channel Routing & Orphan Frame Reconciliation)
 
-自 **v2.3.0** 起，网关在物理传输层由单一 DataChannel 升级为**正交隔离的双 DataChannel 架构**，并在分帧层引入状态感知路由：
+网关在物理传输层采用**正交隔离的双 DataChannel 架构**，并在分帧层引入状态感知路由：
 
 ### 1. 物理信道职责分工表
 

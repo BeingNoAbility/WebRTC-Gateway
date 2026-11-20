@@ -41,7 +41,7 @@ sequenceDiagram
 
 ## 2. P2PMux 原生双物理通道与二进制多路复用协议规范 (Native Dual-Channel Architecture)
 
-为了在并发承载成百上千个独立的 HTTP 请求、超大文件下载与 WebSocket 连接时，彻底消除大文件高吞吐对关键 API 控制流的队头阻塞（Head-of-Line Blocking, HoL），网关自 **v2.3.0** 起全面引入**原生双物理通道架构**与轻量级二进制分帧协议 **P2PMux**。
+为了在并发承载成百上千个独立的 HTTP 请求、超大文件下载与 WebSocket 连接时，彻底消除大文件高吞吐对关键 API 控制流的队头阻塞（Head-of-Line Blocking, HoL），网关全面引入**原生双物理通道架构**与轻量级二进制分帧协议 **P2PMux**。
 
 相关形式化协议数学规约与高压测试实测数据，详见：
 - [P2PMux 协议形式化规约](./protocol-specification)
@@ -117,7 +117,7 @@ sequenceDiagram
   - 针对各类点击新标签页打开子域链接（`<a target="_blank">` 或 `window.open`）的场景，Service Worker 维护全局 `activeNodeId` 并向 HTML 响应实时注入 `window.__P2P_NODE_ID__`；
   - `patch.js` 自动将新页面重写为虚拟化路径 `?peer=${nodeId}#${nodeId}`，解决新窗口脱离上下文误将子域名作为 Node ID 导致 `Target agent offline` 的问题。
 
-### ⑧ 权威真实客户端 IP 透传与防伪中枢 (v1.8.0+)
+### ⑧ 权威真实客户端 IP 透传与防伪中枢
 - **权威信令锚点注入**：信令服务器在转发 Offer 时，物理提取客户端底层套接字真实 IP 强行覆写 `msg.ClientIP = session.RemoteIP`（Cloudflare Workers 提取 `cf-connecting-ip`），防止恶意客户端篡改信令自报伪造 IP；
 - **强制覆写与防伪防御**：Agent 代理层在转发 HTTP 与 WebSocket 握手时，强制通过 `req.Header.Set` 覆写 `X-Forwarded-For` 与 `X-Real-IP` 为权威客户端公网 IP，防范恶意客户端自报伪造头；
 - **WAF 与后端审计协同**：为雷池 SafeLine、Nginx WAF、ModSecurity 赋予单 IP 精准封禁、单 IP 频率限制与日志 GeoIP 溯源能力；支持移动漫游原地 ICE Restart 动态刷新出口 IP 与旧版信令优雅兜底 `127.0.0.1`。
