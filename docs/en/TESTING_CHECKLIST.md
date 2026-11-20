@@ -1,4 +1,4 @@
-# WebRTC Gateway Real-World Release Testing Checklist (Checklist 2.0)
+# WebRTC Gateway Real-World Release Testing Checklist (Checklist 3.0)
 
 > **Mission & Scope**:  
 > WebRTC Gateway is a multi-heterogeneous project bridging **low-level concurrent Go systems, WebRTC/SCTP NAT-traversal protocol stacks, and modern browser same-origin sandbox virtualization**.  
@@ -10,7 +10,7 @@
 ## 1. Release-Tiered Gate Protocol
 
 Release gate classification adheres to the overarching policies defined in [docs/en/RELEASE_CHECKLIST.md](file:///docs/en/RELEASE_CHECKLIST.md) and [docs/en/REVIEW_GUIDELINES.md](file:///docs/en/REVIEW_GUIDELINES.md). Verification is strictly tiered to prevent mechanical over-testing for routine patches while enforcing rigorous gates for major refactoring:
-- **Major Release (`vX+1.0.0`)**: Mandatory 100% pass across all 8 dimensions with a formal signed Release Test Report;
+- **Major Release (`vX+1.0.0`)**: Mandatory 100% pass across all 10 dimensions with a formal signed Release Test Report;
 - **Minor Release (`vX.Y+1.0`)**: Level 1 CDP automated suite 100% PASS, plus targeted testbed dimensions based on the **Blast-Radius Driven Sampling Matrix** below, alongside backward compatibility validation;
 - **Patch Release (`vX.Y.Z+1`)**: Full automated CI pipeline PASS and local Level 1 CDP browser smoke validation for rapid delivery.
 
@@ -21,8 +21,8 @@ For MINOR releases, the QA Lead activates targeted real-world dimensions based o
 ```mermaid
 flowchart LR
     subgraph Blast_Radius_Mapping["MINOR Blast-Radius Driven Dimension Mapping"]
-        C1["Proxy & Security Layer<br/>(pkg/proxy, ssrf.go)"] --> R1["Dimension 1 (1.5 HTTPS Reverse Proxy)<br/>Dimension 2 (2.1-2.7 IP/WAF/SSRF/CSWSH)<br/>Dimension 8 (8.1-8.6 Protocol Epoch/Fingerprint Anti-Replay/Security)"]
-        C2["Browser Sandbox & Frontend<br/>(web/src/sw, patch, portal)"] --> R2["Level 1 CDP Matrix<br/>Dimension 1 (1.1 Portainer, 1.2 Jellyfin)<br/>Dimension 4 (4.1-4.7 DOM/Worker Virtualization)"]
+        C1["Proxy & Security Layer<br/>(pkg/proxy, ssrf.go)"] --> R1["Dimension 1 (1.5 HTTPS Reverse Proxy)<br/>Dimension 2 (2.1-2.7 IP/WAF/SSRF/CSWSH)<br/>Dimension 8 (8.1-8.6 Protocol Epoch/Fingerprint Anti-Replay/Security)<br/>Dimension 9 (9.1-9.4 Heterogeneous Backends/RFC 7230 Length Restoration)"]
+        C2["Browser Sandbox & Frontend<br/>(web/src/sw, patch, portal, i18n)"] --> R2["Level 1 CDP Matrix<br/>Dimension 1 (1.1 Portainer, 1.2 Jellyfin)<br/>Dimension 4 (4.1-4.7 DOM/Worker Virtualization)<br/>Dimension 10 (10.1-10.4 Bilingual i18n/Language-Agnostic/Worker Query)"]
         C3["Signaling Hub & ICE<br/>(cmd/signal, pkg/signaling)"] --> R3["Dimension 3 (3.1-3.5 NAT Punching & Roaming)<br/>Dimension 6 (6.4 Slow Client Anti-Blocking)<br/>Dimension 7 (7.1-7.4 DO Hibernation/Quotas)<br/>Dimension 8 (8.1 Protocol Epoch Defense/8.2 Wire Spec)"]
         C4["Multiplexing & Flow Control<br/>(pkg/mux, frame.go)"] --> R4["Dimension 5 (5.1-5.7 Dual Channel/Orphan Buffer/128MB SCTP Flow Control)<br/>Dimension 6 (6.1-6.2 Chaos Loss & Reordering)"]
     end
@@ -93,7 +93,7 @@ flowchart LR
 
 ---
 
-## 4. Eight Dimensions of Real-World Testing
+## 4. Ten Dimensions of Real-World Testing
 
 ### Dimension 1: Real Linux Host & Complex Application Workloads
 
@@ -398,6 +398,73 @@ tc qdisc del dev eth0 root
 
 ---
 
+### Dimension 9: Heterogeneous Backend Runtimes & RFC Strict Conformance
+
+Guards against protocol edge-case discrepancies across diverse language/container stacks (Nginx, PHP-FPM, Python WSGI, embedded HTTP servers) regarding chunked transfers and request headers:
+
+- [ ] **9.1 Nginx / PHP-FPM / LibreSpeed Upload Rigor & Fixed Content-Length Restoration (RFC 7230 Content-Length vs Chunked)**
+  - **Root Cause & Rationale**: Browser `fetch(url, { method: 'POST', body })` intercepted by Service Worker streams does not automatically expose or downstream `Content-Length`. Standard Go reverse proxies fall back to `Transfer-Encoding: chunked`. However, standard Nginx / PHP-FPM / LibreSpeed deployments (`/backend/empty.php`) fail or drop chunked POST bodies, returning HTTP 411 Length Required or zero upload speed.
+  - **Test Suite**: `pkg/proxy/proxy_targeted_test.go` (`TestHTTPProxy_UploadBodyLengthRestoration`).
+  - 🟢 **Positive Verification**:
+    1. During browser file upload or speedtest, `ws_patch.ts` computes the exact payload byte size and attaches `x-p2p-body-length`;
+    2. Go `HTTPProxy` captures the header, sets `req.ContentLength = cl`, and restores the explicit `Content-Length` header while stripping `x-p2p-body-length`;
+    3. The downstream PHP-FPM backend receives an RFC 7230-compliant fixed-length request, processes the body cleanly, and responds 200 OK.
+  - 🔴 **Negative Proof**:
+    1. Assert Go reverse proxy never forwards private `x-p2p-body-length` headers downstream;
+    2. Assert in real headless browser CDP testing that W3C `ProgressEvent` events are never swallowed at completion (`progress fired: true`).
+  - 📊 **Criteria**: Real LibreSpeed upload speed matches physical link bandwidth (> 100Mbps in LAN), Go test verifies `r.Header.Get("Content-Length") != ""` and `receivedChunked == false`.
+
+- [ ] **9.2 Python WSGI / Node.js Streaming Upload & Truncation-Free Pipelining**
+  - **Deployment**: Python FastAPI / Flask WSGI or Node.js Express upload endpoints.
+  - 🟢 **Positive Verification**: Stream 50MB continuous binary data; assert asynchronous read pipelines complete with 100% SHA-256 hash match.
+  - 🔴 **Negative Proof**: Sudden client tab closure during active upload triggers `REQ_BODY_ERROR` or `RESP_CANCEL`; assert Agent executes `stream.reset()` immediately and releases downstream socket handles within 1s.
+  - 📊 **Criteria**: ActiveStreams count returns to zero within 1 second after client abort.
+
+- [ ] **9.3 Go HTTP ReverseProxy Hop-by-Hop Header Stripping & HTTP/2 Conflict Elimination**
+  - 🟢 **Positive Verification**: Custom business headers (`Authorization`, `Cookie`, `X-Custom-*`) are preserved end-to-end.
+  - 🔴 **Negative Proof**: Client sends hop-by-hop headers (`Connection: keep-alive`, `Upgrade`, `Transfer-Encoding`, `x-p2p-client-decompress`, `x-p2p-dest-host`, `x-p2p-body-length`); assert `pkg/proxy/http_proxy.go` strips all of them before dispatching to backend, preventing HTTP/2 upstream `PROTOCOL_ERROR`.
+  - 📊 **Criteria**: 100% of hop-by-hop headers stripped upon backend arrival.
+
+- [ ] **9.4 Embedded WebUI (OpenWrt LuCI / Lighttpd / Busybox httpd) Static Assets & Pipelining**
+  - **Deployment**: Embedded router administrative web panels (OpenWrt uhttpd / Lighttpd).
+  - 🟢 **Positive Verification**: Static CSS/JS assets return 304 Not Modified cleanly without malformed Content-Length header lockups.
+  - 📊 **Criteria**: 100% of embedded admin pages load smoothly without HTTP pipelining hangs.
+
+---
+
+### Dimension 10: Frontend i18n & Sandbox Injection Resilience
+
+Guards the Web Portal against internationalization regressions, language-coupled test brittleness, and Service Worker injection blind spots:
+
+- [ ] **10.1 Bilingual Dictionary 1:1 Parity & Interpolation Placeholder Safety**
+  - **Test Suite**: `test/test_i18n.cjs`.
+  - 🟢 **Positive Verification**:
+    1. 114 Chinese keys strictly match 114 English keys (zero missing translations, zero orphaned keys);
+    2. Parameter placeholders (`{size}`, `{pct}`, `{speed}`) match 100% between locales;
+    3. All 15 `data-i18n` attributes in `web/src/index.html` resolve to valid dictionary keys.
+  - 🔴 **Negative Proof**: Pass XSS payload strings (`<script>alert(1)</script>`) into translation parameters; assert the interpolation engine treats them as safe plaintext.
+  - 📊 **Criteria**: `npm test` passes `test_i18n.cjs` with 100% success.
+
+- [ ] **10.2 Language-Agnostic Automated Test Assertion Invariant**
+  - 🔴 **Anti-Hardcoding Rule**: Automated test scripts (e.g. `real_browser_matrix_runner.cjs`) **must NEVER assert on user-facing display text** (e.g. `badge === 'CONNECTED'`);
+  - **Remediation**: Use CSS status classes (`el.classList.contains('connected')`) or dedicated `data-testid` attributes;
+  - Assert that all 13 Level 1 CDP tests pass identically under both Simplified Chinese (`🌐 简中`) and English (`🌐 EN`).
+  - 📊 **Criteria**: 13/13 scenarios pass 100% regardless of portal locale.
+
+- [ ] **10.3 Multi-Level Subdomain Routing & Staging Gateway Reservation**
+  - **Test Suite**: `test/test_subdomain_logic.cjs` & `test/node_id_preservation_test.cjs`.
+  - 🟢 **Positive Verification**: Multi-level routing `bili.testing.p2p.example.com` accurately resolves target node to `bili`.
+  - 🔴 **Negative Proof**: Visiting dedicated testing gateways (`testing.p2p.example.com` or `staging.p2p.example.com`) strictly matches reserved keyword lists and falls back to `default_node`, never misinterpreting the infrastructure gateway as a target peer ID.
+  - 📊 **Criteria**: 18/18 multi-level subdomain test vectors pass.
+
+- [ ] **10.4 Web Worker Anti-Cache Query Parameters & Multi-MIME Detection**
+  - **Test Suite**: `test/node_id_preservation_test.cjs`.
+  - 🟢 **Positive Verification**: Worker scripts with anti-cache query parameters (`/speedtest_worker.js?r=0.123`) or alternative MIME types (`application/ecmascript`, `text/javascript`) are accurately matched and injected.
+  - 🔴 **Negative Proof**: Standard scripts (`/main.js`, `/vendor/jquery.min.js`) are rejected to avoid unneeded Worker wrapper overhead.
+  - 📊 **Criteria**: Worker regex matching and negative rejection test 100% PASS.
+
+---
+
 ## 5. Real-World Sign-off Protocol
 
 Before every release, the QA Lead signs off based on release tier (MAJOR full pass / MINOR targeted sampling):
@@ -413,6 +480,8 @@ Before every release, the QA Lead signs off based on release tier (MAJOR full pa
 | **Dimension 6** | Chaos Network Loss & Stress Testing | 30% loss 150ms delay without deadlocks | Network / Signaling | 🟢 PASS | 🟢 PASS |
 | **Dimension 7** | Serverless Hibernation & Daemon Lifecycle | DO hibernation, Cloudflare edge P2P, anti-DoS quotas & 30s reaper | Edge / Daemons | 🟢 PASS | 🟢 PASS |
 | **Dimension 8** | Cross-Version Interop & Security Baselines | Protocol epoch defense, cross-runtime golden vectors, DTLS anti-replay | **Protocol Mandatory** | 🟢 PASS | 🟢 PASS |
+| **Dimension 9** | Heterogeneous Backends & RFC 7230 Rigor | Fixed Content-Length restoration, hop-by-hop stripping, chunked fallback block | Proxy / Upload | 🟢 PASS | 🟢 PASS |
+| **Dimension 10** | Frontend i18n & Sandbox Resilience | Bilingual 1:1 parity, language-agnostic tests, testing gateway reservation | Frontend / i18n | 🟢 PASS | 🟢 PASS |
 
 > Archived Reports:
 > - [Dual-Channel Anti-HoL Blocking & 1000-Stream Benchmark Report (Sprint 2)](file:///docs/en/BENCHMARKS/DUAL_CHANNEL_HOL_BENCHMARK_REPORT.md)
@@ -447,5 +516,32 @@ After sign-off, the QA Lead attaches the following report to the release PR and 
   - [Dimension 6]: PASS (tc netem 30% loss curve verified)
   - [Dimension 7]: PASS (DO hibernation & graceful restart verified)
   - [Dimension 8]: PASS (N-1 Agent interop verified)
+  - [Dimension 9]: PASS (Fixed-length upload & hop-by-hop stripping verified)
+  - [Dimension 10]: PASS (Bilingual 1:1 parity & language-agnostic tests verified)
 - **Final Verdict**: 🟢 ACCEPT (Approved for Release)
 ```
+
+---
+
+## 7. Historical Defect-to-Test Mapping & Regression Registry
+
+To strictly uphold the **"Zero Regression Invariant"**, the QA authority maintains the following historical defect registry. Any PR, major refactor, or minor patch must unconditionally preserve 100% green status on all associated test suites:
+
+| Defect ID | Severity | Description & Root Cause | Fixed Version | Automated Test Suite & Assertion Function |
+| :---: | :---: | :--- | :---: | :--- |
+| **DEF-P0-1** | **P0 Blocker** | **DOM XSS Injection**: Malicious script in URL hash/query concatenated into HTML. | v1.8.1 (`16e87dc`) | [test/node_id_preservation_test.cjs](file:///test/node_id_preservation_test.cjs)<br/>`portal.js MUST NOT interpolate peerId into input value` |
+| **DEF-P0-2** | **P0 Blocker** | **Secret Access Token Leakage**: SW injected token into page DOM or URL query strings. | v1.8.1 (`16e87dc`) | [test/node_id_preservation_test.cjs](file:///test/node_id_preservation_test.cjs)<br/>`sw.js MUST NOT inject window.__P2P_SECRET__` |
+| **DEF-P0-3** | **P0 Blocker** | **PSL Multi-Tenant Cookie Collision**: Shared cookies across tenants on `pages.dev`. | v2.3.2 (`c4cbea0`) | [pkg/proxy/proxy_targeted_test.go](file:///pkg/proxy/proxy_targeted_test.go)<br/>`TestExtractRootDomain_PSL_Hardening` (21 boundary vectors) |
+| **DEF-P0-4** | **P0 Blocker** | **CSWSH Origin Port Coupling**: Non-standard origin ports broke domain matching. | v2.3.1 (`a308dc8`) | [cmd/signal/main_test.go](file:///cmd/signal/main_test.go)<br/>`TestStrictDefaultCSWSH` & port decoupling tests |
+| **DEF-P1-1** | **P1 Critical** | **F5 Fast-Refresh Zombie Session 504**: Dispatching requests to dead MessagePorts. | v1.9.1 (`0479677`) | [test/real_browser_matrix_runner.cjs](file:///test/real_browser_matrix_runner.cjs)<br/>Part 1B: `Page Refresh & Session Preservation` (CDP) |
+| **DEF-P1-2** | **P1 Critical** | **Worker Virtualization API False Positives**: Patch script injected into `/api/worker`. | v1.9.0 (`b9bd90b`) | [test/node_id_preservation_test.cjs](file:///test/node_id_preservation_test.cjs)<br/>`API endpoint /api/worker/tasks with JSON is NOT treated as worker` |
+| **DEF-P1-3** | **P1 Critical** | **Mux Stream Leak & Backpressure Lockup**: Aborted client requests hung unclosed. | v2.0.0 (`a3f76a6`) | [pkg/mux/mux_test.go](file:///pkg/mux/mux_test.go) & `app.ts` `REQ_BODY_ERROR` handling |
+| **DEF-P1-4** | **P1 Critical** | **DataChannel Nil Pointer Panic**: Concurrent read during teardown/reconnect. | v2.2.0 (`1573f1a`) | [pkg/agent/agent_test.go](file:///pkg/agent/agent_test.go)<br/>`TestAgentDataChannelNilPointerSafety` |
+| **DEF-P1-5** | **P1 Critical** | **Chromium 40410035 Download Bypass**: `<a download>` bypassing SW over public web. | v1.7.3 (`161391b`) | [test/test_vault_download.cjs](file:///test/test_vault_download.cjs)<br/>`Verified elimination of unsafe <a download>` |
+| **DEF-P2-1** | **P2 Moderate** | **Mux Slow Client Backpressure Timeout**: Slow consumer locked the send queue. | v2.3.0 (`7671a8c`) | [pkg/mux/mux_test.go](file:///pkg/mux/mux_test.go)<br/>Dual-channel decoupling & timeout auto-drop fuse tests |
+| **DEF-P2-2** | **P2 Moderate** | **LibreSpeed 0 Mbps Upload / Header Stripping**: SW stream POST dropped Content-Length. | v2.4.0 (`ee5b6b0`, `59efedd`) | [pkg/proxy/proxy_targeted_test.go](file:///pkg/proxy/proxy_targeted_test.go)<br/>`TestHTTPProxy_UploadBodyLengthRestoration` & CDP upload test |
+
+> [!CAUTION] **Zero-Regression Invariant Rules**:
+> 1. **Bug-to-Test Atomicity**: Every bugfix PR **must introduce at least one automated test that specifically fails without the fix**. PRs containing only code fixes without corresponding regression tests will be rejected by QA.
+> 2. **Sanctity of Historical Guard Tests**: Tests registered in this registry can never be deleted, disabled (`skip`), or weakened in future releases. Any structural changes to assertions require written authorization from the QA Lead and an updated checklist.
+

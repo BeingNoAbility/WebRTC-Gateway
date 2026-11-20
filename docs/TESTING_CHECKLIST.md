@@ -1,4 +1,4 @@
-# WebRTC Gateway 全息实战与真实环境发版测试清单 (Real-World Testing Checklist 2.0)
+# WebRTC Gateway 全息实战与真实环境发版测试清单 (Real-World Testing Checklist 3.0)
 
 > **导言与测试主管定性**：  
 > WebRTC Gateway 是一个横跨 **Go 高并发底层系统、WebRTC/SCTP 穿透网络协议栈与现代浏览器同源沙箱虚拟化** 的多异构集成工程。  
@@ -10,7 +10,7 @@
 ## 一、 发版分级准入与测试治理协议 (Release-Tiered Gate Protocol)
 
 发版分级准入与门禁裁定总则严格遵循 [docs/RELEASE_CHECKLIST.md](file:///docs/RELEASE_CHECKLIST.md) 与 [docs/REVIEW_GUIDELINES.md](file:///docs/REVIEW_GUIDELINES.md)。项目坚决反对“小修小补机械全跑”的形式主义与“重大重构侥幸放行”的本位傲慢，依据发版类型分级裁定：
-- **主版本 (Major, `vX+1.0.0`)**：强制 100% 逐项跑满本清单全量 8 大维度，并在 PR 中出具归档的正式测试签核报告；
+- **主版本 (Major, `vX+1.0.0`)**：强制 100% 逐项跑满本清单全量 10 大维度，并在 PR 中出具归档的正式测试签核报告；
 - **次版本 (Minor, `vX.Y+1.0`)**：Level 1 CDP 自动化矩阵 100% 通过，并依照下述**特征爆炸半径矩阵**必测相关维度，旧版 Agent 互通必须通过；
 - **补丁版本 (Patch, `vX.Y.Z+1`)**：CI 自动化防线全绿，配合本地 Level 1 浏览器冒烟验证即可快速交付。
 
@@ -21,8 +21,8 @@
 ```mermaid
 flowchart LR
     subgraph Blast_Radius_Mapping["MINOR 特征爆炸半径与必测维度映射"]
-        C1["反代与安全层改动<br/>(pkg/proxy, ssrf.go)"] --> R1["维度一 (1.5 HTTPS 穿透)<br/>维度二 (2.1-2.7 IP/WAF/SSRF/CSWSH)<br/>维度八 (8.1-8.6 协议断代/指纹防重放/安全防线)"]
-        C2["浏览器沙箱与前端协议<br/>(web/src/sw, patch, portal)"] --> R2["Level 1 CDP 自动化矩阵<br/>维度一 (1.1 Portainer, 1.2 Jellyfin)<br/>维度四 (4.1-4.7 DOM/Worker 虚拟化)"]
+        C1["反代与安全层改动<br/>(pkg/proxy, ssrf.go)"] --> R1["维度一 (1.5 HTTPS 穿透)<br/>维度二 (2.1-2.7 IP/WAF/SSRF/CSWSH)<br/>维度八 (8.1-8.6 协议断代/指纹防重放/安全防线)<br/>维度九 (9.1-9.4 异构后端/RFC 7230 定长恢复)"]
+        C2["浏览器沙箱与前端协议<br/>(web/src/sw, patch, portal, i18n)"] --> R2["Level 1 CDP 自动化矩阵<br/>维度一 (1.1 Portainer, 1.2 Jellyfin)<br/>维度四 (4.1-4.7 DOM/Worker 虚拟化)<br/>维度十 (10.1-10.4 双语国际化/抗脱敏/Worker Query 防缓存)"]
         C3["信令通道与 ICE 协商<br/>(cmd/signal, pkg/signaling)"] --> R3["维度三 (3.1-3.5 NAT 打洞与漫游)<br/>维度六 (6.4 慢速客户端防挂死)<br/>维度七 (7.1-7.4 DO 休眠/优雅关闭/配额)<br/>维度八 (8.1 协议断代防线/8.2 Wire 规范)"]
         C4["多路复用与底层流控<br/>(pkg/mux, frame.go)"] --> R4["维度五 (5.1-5.7 双通道解耦/孤儿缓冲/128MB 物理流控)<br/>维度六 (6.1-6.2 混沌丢包与乱序)"]
     end
@@ -98,7 +98,7 @@ flowchart LR
 
 ---
 
-## 四、 全息实战 8 大维度核对清单
+## 四、 全息实战 10 大维度核对清单
 
 ### 维度一：真实 Linux 宿主机与复杂业务应用部署验证
 
@@ -470,6 +470,80 @@ tc qdisc del dev eth0 root
 
 ---
 
+### 维度九：异构后端容器与标准 RFC 严格模式兼容性测试 (Heterogeneous Backend Runtimes & RFC Strict Conformance)
+
+本维度专门防御跨语言/跨容器的协议边际行为（如 Nginx、PHP-FPM、Python WSGI、嵌入式 HTTP 服务对分块传输与请求头的差异化对待）：
+
+- [ ] **9.1 Nginx / PHP-FPM / LibreSpeed 上传请求头严苛性与定长恢复验证 (RFC 7230 Content-Length vs Chunked 强制还原)**
+  - **问题根因**：浏览器端经 Service Worker 拦截流式 `fetch(url, { method: 'POST', body })` 时，标准规范通常不暴露或剥离 `Content-Length`。Go 反代接收到无长度 POST 请求体时默认采用 `Transfer-Encoding: chunked` 转发。然而 Nginx / PHP-FPM / LibreSpeed 默认对 chunked POST 体极度敏感（直接抛弃、报错 411 Length Required 或上传速度归零）。
+  - **测试套件**：`pkg/proxy/proxy_targeted_test.go` (`TestHTTPProxy_UploadBodyLengthRestoration`)。
+  - 🟢 **正向验证**：
+    1. 访客在浏览器端触发文件上传或测速，前端 `ws_patch.ts` 在底层自动计算 ArrayBuffer/Blob/String 长度并附加 `x-p2p-body-length`；
+    2. Go 端 `HTTPProxy` 成功截获该长度，强制还原标准定长 `Content-Length: <bytes>`，阻断 chunked 降级；
+    3. 后端标准 PHP-FPM（如 `adolfintel/speedtest` 的 `/backend/empty.php`）收到定长请求并顺利读空，返回 200 OK。
+  - 🔴 **反向对抗与证伪**：
+    1. 断言 Go 反向代理绝对不向下游 PHP/Nginx 转发带有 `x-p2p-body-length` 的私有头（必须清洗）；
+    2. 验证真实无头浏览器下上传完成瞬间 W3C `ProgressEvent` 100% 正常派发（`progress fired: true`），绝不因异步完成标记时序倒置而静默吞没。
+  - 📊 **判定标准与证据**：LibreSpeed 真实测速上传带宽显示正常（局域网 > 100Mbps），Go 单测断言 `r.Header.Get("Content-Length") != ""` 且 `receivedChunked == false`。
+
+- [ ] **9.2 Python WSGI / Node.js 异步流式上传与无截断分块传输断言**
+  - **部署目标**：部署 Python FastAPI / Flask 或 Node.js Express 接收上传的后端。
+  - 🟢 **正向验证**：流式上传 50MB 连续数据流，后端异步读取管道无挂死，传输完成后 SHA-256 哈希比对 100% 一致。
+  - 🔴 **反向对抗与证伪**：客户端上传途中突发关闭浏览器标签页，断言 Agent 收到 `REQ_BODY_ERROR` 或 `RESP_CANCEL` 时立即执行 `stream.reset()` 销毁底层流句柄，后端连接优雅释放，无内存僵尸泄漏。
+  - 📊 **判定标准与证据**：客户端中断后，Agent 端活跃流（ActiveStreams）计数在 1 秒内归零。
+
+- [ ] **9.3 Go HTTP 反向代理 Hop-by-hop 请求头清洗与 HTTP/2 协议冲突杜绝**
+  - 🟢 **正向验证**：业务自定义头部（`Authorization`, `Cookie`, `X-Custom-*`）完整透传至后端。
+  - 🔴 **反向对抗与证伪**：客户端请求携带逐跳头部：
+    - `Connection: keep-alive`、`Upgrade`、`Transfer-Encoding`、`x-p2p-client-decompress`、`x-p2p-dest-host`、`x-p2p-body-length`；
+    - **断言判定**：`pkg/proxy/http_proxy.go` 在向目标主机发起 HTTP 请求前，强制剥离上述全部逐跳头部，杜绝上游 HTTP/2 反代抛出 `PROTOCOL_ERROR` 或连接异常重置。
+  - 📊 **判定标准与证据**：后端抓包确认逐跳头部剥离率 100%。
+
+- [ ] **9.4 传统嵌入式 WebUI (OpenWrt LuCI / Lighttpd / Busybox httpd) 静态资源与长连兼容**
+  - **部署目标**：嵌入式路由器管理后台（如 OpenWrt uhttpd / Lighttpd）。
+  - 🟢 **正向验证**：管理后台静态 CSS、JS 正常响应 304 Not Modified，无畸形 Content-Length 引发的嵌入式 HTTP 管道挂死。
+  - 📊 **判定标准与证据**：嵌入式后台所有页面与静态资源 100% 秒级加载。
+
+---
+
+### 维度十：前端双语国际化与沙箱注入环境韧性测试 (Frontend i18n & Sandbox Injection Resilience)
+
+本维度专门守卫 Web 门户在国际化改造与沙箱注入过程中的环境适应性，杜绝“代码国际化了，测试反而脆断了”或“Worker 注入漏网”：
+
+- [ ] **10.1 双语字典 1:1 双向对齐与插值占位符安全性测试**
+  - **测试套件**：`test/test_i18n.cjs`。
+  - 🟢 **正向验证**：
+    1. 中文与英文双语字典 114 组键位 100% 严格双向对齐（零缺失翻译、零孤儿键位）；
+    2. 参数插值占位符（如 `{size}`, `{pct}`, `{speed}`）格式在双语间 100% 一致；
+    3. `web/src/index.html` 中声明的全部 15 个 `data-i18n` 属性在字典中均有真实有效定义。
+  - 🔴 **反向对抗与证伪**：向翻译参数传入携带 XSS 攻击的字符串（如 `<script>alert(1)</script>`），断言插值引擎严格将其作为普通纯文本渲染，绝不触发 DOM 注入。
+  - 📊 **判定标准与证据**：`npm test` 中 `test_i18n.cjs` 全绿通过。
+
+- [ ] **10.2 自动化测试脚本跨语言解耦断言 (Language-Agnostic Test Assertion Invariant)**
+  - 🔴 **反向对抗与硬编码拦截**：对标审查全部端到端与浏览器测试脚本（如 `real_browser_matrix_runner.cjs`）：
+    - **铁律**：严禁在测试中硬编码用户界面显示文案（例如严禁使用 `badge === 'CONNECTED'` 作为连接就绪判定）；
+    - **合规改造**：必须使用 CSS 状态类名（如 `el.classList.contains('connected')`）或专属 `data-testid` 属性作为断言锚点；
+    - 验证在默认简体中文（`🌐 简中`）与英文（`🌐 EN`）两种环境下，全部自动化脚本均 100% 稳定运行。
+  - 📊 **判定标准与证据**：切换语言前后，`npm --prefix web run test:browser` 跑出相同的 13/13 100% PASS。
+
+- [ ] **10.3 多级子域名隔离与测试环境专属网关防混淆断言**
+  - **测试套件**：`test/test_subdomain_logic.cjs` 与 `test/node_id_preservation_test.cjs`。
+  - 🟢 **正向验证**：
+    - 多级子域名反向提取：访问 `bili.testing.p2p.example.com` 准确识别目标节点为 `bili`；
+  - 🔴 **反向对抗与证伪**：
+    - 访问测试专用网关门户 `testing.p2p.example.com` 或 `staging.p2p.example.com` 时，系统严格匹配保留关键字名单（`testing`, `stage`, `staging`, `dev` 等），降级为 `default_node`，**绝对禁止将保留测试域名误当作目标节点 ID**。
+  - 📊 **判定标准与证据**：`test_subdomain_logic.cjs` 中 18 个多级子域名用例 100% 通过。
+
+- [ ] **10.4 Web Worker 随机数 Query 防缓存注入与 ECMAScript 多 MIME 类型穿透**
+  - **测试套件**：`test/node_id_preservation_test.cjs`。
+  - 🟢 **正向验证**：
+    - 携带防缓存随机数参数的 Worker 脚本（如 `/speedtest_worker.js?r=0.123`）被正则正确识别；
+    - 服务端返回 `application/javascript`、`text/javascript`、`application/ecmascript` 或直接以 `.js` 扩展名下发时，SW 均精准执行 Worker 拦截与注入。
+  - 🔴 **反向对抗与证伪**：普通脚本文件（如 `/main.js`、`/vendor/jquery.min.js`）绝不误匹配，避免无意义的 Worker 补丁开销。
+  - 📊 **判定标准与证据**：正则全集匹配与拒绝测试 100% PASS。
+
+---
+
 ## 五、 实战测试合格判定与签字矩阵 (Sign-off Protocol)
 
 每次正式发版时，测试主管必须根据发版定级（MAJOR 全量签核 / MINOR 抽样签核），在 PR 或发版报告中签核：
@@ -485,6 +559,8 @@ tc qdisc del dev eth0 root
 | **维度六** | 混沌网络损耗与抗压排毒 | 30% 丢包 150ms 延迟损耗无死锁，连接优雅维持 | 涉及网络/信令 | 🟢 PASS | 🟢 PASS |
 | **维度七** | 边缘休眠与守护进程生命周期 | DO 休眠唤醒鉴权不丢，真实 Cloudflare 穿透，Anti-DoS 配额与半开回收 | 涉及边缘/守护 | 🟢 PASS | 🟢 PASS |
 | **维度八** | 跨版本异构互通与安全基线 | 协议断代防线旧版握手全拒，Wire 黄金向量双端对齐，DTLS 指纹防重放 | **涉及协议必测** | 🟢 PASS | 🟢 PASS |
+| **维度九** | 异构后端与 RFC 7230 兼容 | 定长 Content-Length 强制还原，逐跳头部清洗，无 chunked 报错 | 涉及反代/上传 | 🟢 PASS | 🟢 PASS |
+| **维度十** | 前端双语与沙箱环境韧性 | 双语 1:1 对齐，测试语言解耦，测试网关保留字，Worker Query 渗透 | 涉及前端/i18n | 🟢 PASS | 🟢 PASS |
 
 > 归档详情查阅：
 > - [双通道抗队头阻塞与千级并发基准测试报告 (Sprint 2)](file:///docs/BENCHMARKS/DUAL_CHANNEL_HOL_BENCHMARK_REPORT.md)
@@ -521,3 +597,28 @@ tc qdisc del dev eth0 root
   - [维度八]: PASS (附带 N-1 Agent 互通测试日志)
 - **终审裁定**: 🟢 ACCEPT (准予正式发布)
 ```
+
+---
+
+## 七、 历史核心缺陷自动化测试映射与防回归红线档案 (Historical Defect-to-Test Mapping & Regression Registry)
+
+为坚决践行**“任何修复过的问题永不回归”**的质量红线，测试团队建立如下历史核心缺陷档案库。代码库的任何 PR、大版本重构或微小修补，均必须无条件保持下列对应的自动化测试用例处于 100% 绿灯状态：
+
+| 缺陷代号 | 严重级别 | 缺陷现象与物理根因 | 历史引入/修复版本 | 守护该缺陷的自动化测试套件与断言函数 |
+| :---: | :---: | :--- | :---: | :--- |
+| **DEF-P0-1** | **P0 致命** | **DOM XSS 模板字符串注入**：URL Hash/Query 中携带的恶意脚本直接拼接入 HTML。 | v1.8.1 (`16e87dc`) | [test/node_id_preservation_test.cjs](file:///test/node_id_preservation_test.cjs)<br/>断言 `portal.js MUST NOT interpolate peerId into input value` |
+| **DEF-P0-2** | **P0 致命** | **Secret 访问密钥前端泄露**：SW 误向代理页面注入凭据或 URL query 暴露 secret。 | v1.8.1 (`16e87dc`) | [test/node_id_preservation_test.cjs](file:///test/node_id_preservation_test.cjs)<br/>断言 `sw.js MUST NOT inject window.__P2P_SECRET__` |
+| **DEF-P0-3** | **P0 致命** | **PSL 多租户 Cookie 跨域污染**：在 `pages.dev` 等公共后缀下错误提升 Root Domain。 | v2.3.2 (`c4cbea0`) | [pkg/proxy/proxy_targeted_test.go](file:///pkg/proxy/proxy_targeted_test.go)<br/>函数 `TestExtractRootDomain_PSL_Hardening` (21 个边界断言) |
+| **DEF-P0-4** | **P0 致命** | **CSWSH 跨站劫持端口误杀**：带非标端口的合法 Origin 导致阻断失效或合法访问被误杀。 | v2.3.1 (`a308dc8`) | [cmd/signal/main_test.go](file:///cmd/signal/main_test.go)<br/>测试用例 `TestStrictDefaultCSWSH` 及端口解耦测试 |
+| **DEF-P1-1** | **P1 严重** | **F5 连续刷新僵尸会话 504 挂死**：向已销毁页面的 MessagePort 发送数据引发超时。 | v1.9.1 (`0479677`) | [test/real_browser_matrix_runner.cjs](file:///test/real_browser_matrix_runner.cjs)<br/>Part 1B: `Page Refresh & Session Preservation` (CDP 实测) |
+| **DEF-P1-2** | **P1 严重** | **Worker 虚拟化误杀 API 路由**：`/api/worker/tasks` 接口返回 JSON 被误注入 patch。 | v1.9.0 (`b9bd90b`) | [test/node_id_preservation_test.cjs](file:///test/node_id_preservation_test.cjs)<br/>断言 `API endpoint /api/worker/tasks with JSON is NOT treated as worker` |
+| **DEF-P1-3** | **P1 严重** | **Mux 底层流泄漏与背压挂死**：客户端主动取消请求未向 Agent 触发重置导致流堆积。 | v2.0.0 (`a3f76a6`) | [pkg/mux/mux_test.go](file:///pkg/mux/mux_test.go) 及 `app.ts` `REQ_BODY_ERROR` 熔断处理 |
+| **DEF-P1-4** | **P1 严重** | **DataChannel 空指针崩溃**：连接销毁或重连瞬间并发读取 `peerConnection` nil 指针。 | v2.2.0 (`1573f1a`) | [pkg/agent/agent_test.go](file:///pkg/agent/agent_test.go)<br/>函数 `TestAgentDataChannelNilPointerSafety` |
+| **DEF-P1-5** | **P1 严重** | **Chromium 40410035 下载绕过 SW**：`<a download>` 标签绕过 SW 走公网直连导致失败。 | v1.7.3 (`161391b`) | [test/test_vault_download.cjs](file:///test/test_vault_download.cjs)<br/>断言 `Verified elimination of unsafe <a download>` |
+| **DEF-P2-1** | **P2 中度** | **Mux 慢客户端背压熔断超时**：慢速读取导致背压锁无法释放，阻塞整个 Mux 传输。 | v2.3.0 (`7671a8c`) | [pkg/mux/mux_test.go](file:///pkg/mux/mux_test.go)<br/>双通道解耦与超时自动丢弃熔断测试 |
+| **DEF-P2-2** | **P2 中度** | **LibreSpeed 上传速度为 0 / 请求头丢失**：SW 拦截流式 POST 丢失 Content-Length，PHP 拒收。 | v2.4.0 (`ee5b6b0`, `59efedd`) | [pkg/proxy/proxy_targeted_test.go](file:///pkg/proxy/proxy_targeted_test.go)<br/>函数 `TestHTTPProxy_UploadBodyLengthRestoration` 及 CDP 上传实测 |
+
+> [!CAUTION] **防回归绝对红线法则 (Zero-Regression Invariant)**：
+> 1. **缺陷转用例原子性 (Bug-to-Test Atomicity)**：任何旨在修复 Bug 的 PR，**必须同时提交至少一个能够在该 Bug 未修复时直接失败的自动化测试用例**。若 PR 仅包含修复代码而无对应回归测试，测试团队一票否决，绝对禁止合并。
+> 2. **历史守护用例神圣不可侵犯**：本档案库中绑定的任何测试用例，在未来的版本迭代中一律禁止私自删除、禁用（`skip`）或降低断言强度。若架构变动需调整断言，必须经测试主管书面签核并更新本清单。
+
