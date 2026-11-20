@@ -1,0 +1,44 @@
+name: Deploy Testing Environment (testing.p2p)
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - 'web/**'
+      - 'edge/**'
+      - '.github/workflows/deploy-testing.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: 'cloudflare-testing'
+  cancel-in-progress: true
+
+jobs:
+  deploy-testing:
+    name: Deploy to Cloudflare (testing.p2p)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package.json
+
+      - name: Install dependencies & Build
+        run: |
+          cd web
+          npm ci || npm install
+          npm run build
+
+      - name: Deploy to Cloudflare Workers (testing-p2p)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: 'web'
+          command: deploy --env testing

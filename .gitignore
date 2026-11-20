@@ -48,4 +48,8 @@ desktop.ini
 test/*.local.json
 test/*.local.env
 .env*.local
+*wrangler.local.toml
+*wrangler.custom.toml
+web/wrangler.local.toml
+edge/wrangler.local.toml
 *.local.json

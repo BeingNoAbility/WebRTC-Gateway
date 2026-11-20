@@ -125,6 +125,7 @@ const sensitivePatterns = [
   { name: 'Private instance IP pattern 4', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjM0'), 'i') },
   { name: 'Private instance IP pattern 5', pattern: new RegExp(decodeB64('MTkyXC4xNjhcLjFcLjk5'), 'i') },
   { name: 'Private custom port pattern', pattern: new RegExp(decodeB64('MjIzNTU='), 'i') },
+  { name: 'Private domain pattern 2', pattern: new RegExp(decodeB64('bHljb3Jpc3JlY29pbA=='), 'i') },
 ];
 
 let leakCount = 0;
@@ -133,6 +134,9 @@ const filesToScan = [
   'cmd/signal/broker_test.go',
   'cmd/agent/main.go',
   'web/src/portal/app.ts',
+  'web/wrangler.toml',
+  '.github/workflows/release.yml',
+  '.github/workflows/deploy-testing.yml',
   'docs/RELEASE_NOTES.md',
   'CHANGELOG.md',
   'configs/server.example.yaml',

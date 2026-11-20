@@ -18,17 +18,56 @@ This guide covers deployment options for the public signaling server and the int
 
 The project includes an edge signaling implementation built on Cloudflare Workers and Durable Objects:
 
-1. Install Wrangler CLI:
-   ```bash
-   npm install -g wrangler
+### 2. Build & Local Deployment
+```bash
+# 1. Build web portal assets
+cd web
+npm install
+npm run build
+
+# 2. Deploy to Cloudflare Workers (Production or Testing)
+npm run deploy:prod      # Deploy official production Worker (p2p)
+npm run deploy:testing   # Deploy isolated testing Worker (testing.p2p)
+```
+
+Once deployed, the unified Worker handles both frontend static assets and WebSocket signaling:
+- **Web Portal**: `https://p2p.yourdomain.com/` (or `https://p2p.<subdomain>.workers.dev/`)
+- **Signaling Endpoint**: `wss://p2p.yourdomain.com/ws`
+
+---
+
+### 3. GitHub Actions Automated Release Deployment (CI/CD)
+
+The repository provides automated CI/CD workflows out of the box:
+- **Production Release Deployment** (`.github/workflows/release.yml`): Whenever a semantic version tag (e.g. `v2.3.3`) is pushed to GitHub, GitHub Actions builds client binaries and automatically deploys the updated Edge Worker to Cloudflare production (`p2p`).
+- **Testing Continuous Deployment** (`.github/workflows/deploy-testing.yml`): Whenever changes land on `dev` or via manual trigger, updates deploy directly to `testing.p2p`.
+
+#### Configuration Steps:
+1. **Create Cloudflare API Token**:
+   - Navigate to [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens);
+   - Select **Create Token** -> use **Edit Cloudflare Workers** template;
+   - Copy the generated token.
+2. **Add Encrypted Secrets to GitHub Repository**:
+   - Go to your repository `Settings` -> `Secrets and variables` -> `Actions`;
+   - Add two repository secrets:
+     - `CLOUDFLARE_API_TOKEN`: Your Cloudflare API Token;
+     - `CLOUDFLARE_ACCOUNT_ID`: Your Cloudflare Account ID.
+3. **Automated Operation**:
+   Subsequent releases will deploy seamlessly without manual intervention.
+
+---
+
+### 4. Zero-Leakage Private Custom Domain Deployment (Local Hook Mode)
+
+If you prefer keeping credentials off GitHub or maintaining a custom domain privately:
+1. Create a `wrangler.local.toml` file under `web/` (which is globally gitignored):
+   ```toml
+   routes = [
+     { pattern = "p2p.yourdomain.com", custom_domain = true }
+   ]
    ```
-2. Deploy edge signaling worker:
-   ```bash
-   cd edge
-   wrangler deploy
-   ```
-3. Your signaling URL is immediately ready:
-   `wss://your-subdomain.workers.dev/ws`
+2. The local deployment wrapper (`web/scripts/deploy.mjs`) automatically prioritizes `wrangler.local.toml` locally while gracefully falling back to public `wrangler.toml` in CI.
+3. The included `.git/hooks/pre-push` hook automatically triggers production deployment with your local domain whenever pushing a release tag, achieving 100% automated release with zero secret leakage.
 
 ---
 

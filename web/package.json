@@ -6,7 +6,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && node esbuild.config.mjs",
-    "deploy:cloudflare": "npm run build && wrangler deploy",
+    "deploy:cloudflare": "npm run build && node ./scripts/deploy.mjs prod",
+    "deploy:testing": "npm run build && node ./scripts/deploy.mjs testing",
+    "deploy:prod": "npm run build && node ./scripts/deploy.mjs prod",
     "test": "node ../test/test_worker_syntax.cjs && node ../test/test_subdomain_logic.cjs && node ../test/node_id_preservation_test.cjs && node ../test/test_vault_download.cjs && node ../test/test_smart_pill.cjs && node ../test/test_protocol_vectors.cjs && node ../test/test_dual_channel.cjs",
     "test:browser": "node ../test/real_browser_matrix_runner.cjs --local-only",
     "test:browser:full": "node ../test/real_browser_matrix_runner.cjs",

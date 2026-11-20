@@ -375,8 +375,8 @@ function createMockDOM(options = {}) {
       'p2p', 'www', 'webrtc', 'webrtc-p2p-signal', 'signal', 'signaling',
       'gateway', 'portal', 'api', 'admin', 'proxy', 'vpn', 'tunnel',
       'webrtc-gateway', 'p2p-gateway', 'app', 'web', 'client', 'relay',
-      'service', 'hub', 'test', 'demo', 'node', 'nodes', 'server', 'direct',
-      'static', 'assets', 'cdn'
+      'service', 'hub', 'test', 'testing', 'stage', 'staging', 'dev', 'demo',
+      'node', 'nodes', 'server', 'direct', 'static', 'assets', 'cdn'
     ]);
 
     function extractExplicitP2PSubdomain(hostname) {
@@ -384,8 +384,10 @@ function createMockDOM(options = {}) {
       if (p2pIndex > 0) {
         const sub = hostname.substring(0, p2pIndex);
         const parts = sub.split('.');
-        const candidate = parts[parts.length - 1];
-        if (candidate && !reserved.has(candidate)) return candidate;
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const candidate = parts[i];
+          if (candidate && !reserved.has(candidate)) return candidate;
+        }
       }
       return null;
     }
@@ -468,6 +470,14 @@ function createMockDOM(options = {}) {
   // 5. Reserved subdomain gateway.example.com falls back to default_node
   const cfg5 = simulateResolveConfig('https://gateway.example.com/');
   assert(cfg5.peerId === 'default_node', 'Reserved gateway subdomain does not become node ID');
+
+  // 5b. Dedicated testing portal subdomain testing.p2p.example.com falls back to default_node
+  const cfgTestingPortal = simulateResolveConfig('https://testing.p2p.example.com/');
+  assert(cfgTestingPortal.peerId === 'default_node', 'Reserved testing portal subdomain does not become node ID');
+
+  // 5c. Multi-level testing subdomain bili.testing.p2p.example.com resolves peerId = bili
+  const cfgTestingNode = simulateResolveConfig('https://bili.testing.p2p.example.com/');
+  assert(cfgTestingNode.peerId === 'bili', 'Multi-level testing subdomain bili.testing.p2p.example.com resolves peerId = bili');
 
   // 6. XSS Injection attack via hash falls back to default_node
   const cfgXss1 = simulateResolveConfig('https://my-gateway.pages.dev/#<script>alert(1)</script>');

@@ -18,22 +18,90 @@ WebRTC Gateway 提供三种生产级自建与托管方案，适配不同的网�
 - 注册 Cloudflare 账号；
 - 本地安装 Node.js (v18+) 与 npm。
 
-### 2. 构建与部署
+### 2. 构建与本地部署
 ```bash
 # 1. 编译前端资源
 cd web
 npm install
 npm run build
 
-# 2. 部署至 Cloudflare Workers
-npx wrangler deploy
+# 2. 部署至生产环境或测试环境
+npm run deploy:prod      # 部署正式生产版 (p2p)
+npm run deploy:testing   # 部署独立测试版 (testing.p2p)
 ```
 
 部署完成后，单个 Worker 即**同时承载前端与 WebSocket 信令**：
-- **Web 门户前端**：`https://p2p.yourdomain.com/`
+- **Web 门户前端**：`https://p2p.yourdomain.com/`（或 `https://p2p.<subdomain>.workers.dev/`）
 - **信令端点**：`wss://p2p.yourdomain.com/ws`
 
-在 Cloudflare 控制台为该 Worker 绑定自定义域名（例如 `p2p.yourdomain.com` 及泛域名 `*.p2p.yourdomain.com`），即刻享受开箱即用的多级子域名智能路由。
+---
+
+### 3. GitHub Actions 自动跟随发布教程 (CI/CD 自动化)
+
+项目已内置完整的 GitHub Actions 自动化部署流水线：
+- **生产环境自动发布**（`.github/workflows/release.yml`）：每当为仓库打上语义化版本 Tag（如 `v2.3.3`）并推送到 GitHub 时，GitHub Actions 会自动编译多平台客户端，并自动将最新代码部署到 Cloudflare 生产环境 Worker（`p2p`）。
+- **测试环境持续部署**（`.github/workflows/deploy-testing.yml`）：每当 `dev` 分支发生代码更新或在 GitHub 页面手动触发时，自动部署到测试环境 Worker（`testing.p2p`）。
+
+#### 自动化配置步骤（任何人复刻或自建均可开箱即用）：
+1. **生成 Cloudflare 专用 API Token**：
+   - 访问 [Cloudflare API 令牌管理面板](https://dash.cloudflare.com/profile/api-tokens)；
+   - 点击 **创建令牌** -> 选择 **编辑 Cloudflare Workers** 模板；
+   - 账户资源选择您的目标账户，点击保存并复制该 Token。
+2. **在 GitHub 仓库添加加密 Secrets**：
+   - 打开您的 GitHub 仓库，进入 `Settings` -> `Secrets and variables` -> `Actions`；
+   - 点击 **New repository secret**，添加以下两项：
+     - `CLOUDFLARE_API_TOKEN`：刚创建的 Cloudflare API 令牌；
+     - `CLOUDFLARE_ACCOUNT_ID`：您的 Cloudflare 账户 ID（可在 Workers 仪表盘右侧栏获取）。
+3. **完成配置**：
+   配置完成后，后续所有版本发布（Release）均由 GitHub 全自动接管部署，零人工介入。
+
+---
+
+### 4. 专属私有域名的本地无感发布 (隐私安全模式)
+
+若您不希望将 Cloudflare 凭据托管在 GitHub 上，或者希望将项目开源的同时为自己绑定专属私有自定义域名：
+
+1. **本地专属域名隔离**：
+   在 `web/` 目录下创建 `wrangler.local.toml`（此文件已被全局 `.gitignore` 强制忽略，永远不会被 Git 追踪或意外提交）：
+   ```toml
+   name = "p2p"
+   main = "../edge/cloudflare-worker/worker.js"
+   compatibility_date = "2024-04-03"
+   assets = { directory = "./dist", binding = "ASSETS" }
+   workers_dev = true
+
+   routes = [
+     { pattern = "p2p.yourdomain.com", custom_domain = true }
+   ]
+
+   [durable_objects]
+   bindings = [
+     { name = "ROOM", class_name = "SignalingRoom" }
+   ]
+
+   [[migrations]]
+   tag = "v1"
+   new_sqlite_classes = ["SignalingRoom"]
+
+   [env.testing]
+   name = "testing-p2p"
+   workers_dev = true
+   routes = [
+     { pattern = "testing.p2p.yourdomain.com", custom_domain = true }
+   ]
+
+   [env.testing.durable_objects]
+   bindings = [
+     { name = "ROOM", class_name = "SignalingRoom" }
+   ]
+
+   [[env.testing.migrations]]
+   tag = "v1"
+   new_sqlite_classes = ["SignalingRoom"]
+   ```
+2. **智能部署脚本与本地 Git Hook 自动化**：
+   - 项目内置的 `web/scripts/deploy.mjs` 会优先智能检测 `wrangler.local.toml`，存在时自动加载私有域名配置；在不存在的 CI 或他人环境则优雅回退至通用 `wrangler.toml`。
+   - 本地已配置 `.git/hooks/pre-push` 钩子：每当您在本地执行 `git push origin main dev --tags` 推送正式版本标签时，Git 钩子会在本地自动调用当前已认证的 Wrangler 执行生产发布，实现**代码零泄漏、发版全自动**。
 
 ---
 

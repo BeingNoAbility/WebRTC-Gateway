@@ -147,14 +147,17 @@
           'p2p', 'www', 'webrtc', 'webrtc-p2p-signal', 'signal', 'signaling', 'gateway',
           'portal', 'api', 'admin', 'proxy', 'vpn', 'tunnel', 'webrtc-gateway',
           'p2p-gateway', 'app', 'web', 'client', 'relay', 'service', 'hub', 'test',
-          'demo', 'node', 'nodes', 'server', 'direct', 'static', 'assets', 'cdn'
+          'testing', 'stage', 'staging', 'dev', 'demo', 'node', 'nodes', 'server',
+          'direct', 'static', 'assets', 'cdn'
         ]);
 
         const p2pIdx = host.indexOf('.p2p.');
         if (p2pIdx > 0) {
           const parts = host.substring(0, p2pIdx).split('.');
-          const cand = parts[parts.length - 1];
-          if (cand && !reserved.has(cand)) return cand;
+          for (let i = parts.length - 1; i >= 0; i--) {
+            const cand = parts[i];
+            if (cand && !reserved.has(cand)) return cand;
+          }
         }
 
         const parts = host.split('.');

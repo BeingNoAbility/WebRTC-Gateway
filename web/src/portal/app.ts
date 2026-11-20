@@ -244,15 +244,18 @@ class PortalApp {
       if (!hostname) return null;
       const reserved = new Set([
         'p2p', 'www', 'webrtc', 'webrtc-p2p-signal', 'signal', 'signaling',
-        'gateway', 'portal', 'api', 'admin', 'proxy', 'vpn', 'tunnel'
+        'gateway', 'portal', 'api', 'admin', 'proxy', 'vpn', 'tunnel',
+        'test', 'testing', 'stage', 'staging', 'dev'
       ]);
       const p2pIndex = hostname.indexOf('.p2p.');
       if (p2pIndex > 0) {
         const sub = hostname.substring(0, p2pIndex);
         const parts = sub.split('.');
-        const candidate = parts[parts.length - 1];
-        if (candidate && !reserved.has(candidate)) {
-          return candidate;
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const candidate = parts[i];
+          if (candidate && !reserved.has(candidate)) {
+            return candidate;
+          }
         }
       }
     } catch {}
@@ -290,8 +293,8 @@ class PortalApp {
         'p2p', 'www', 'webrtc', 'webrtc-p2p-signal', 'signal', 'signaling',
         'gateway', 'portal', 'api', 'admin', 'proxy', 'vpn', 'tunnel',
         'webrtc-gateway', 'p2p-gateway', 'app', 'web', 'client', 'relay',
-        'service', 'hub', 'test', 'demo', 'node', 'nodes', 'server', 'direct',
-        'static', 'assets', 'cdn'
+        'service', 'hub', 'test', 'testing', 'stage', 'staging', 'dev', 'demo',
+        'node', 'nodes', 'server', 'direct', 'static', 'assets', 'cdn'
       ]);
 
       // Multi-level subdomain (e.g. "immich.example.com", "bili.localhost")
