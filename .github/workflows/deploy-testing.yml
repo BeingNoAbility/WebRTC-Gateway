@@ -18,12 +18,25 @@ jobs:
   deploy-testing:
     name: Deploy to Cloudflare (testing.p2p)
     runs-on: ubuntu-latest
-    if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
     steps:
+      - name: Check Cloudflare Credentials
+        id: cf_auth
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$CF_TOKEN" ]; then
+            echo "configured=true" >> $GITHUB_OUTPUT
+          else
+            echo "configured=false" >> $GITHUB_OUTPUT
+            echo "CLOUDFLARE_API_TOKEN secret is not configured in repository. Skipping Cloudflare testing deployment."
+          fi
+
       - name: Checkout code
+        if: steps.cf_auth.outputs.configured == 'true'
         uses: actions/checkout@v4
 
       - name: Setup Node.js
+        if: steps.cf_auth.outputs.configured == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -31,12 +44,14 @@ jobs:
           cache-dependency-path: web/package.json
 
       - name: Install dependencies & Build
+        if: steps.cf_auth.outputs.configured == 'true'
         run: |
           cd web
           npm ci || npm install
           npm run build
 
       - name: Deploy to Cloudflare Workers (testing-p2p)
+        if: steps.cf_auth.outputs.configured == 'true'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
