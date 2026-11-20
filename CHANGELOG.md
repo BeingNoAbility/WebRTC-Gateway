@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **1:1 i18n Parity & Attribute Binding Suite**:
   - Added `test/test_i18n.cjs` verifying 100% translation key completeness, parameter placeholder parity, non-empty values, and HTML `data-i18n` binding validity.
 
+### HTTP Proxy & Upload Stream Hardening
+- **Strict Content-Length & Upload Progress Preservation (RFC 7230)**:
+  - Restored generic `Content-Length` via `x-p2p-body-length` header for stream-intercepted POST requests in `pkg/proxy/http_proxy.go`, ensuring complete compatibility with strict upload backends (Nginx, PHP-FPM, LibreSpeed) without falling back to chunked encoding.
+  - Guaranteed final upload `ProgressEvent` dispatch before stream completion in `patch.js` for accurate 100% progress indicators and decoupled badge assertions.
+
 ### CI/CD & Deployment
 - **Cloudflare Workers Dual-Environment & CI Release Automation**:
   - Configured dual-environment deployment in `web/wrangler.toml` separating production (`p2p`) from staging (`testing.p2p`).

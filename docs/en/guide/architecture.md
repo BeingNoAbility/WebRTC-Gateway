@@ -121,6 +121,11 @@ For formal byte-level mathematical specifications and high-concurrency benchmark
 - **Agent Reverse-Proxy Override**: The Agent forcibly overrides `X-Forwarded-For` and `X-Real-IP` with the authoritative IP before proxying HTTP/WS requests;
 - **WAF Synergy**: Enables SafeLine, Nginx WAF, and ModSecurity to perform per-IP rate limiting, individual IP blocking, and GeoIP logging, while supporting in-place ICE Restart IP updates on mobile network roaming.
 
+### ⑨ Zero-Dependency Frontend Bilingual i18n & In-Place DOM Repaint
+- **Ultra-Lightweight Type-Safe i18n Engine**: The Web Portal embeds a bespoke zero-dependency i18n dictionary engine (`web/src/portal/i18n.ts`, < 2.5KB overhead) supporting Simplified Chinese (`zh-CN`) and English (`en-US`);
+- **In-Place DOM Repainting with Zero DataChannel Disruption**: Language switching performs localized text node updates on elements with `data-i18n` attributes without reloading the page, guaranteeing that underlying physical WebRTC PeerConnections, dual DataChannels, active media streams, and file transfers remain **100% uninterrupted**;
+- **Input & State Preservation**: Dynamically preserves typed node IDs, access secrets, and floating HUD snap coordinates during live language toggling.
+
 ---
 
 ## 4. Signaling Architecture & Topology Trade-offs

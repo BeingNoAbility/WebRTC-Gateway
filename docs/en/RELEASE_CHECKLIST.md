@@ -27,7 +27,7 @@ The project strictly adheres to [Semantic Versioning 2.0.0 (SemVer)](https://sem
 
 | Release Type | Version Segment | Trigger Conditions & Scope | Backward Compatibility | Verification & Gate Policy |
 | :--- | :---: | :--- | :--- | :--- |
-| **Major Release** | `vX+1.0.0` | Breaking changes to low-level P2PMux binary framing, cryptographic authentication overhauls, fundamental invariant redesign, or non-backward-compatible refactoring. | May break legacy protocol compatibility; migration guidance must be documented in `docs/RELEASE_NOTES.md`. | **Mandatory Full Testbed Sign-off**: Must achieve 100% pass rate across all 8 real-world testing dimensions in `TESTING_CHECKLIST.md`. |
+| **Major Release** | `vX+1.0.0` | Breaking changes to low-level P2PMux binary framing, cryptographic authentication overhauls, fundamental invariant redesign, or non-backward-compatible refactoring. | May break legacy protocol compatibility; migration guidance must be documented in `docs/RELEASE_NOTES.md`. | **Mandatory Full Testbed Sign-off**: Must achieve 100% pass rate across all 10 real-world testing dimensions in `TESTING_CHECKLIST.md`. |
 | **Minor Release** | `vX.Y+1.0` | New operating modes (e.g. `-dir`/`-file` static servers), new CLI flags/environment variables, protocol extensions, or backward-compatible feature enhancements. | **Strictly backward-compatible** with existing wire protocols, configuration schemas, and signaling handshakes. Legacy agents must interoperate with new servers/portals. | **Targeted Sample Testbed Sign-off**: Verify relevant testbed dimensions based on blast radius; attach execution logs or screenshots to the release PR. |
 | **Patch Release** | `vX.Y.Z+1` | Concurrency race condition/deadlock fixes, buffer bounds and zero-payload edge defenses, Service Worker stream cancellation guards, UI/UX polish, documentation alignment. | **100% backward-compatible**; zero API or protocol modifications. | **Exempt from physical real-world testbed execution**: Automated CI unit/race tests and local Docker smoke verification are sufficient for rapid delivery. |
 
@@ -142,12 +142,12 @@ flowchart LR
   - **Criteria**: Clean builds for all 3 targets in seconds with zero compilation errors.
 
 - [ ] **3.5 Real-World Testing Tiered Sign-off**
-  - **Reference Guide**: See [docs/en/TESTING_CHECKLIST.md](file:///docs/en/TESTING_CHECKLIST.md) (covers 8 holographic real-world dimensions and staging testbeds).
+  - **Reference Guide**: See [docs/en/TESTING_CHECKLIST.md](file:///docs/en/TESTING_CHECKLIST.md) (covers 10 holographic real-world dimensions and staging testbeds).
   - **Tiered Gate Policy**:
     To prevent dogmatic overhead from paralyzing routine maintenance, verification is tiered by release category:
     - **Patch Releases (`vX.Y.Z+1`)**: **Exempt from physical real-world testbed execution**. Passing CI unit tests, race detectors, and local Docker smoke tests is sufficient for release.
     - **Minor Releases (`vX.Y+1.0`)**: **Targeted Sampling Sign-off**. Reviewers audit targeted test cases corresponding to the blast radius of new features (e.g. Dimension 2 for WAF changes, Dimension 5 for streaming/flow control) and attach execution logs/screenshots to the release PR.
-    - **Major Milestones (`vX+1.0.0`)**: **Full 8-Dimension Holographic Sign-off**. Mandatory execution across all 8 dimensions on physical Linux testbeds, cross-network cellular devices, and modern browser engines, accompanied by a verified sign-off audit report.
+    - **Major Milestones (`vX+1.0.0`)**: **Full 10-Dimension Holographic Sign-off**. Mandatory execution across all 10 dimensions on physical Linux testbeds, cross-network cellular devices, and modern browser engines, accompanied by a verified sign-off audit report.
 
 ---
 

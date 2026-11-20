@@ -42,6 +42,7 @@ This project is built upon **WebRTC RTCDataChannel (SCTP) + In-Browser Service W
 - **Authoritative Client IP & Enterprise WAF Integration**: The Agent reverse proxy injects the authoritative client IP into standard `X-Forwarded-For` and `X-Real-IP` headers for accurate rate-limiting, GeoIP auditing, and single-IP blocking in SafeLine, Nginx WAF, and ModSecurity.
 - **Dual-Secret Decoupling & Stateless Share Links**: Control plane cluster registration (`-signal-secret`) and data plane visitor passwords (`-access-secret`) are strictly decoupled; supports pure mathematical HMAC-SHA256 time-limited sharing links.
 - **Real-Time WebRTC Diagnostic HUD**: Floating status pill shows direct vs relay connection status; opens a diagnostics modal displaying RTT, packet loss, throughput, and candidate pair topology.
+- **Zero-Dependency Bilingual Web Portal**: Built-in lightweight, type-safe i18n engine (< 2.5KB) with instant in-place language switching between Simplified Chinese and English, keeping WebRTC DataChannels and media streaming 100% uninterrupted.
 - **Three Operating Modes**: Supports intranet HTTP/WS reverse proxy (`-target`), zero-port static directory hosting (`-dir`), and single-file streaming delivery (`-file`).
 
 ---

@@ -122,6 +122,11 @@ sequenceDiagram
 - **强制覆写与防伪防御**：Agent 代理层在转发 HTTP 与 WebSocket 握手时，强制通过 `req.Header.Set` 覆写 `X-Forwarded-For` 与 `X-Real-IP` 为权威客户端公网 IP，防范恶意客户端自报伪造头；
 - **WAF 与后端审计协同**：为雷池 SafeLine、Nginx WAF、ModSecurity 赋予单 IP 精准封禁、单 IP 频率限制与日志 GeoIP 溯源能力；支持移动漫游原地 ICE Restart 动态刷新出口 IP 与旧版信令优雅兜底 `127.0.0.1`。
 
+### ⑨ 零依赖纯前端双语国际化与 DOM 原地热重绘
+- **超轻量强类型字典引擎**：前端内建独立自研的轻量 i18n 引擎（`web/src/portal/i18n.ts`，体积小于 2.5KB），零第三方重型国际化库依赖，完整支持简体中文 (`zh-CN`) 与英文 (`en-US`)；
+- **DOM 原地热重绘与 DataChannel 零中断**：切换语言时，系统仅针对持有 `data-i18n` 属性的 DOM 节点执行原地局部文本热更新，绝对不刷新页面（No Page Reload），从而保证底层的 WebRTC 物理 PeerConnection、DataChannel 双通道、音视频点播与大文件传输 **100% 保持连贯与零中断**；
+- **状态与输入记忆保全**：语言切换全程保留当前已输入的节点 ID、访问口令与悬浮药丸的吸附坐标，杜绝用户交互上下文丢失。
+
 ---
 
 ## 4. 信令服务架构形态与部署拓扑权衡
