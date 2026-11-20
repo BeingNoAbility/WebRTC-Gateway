@@ -385,8 +385,12 @@ async function main() {
   let reconnected = false;
   for (let i = 0; i < 15; i++) {
     await sleep(1000);
-    const badge = await cdp.evaluate("document.getElementById('connBadge')?.textContent");
-    if (badge === 'CONNECTED') {
+    const isConn = await cdp.evaluate(`(() => {
+      const el = document.getElementById('connBadge');
+      if (!el) return false;
+      return el.classList.contains('connected') || el.textContent === 'CONNECTED' || el.textContent === '已连接';
+    })()`);
+    if (isConn) {
       reconnected = true;
       break;
     }

@@ -676,7 +676,6 @@
 
       const finishUpload = () => {
         if (completed) return;
-        completed = true;
         if (timer) {
           clearInterval(timer);
           timer = null;
@@ -689,8 +688,9 @@
           lastKnownSpeed = (lastKnownSpeed * 0.3) + (measuredSpeed * 0.7);
         }
 
-        // Dispatch final 100% progress
+        // Dispatch final 100% progress before marking completed
         dispatchProgress(totalBytes);
+        completed = true;
 
         try {
           upload.dispatchEvent(new ProgressEvent('load', {
