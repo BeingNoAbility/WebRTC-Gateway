@@ -46,6 +46,9 @@ assert(swCode.includes('_p2p_worker') && swCode.includes('import "/patch.js";'),
 assert(swCode.includes('!doctype'), 'sw.js supports DOCTYPE-safe HTML script injection (F-10)');
 assert(swCode.includes('application/xhtml+xml'), 'sw.js includes navigation document guard against API fetch pollution');
 assert(patchCode.includes('_p2p_worker'), 'patch.js wraps Worker for dynamic module worker adaptation (v2.0.0 Task 2)');
+assert(patchCode.includes('x-p2p-body-length'), 'patch.js sets x-p2p-body-length header for upload streaming transparency');
+assert(swCode.includes('speedtest_worker'), 'sw.js supports speedtest_worker and minified worker script detection');
+assert(portalCode.includes('REQ_BODY_ERROR'), 'portal.js handles REQ_BODY_ERROR to reset upload stream lifecycle');
 assert(!portalCode.includes('value="${this.peerId}"'), 'portal.js MUST NOT interpolate peerId into input value attribute (P0-2)');
 assert(!portalCode.includes('value="${this.secret}"'), 'portal.js MUST NOT interpolate secret into input value attribute (P0-2)');
 
@@ -53,6 +56,7 @@ const indexHtmlPath = path.resolve(__dirname, '../web/dist/index.html');
 assert(fs.existsSync(indexHtmlPath), 'web/dist/index.html exists');
 const indexHtmlCode = fs.readFileSync(indexHtmlPath, 'utf-8');
 assert(indexHtmlCode.includes('v2.4.0'), 'index.html displays v2.4.0 version badge in header');
+assert(indexHtmlCode.includes('🌐 简中'), 'index.html displays default 🌐 简中 in header language button');
 assert(portalCode.includes('btnCloseOffline') && portalCode.includes('btnDismissOffline'), 'portal.js provides dismissable offline prompt with close and dismiss controls');
 assert(portalCode.includes('p2pOfflineAlertBar'), 'portal.js degrades to non-blocking offline alert bar on dismiss');
 assert(portalCode.includes('P2PMux v2.3 Dual-Channel (10-byte Header / 32KB Frame)'), 'portal.js displays non-sensitive protocol and runtime diagnostics');
@@ -767,6 +771,18 @@ function createMockDOM(options = {}) {
   assert(processedHtmlStr.includes('<head><meta name="referrer" content="no-referrer"><script src="/patch.js"></script><title>Tailscale</title>'),
     'Document navigation with valid HTML successfully injects patch script and meta tags into <head>');
   assert(processedHtmlStr.includes('<h1>Admin</h1>'), 'Document navigation preserves HTML body content');
+}
+
+// 11. Worker detection regex and upload virtualization verification
+{
+  const workerRegex = /(?:\.worker|_worker|speedtest_worker).*?\.js(?:\?|$)/i;
+  assert(workerRegex.test('/speedtest_worker.min.js'), 'Worker regex matches /speedtest_worker.min.js');
+  assert(workerRegex.test('/speedtest_worker.js?r=0.123'), 'Worker regex matches /speedtest_worker.js?r=0.123');
+  assert(workerRegex.test('/assets/speedtest_worker.min.js'), 'Worker regex matches /assets/speedtest_worker.min.js');
+  assert(workerRegex.test('/js/app.worker.js'), 'Worker regex matches /js/app.worker.js');
+  assert(workerRegex.test('/js/editor_worker.js'), 'Worker regex matches /js/editor_worker.js');
+  assert(!workerRegex.test('/main.js'), 'Worker regex rejects /main.js');
+  assert(!workerRegex.test('/vendor/jquery.min.js'), 'Worker regex rejects /vendor/jquery.min.js');
 }
 
 console.log(`\n=== Verification Complete: ${passCount} Passed, ${failCount} Failed ===`);

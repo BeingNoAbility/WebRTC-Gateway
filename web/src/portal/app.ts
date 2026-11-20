@@ -498,7 +498,9 @@ class PortalApp {
     const btnHeaderLang = document.getElementById('btnHeaderLang');
     const updateLangBtn = () => {
       if (btnHeaderLang) {
-        btnHeaderLang.textContent = i18n.getLocale() === 'zh-CN' ? '🌐 EN' : '🌐 简中';
+        const isZh = i18n.getLocale() === 'zh-CN';
+        btnHeaderLang.textContent = isZh ? '🌐 简中' : '🌐 EN';
+        btnHeaderLang.title = isZh ? '点击切换为 English' : 'Click to switch to 简体中文';
       }
     };
     updateLangBtn();
@@ -2632,6 +2634,7 @@ class PortalApp {
           });
           break;
         case 'RESP_CANCEL':
+        case 'REQ_BODY_ERROR':
           stream.reset();
           break;
       }

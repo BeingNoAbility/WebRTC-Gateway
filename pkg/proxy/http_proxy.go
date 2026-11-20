@@ -416,6 +416,10 @@ func (p *HTTPProxy) HandleStreamWithMeta(sessionID, clientIP string, stream *mux
 		if cl, err := strconv.ParseInt(strings.TrimSpace(clStr), 10, 64); err == nil && cl >= 0 {
 			contentLength = cl
 		}
+	} else if p2pLenStr, ok := reqMeta.Headers["x-p2p-body-length"]; ok && p2pLenStr != "" {
+		if cl, err := strconv.ParseInt(strings.TrimSpace(p2pLenStr), 10, 64); err == nil && cl >= 0 {
+			contentLength = cl
+		}
 	}
 
 	if hasBody {
@@ -445,6 +449,11 @@ func (p *HTTPProxy) HandleStreamWithMeta(sessionID, clientIP string, stream *mux
 		req.Header.Set(k, v)
 	}
 
+	// Ensure Content-Length header is explicitly restored if known, preventing chunked fallback
+	if contentLength >= 0 {
+		req.Header.Set("Content-Length", strconv.FormatInt(contentLength, 10))
+	}
+
 	// Strip hop-by-hop headers to prevent HTTP/2 backend protocol violations
 	req.Header.Del("Connection")
 	req.Header.Del("Keep-Alive")
@@ -453,6 +462,7 @@ func (p *HTTPProxy) HandleStreamWithMeta(sessionID, clientIP string, stream *mux
 	req.Header.Del("Upgrade")
 	req.Header.Del("x-p2p-client-decompress")
 	req.Header.Del("x-p2p-dest-host")
+	req.Header.Del("x-p2p-body-length")
 
 	// Standard reverse proxy headers
 	req.Host = targetHost

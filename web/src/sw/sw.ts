@@ -422,11 +422,11 @@ async function handleTunneledRequest(request: Request, initialSession: PortalSes
                          request.destination === 'document' ||
                          request.destination === 'iframe';
         const isHtml = isNavDoc && (contentType.includes('text/html') || contentType.includes('application/xhtml+xml'));
-        // Task 2: Worker script injection strict precision check
+        // Task 2: Worker script injection precision check
         const isWorker = (request.destination === 'worker' ||
                           request.destination === 'sharedworker' ||
-                          /(?:\.worker|_worker)\.js$/i.test(url.pathname)) &&
-                         contentType.includes('javascript');
+                          /(?:\.worker|_worker|speedtest_worker).*?\.js(?:\?|$)/i.test(url.pathname)) &&
+                         (contentType.includes('javascript') || contentType.includes('ecmascript') || url.pathname.endsWith('.js'));
         const isModuleWorker = isWorker && url.searchParams.get('_p2p_worker') === 'module';
 
         const p2pEncoding = (msg.headers?.['x-p2p-content-encoding'] || '').toLowerCase();

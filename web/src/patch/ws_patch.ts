@@ -555,6 +555,29 @@
         init.headers = headers;
       }
 
+      // Attach x-p2p-body-length if upload body length is computable
+      if (init && init.body) {
+        let totalBytes = 0;
+        const b = init.body as any;
+        if (typeof b === 'string') {
+          totalBytes = new Blob([b]).size;
+        } else if (b instanceof Blob) {
+          totalBytes = b.size;
+        } else if (b instanceof ArrayBuffer) {
+          totalBytes = b.byteLength;
+        } else if (ArrayBuffer.isView(b)) {
+          totalBytes = b.byteLength;
+        }
+        if (totalBytes > 0) {
+          init = init || {};
+          const headers = new Headers(init.headers || {});
+          if (!headers.has('x-p2p-body-length')) {
+            headers.set('x-p2p-body-length', totalBytes.toString());
+          }
+          init.headers = headers;
+        }
+      }
+
       return origFetch.call(this, input, init);
     };
   }
@@ -620,6 +643,12 @@
         totalBytes = body.byteLength;
       } else if (ArrayBuffer.isView(body)) {
         totalBytes = body.byteLength;
+      }
+
+      if (totalBytes > 0) {
+        try {
+          this.setRequestHeader('x-p2p-body-length', totalBytes.toString());
+        } catch (e) {}
       }
 
       if (totalBytes <= 0 || !this.upload) {

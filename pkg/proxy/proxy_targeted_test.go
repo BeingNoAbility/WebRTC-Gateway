@@ -2,12 +2,19 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"webrtc-gateway/pkg/mux"
 )
 
 // 1. Comprehensive PSL & eTLD+1 boundary tests covering recent commit c4cbea0
@@ -261,4 +268,122 @@ func TestCreateSafeDialContext_RetryLogic(t *testing.T) {
 			t.Errorf("Expected SSRF block for loopback 127.0.0.1:8080, got: %v", err)
 		}
 	})
+}
+
+// 3. Test upload body length header restoration (RFC 7230 / Nginx 413 mitigation via x-p2p-body-length)
+func TestHTTPProxy_UploadBodyLengthRestoration(t *testing.T) {
+	var mu sync.Mutex
+	var receivedContentLength int64
+	var receivedHeaderCL string
+	var receivedChunked bool
+	var receivedP2PLengthHeader string
+	var receivedBody []byte
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		receivedContentLength = r.ContentLength
+		receivedHeaderCL = r.Header.Get("Content-Length")
+		for _, te := range r.TransferEncoding {
+			if strings.EqualFold(te, "chunked") {
+				receivedChunked = true
+			}
+		}
+		receivedP2PLengthHeader = r.Header.Get("x-p2p-body-length")
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	cm := NewSessionCookieManager()
+	hp, err := NewHTTPProxy(backend.URL, cm)
+	if err != nil {
+		t.Fatalf("NewHTTPProxy failed: %v", err)
+	}
+
+	tClient, tAgent := newMemoryTransportPair()
+	defer tClient.Close()
+	defer tAgent.Close()
+
+	clientMux := mux.NewMux(tClient, true)
+	agentMux := mux.NewMux(tAgent, false)
+	defer clientMux.Close()
+	defer agentMux.Close()
+
+	tClient.mu.Lock()
+	tClient.onMsg = func(d []byte) { _ = clientMux.HandleIncomingMessage(d) }
+	tClient.mu.Unlock()
+
+	tAgent.mu.Lock()
+	tAgent.onMsg = func(d []byte) { _ = agentMux.HandleIncomingMessage(d) }
+	tAgent.mu.Unlock()
+
+	go func() {
+		stream, err := agentMux.AcceptStream(context.Background())
+		if err != nil {
+			return
+		}
+		hp.HandleStream("test-session-upload", "127.0.0.1", stream)
+	}()
+
+	clientStream, err := clientMux.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+
+	payload := []byte("upload-test-payload-1234567890")
+	expectedLen := int64(len(payload))
+
+	reqMeta := RequestMetadata{
+		Method: "POST",
+		Path:   "/upload",
+		Headers: map[string]string{
+			"x-p2p-body-length": fmt.Sprintf("%d", expectedLen),
+			// Notice: content-length is intentionally omitted to simulate SW fetch streaming
+		},
+	}
+	reqData, _ := json.Marshal(reqMeta)
+	if err := clientStream.WriteHeaders(reqData); err != nil {
+		t.Fatalf("WriteHeaders failed: %v", err)
+	}
+
+	if _, err := clientStream.Write(payload); err != nil {
+		t.Fatalf("Write body failed: %v", err)
+	}
+	_ = clientStream.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	respHeadersBytes, err := clientStream.ReadHeaders(ctx)
+	if err != nil {
+		t.Fatalf("ReadHeaders failed: %v", err)
+	}
+
+	var respMeta ResponseMetadata
+	if err := json.Unmarshal(respHeadersBytes, &respMeta); err != nil {
+		t.Fatalf("Unmarshal respMeta failed: %v", err)
+	}
+	if respMeta.Status != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", respMeta.Status)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if receivedContentLength != expectedLen {
+		t.Errorf("Expected r.ContentLength=%d, got %d", expectedLen, receivedContentLength)
+	}
+	if receivedHeaderCL != fmt.Sprintf("%d", expectedLen) {
+		t.Errorf("Expected Content-Length header=%d, got %q", expectedLen, receivedHeaderCL)
+	}
+	if receivedChunked {
+		t.Errorf("Expected non-chunked transfer encoding, but chunked was received")
+	}
+	if receivedP2PLengthHeader != "" {
+		t.Errorf("Expected x-p2p-body-length header to be stripped, got %q", receivedP2PLengthHeader)
+	}
+	if string(receivedBody) != string(payload) {
+		t.Errorf("Payload mismatch: expected %q, got %q", string(payload), string(receivedBody))
+	}
 }
