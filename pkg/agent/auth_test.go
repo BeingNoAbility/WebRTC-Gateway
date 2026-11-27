@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"webrtc-gateway/pkg/protocol"
+	"webrtc-gateway/pkg/proxy"
 )
 
 func TestAgentV7_IdentityPersistenceAndCapabilityRevocationPersistence(t *testing.T) {
@@ -288,5 +291,202 @@ func TestRFC9383AppendixCVectorAndV7KDF(t *testing.T) {
 	}
 	if hex.EncodeToString(creds.W0[:]) != doc.V7KDF.W0Hex || hex.EncodeToString(creds.W1[:]) != doc.V7KDF.W1Hex {
 		t.Fatalf("V7 KDF mismatch: w0=%x w1=%x", creds.W0, creds.W1)
+	}
+}
+
+func TestAgentSecurityRegressions(t *testing.T) {
+	id, err := GenerateEphemeralIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := proxy.NewDestinationPolicy("http://127.0.0.1:8080", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hp, err := proxy.NewHTTPProxy(proxy.HTTPProxyOptions{Policy: pol})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// P1-09: Contradictory AccessSecret + AllowPublic MUST fail closed at startup!
+	if _, err := New(Config{
+		NodeID:       "nas",
+		AccessSecret: "hunter2",
+		AllowPublic:  true,
+		Identity:     id,
+		HTTPProxy:    hp,
+	}); err == nil {
+		t.Fatal("P1-09 regression: Agent allowed AccessSecret != '' together with AllowPublic == true")
+	}
+
+	// P1-11: mDNS Fail-Closed outbound ICE candidate scrubber drops raw host IPs and scrubs TURN/STUN raddr.
+	if _, ok := sanitizeOutboundICECandidate("candidate:1 1 udp 2122260223 192.168.1.42 54321 typ host", true); ok {
+		t.Fatal("P1-11 regression: raw IPv4 typ host candidate was not dropped when ICEMDNS=true")
+	}
+	if _, ok := sanitizeOutboundICECandidate("candidate:2 1 udp 2122260223 fd00::1234 54321 typ host", true); ok {
+		t.Fatal("P1-11 regression: raw IPv6 typ host candidate was not dropped when ICEMDNS=true")
+	}
+	if c, ok := sanitizeOutboundICECandidate("candidate:3 1 udp 2122260223 abcdef01-2345.local 54321 typ host", true); !ok || !strings.Contains(c, ".local") {
+		t.Fatalf("valid .local mDNS host candidate rejected: ok=%v cand=%q", ok, c)
+	}
+	scrubbedRelay, ok := sanitizeOutboundICECandidate(
+		"candidate:4 1 udp 16777295 203.0.113.10 49152 typ relay raddr 10.244.1.7 rport 51234 generation 0",
+		true,
+	)
+	if !ok || strings.Contains(scrubbedRelay, "10.244.1.7") || strings.Contains(scrubbedRelay, "51234") || !strings.Contains(scrubbedRelay, "raddr 0.0.0.0 rport 0") {
+		t.Fatalf("P1-11 regression: TURN relay raddr/rport leaked internal IP: ok=%v cand=%q", ok, scrubbedRelay)
+	}
+
+	// P1-12: Global auth failure cap defeats 9-failures/IP distributed LRU eviction bypass.
+	lim := NewVisitorAuthLimiter()
+	now := time.Now()
+	for i := 0; i < 8; i++ {
+		ip := fmt.Sprintf("2001:db8:%x::1", i+1)
+		for f := 0; f < 9; f++ {
+			lim.RecordFailure(ip, now)
+		}
+	}
+	if allowed, _ := lim.Allow("2001:db8:ffff::1", now); allowed {
+		t.Fatal("P1-12 regression: global auth failure cap failed to block 9-failures/IP distributed flood")
+	}
+
+	// P1-12: Per-IP handshaking cap (MaxHandshakingPerIP = 4) and invalid ClientIP normalization.
+	if normalizeClientIP("127.0.0.1, 10.0.0.1") != "" || normalizeClientIP("evil-spoof") != "" {
+		t.Fatal("P1-12 regression: unparseable ClientIP accepted")
+	}
+	ag, err := New(Config{
+		NodeID:      "nas",
+		AllowPublic: true,
+		Identity:    id,
+		HTTPProxy:   hp,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ag.Close()
+
+	fp := strings.Repeat("aa", 32)
+	for i := 0; i < MaxHandshakingPerIP; i++ {
+		if _, err := ag.createHandshakingSession(fmt.Sprintf("sess-%d", i), "198.51.100.7", fp, "visitor-nonce-123456"); err != nil {
+			t.Fatalf("unexpected rejection on handshake %d: %v", i, err)
+		}
+	}
+	if _, err := ag.createHandshakingSession("sess-overflow", "198.51.100.7", fp, "visitor-nonce-123456"); err == nil {
+		t.Fatal("P1-12 regression: single IP exceeded MaxHandshakingPerIP")
+	}
+	// Different IP still allowed.
+	if _, err := ag.createHandshakingSession("sess-other-ip", "198.51.100.8", fp, "visitor-nonce-123456"); err != nil {
+		t.Fatalf("unrelated IP blocked by another IP's handshake cap: %v", err)
+	}
+
+	// P1-13: AUTH_RESULT with 42 KiB of InitialCookies strictly fits inside negotiated max control frame!
+	var bigCookies []proxy.CookieDelta
+	val := strings.Repeat("v", 1000)
+	for i := 0; i < 45; i++ {
+		bigCookies = append(bigCookies, proxy.CookieDelta{
+			Op: "set", Name: fmt.Sprintf("c%02d", i), Value: val, Path: "/",
+		})
+	}
+	for _, limit := range []int{protocol.MinChunkSize, protocol.DefaultChunkSize, protocol.MaxControlJSONSize} {
+		raw := marshalBoundedAuthResult(limit, "owner", "tok123", "", BackendMeta{
+			NodeID: "nas", BackendOrigin: "http://127.0.0.1:8080",
+		}, bigCookies)
+		if len(raw) > limit {
+			t.Fatalf("P1-13 regression: AUTH_RESULT (%d bytes) exceeded negotiated limit %d", len(raw), limit)
+		}
+	}
+
+	// P1-14: Cross-process CapabilityStore merge preserves monotonic revocations & exposes CLI-minted records.
+	stateFile := filepath.Join(t.TempDir(), "cap.state.json")
+	liveStore, err := NewCapabilityStoreWithFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliStore, err := NewCapabilityStoreWithFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exp := time.Now().Add(time.Hour).Unix()
+	p1 := CapabilityPayload{V: CapabilityVersion, JTI: "cap-old", Node: "nas", Exp: exp}
+	p2 := CapabilityPayload{V: CapabilityVersion, JTI: "cap-cli-new", Node: "nas", Exp: exp}
+	if err := liveStore.Track(p1); err != nil {
+		t.Fatal(err)
+	}
+	// Live agent revokes cap-old.
+	if err := liveStore.Revoke("cap-old"); err != nil {
+		t.Fatal(err)
+	}
+	// Stale CLI process mints cap-cli-new into the same state file: MUST NOT resurrect cap-old!
+	if err := cliStore.Track(p2); err != nil {
+		t.Fatal(err)
+	}
+	// Reload in a fresh store AND check liveStore sees cap-cli-new without losing cap-old revocation!
+	if !liveStore.IsRevoked("cap-old") {
+		t.Fatal("P1-14 regression: cap-old lost revocation in liveStore")
+	}
+	items, _, _ := liveStore.ListPage(time.Now(), 0, 50)
+	sawNew := false
+	for _, it := range items {
+		if it.Payload.JTI == "cap-cli-new" {
+			sawNew = true
+		}
+	}
+	if !sawNew {
+		t.Fatal("P1-14 regression: liveStore did not reload CLI-minted cap-cli-new")
+	}
+	freshStore, err := NewCapabilityStoreWithFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !freshStore.IsRevoked("cap-old") {
+		t.Fatal("P1-14 regression: CLI -mint-link resurrected revoked cap-old on disk!")
+	}
+
+	// P2-09: CAP_RESP list dynamically packs to small negotiated chunk size + MintCapability validation.
+	var manyItems []CapabilityRecord
+	for i := 0; i < 100; i++ {
+		manyItems = append(manyItems, CapabilityRecord{
+			Payload: CapabilityPayload{
+				V: CapabilityVersion, JTI: fmt.Sprintf("cap-%03d", i), Node: "nas",
+				Exp: exp, PathPrefix: "/very/long/path/prefix/" + strings.Repeat("x", 100),
+			},
+		})
+	}
+	packed, packedHasMore := fitCapListPage(protocol.MinChunkSize, "req-1", manyItems, 100, 0, 100, false)
+	if !packedHasMore || len(packed) == 0 || len(packed) >= len(manyItems) {
+		t.Fatalf("P2-09 regression: fitCapListPage failed to pack for 4088B limit: len=%d hasMore=%v", len(packed), packedHasMore)
+	}
+	if _, err := id.MintCapability(CapabilityPayload{JTI: "ok", Node: "nas", Exp: exp, MaxConns: -1}); err == nil {
+		t.Fatal("P2-09 regression: MintCapability accepted negative MaxConns")
+	}
+	if _, err := id.MintCapability(CapabilityPayload{JTI: "ok", Node: "nas", Exp: exp, PathPrefix: strings.Repeat("a", 600)}); err == nil {
+		t.Fatal("P2-09 regression: MintCapability accepted oversized PathPrefix")
+	}
+
+	// P2-12: RFC 8841 a=max-message-size:0 -> 262144; 1..4095 -> error!
+	mkSDP := func(mms string) string {
+		return strings.Join([]string{
+			"v=0",
+			"o=- 1 2 IN IP4 127.0.0.1",
+			"s=-",
+			"t=0 0",
+			"m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+			"c=IN IP4 0.0.0.0",
+			"a=ice-ufrag:ufrag1234",
+			"a=ice-pwd:passwordpasswordpassword1234",
+			"a=fingerprint:sha-256 " + FormatColonFingerprint(fp),
+			"a=setup:actpass",
+			"a=mid:0",
+			"a=sctp-port:5000",
+			"a=max-message-size:" + mms,
+			"",
+		}, "\r\n")
+	}
+	d0, err := ExtractSessionDescriptor(mkSDP("0"), 2)
+	if err != nil || d0.MaxMsgSize != 262144 {
+		t.Fatalf("P2-12 regression: max-message-size:0 expected 262144, got %+v err=%v", d0, err)
+	}
+	if _, err := ExtractSessionDescriptor(mkSDP("1024"), 2); err == nil {
+		t.Fatal("P2-12 regression: max-message-size:1024 below 4096 must fail closed")
 	}
 }

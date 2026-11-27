@@ -5,6 +5,7 @@ import * as path from 'node:path';
 
 const outdir = path.resolve('dist');
 const gwDir = path.join(outdir, '__p2p_gw__');
+const assetsDir = path.join(gwDir, 'assets');
 const versionFile = path.resolve('..', 'VERSION');
 const appVersion = fs.existsSync(versionFile)
   ? `v${fs.readFileSync(versionFile, 'utf8').trim()}`
@@ -12,18 +13,19 @@ const appVersion = fs.existsSync(versionFile)
 
 // Always clean web/dist before building to guarantee zero stale assets or stray .map files.
 fs.rmSync(outdir, { recursive: true, force: true });
-fs.mkdirSync(gwDir, { recursive: true });
+fs.mkdirSync(assetsDir, { recursive: true });
 
 function shortHash(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex').slice(0, 10);
 }
 
-function writeHashedAsset(srcPath, baseName, ext) {
+function writeHashedAsset(srcPath, baseName, ext, subDir = '') {
   const data = fs.readFileSync(srcPath);
   const hash = shortHash(data);
   const hashedName = `${baseName}.${hash}.${ext}`;
-  fs.writeFileSync(path.join(gwDir, hashedName), data);
-  return `/__p2p_gw__/${hashedName}`;
+  const targetDir = subDir ? path.join(gwDir, subDir) : gwDir;
+  fs.writeFileSync(path.join(targetDir, hashedName), data);
+  return subDir ? `/__p2p_gw__/${subDir}/${hashedName}` : `/__p2p_gw__/${hashedName}`;
 }
 
 function finalizeHtmlAndManifest(isWatch) {
@@ -33,8 +35,8 @@ function finalizeHtmlAndManifest(isWatch) {
 
   let portalJS = '/__p2p_gw__/portal.js';
   let portalCSS = '/__p2p_gw__/portal.css';
-  let bridgeJS = '/__p2p_gw__/bridge.js';
-  let patchJS = '/__p2p_gw__/patch.js';
+  let bridgeJS = '/__p2p_gw__/assets/bridge.js';
+  let patchJS = '/__p2p_gw__/assets/patch.js';
   const swJS = '/__p2p_gw__/sw.js';
 
   if (isWatch) {
@@ -45,16 +47,17 @@ function finalizeHtmlAndManifest(isWatch) {
     if (fs.existsSync('src/portal/portal.css')) {
       portalCSS = writeHashedAsset('src/portal/portal.css', 'portal', 'css');
     }
-    const renameToHashed = (name) => {
-      const rawPath = path.join(gwDir, `${name}.js`);
+    const renameToHashed = (name, subDir = '') => {
+      const targetDir = subDir ? path.join(gwDir, subDir) : gwDir;
+      const rawPath = path.join(targetDir, `${name}.js`);
       const data = fs.readFileSync(rawPath);
       const hashedName = `${name}.${shortHash(data)}.js`;
-      fs.renameSync(rawPath, path.join(gwDir, hashedName));
-      return `/__p2p_gw__/${hashedName}`;
+      fs.renameSync(rawPath, path.join(targetDir, hashedName));
+      return subDir ? `/__p2p_gw__/${subDir}/${hashedName}` : `/__p2p_gw__/${hashedName}`;
     };
     portalJS = renameToHashed('portal');
-    bridgeJS = renameToHashed('bridge');
-    patchJS = renameToHashed('patch');
+    bridgeJS = renameToHashed('bridge', 'assets');
+    patchJS = renameToHashed('patch', 'assets');
   }
 
   const manifest = {
@@ -74,7 +77,7 @@ function finalizeHtmlAndManifest(isWatch) {
   }
   if (fs.existsSync('src/bridge/bridge.html')) {
     let html = fs.readFileSync('src/bridge/bridge.html', 'utf8');
-    html = html.replace('/__p2p_gw__/bridge.js', bridgeJS);
+    html = html.replace('/__p2p_gw__/assets/bridge.js', bridgeJS);
     fs.writeFileSync(path.join(gwDir, 'bridge.html'), html);
   }
 }
@@ -101,8 +104,8 @@ async function build() {
   const classicOptions = {
     entryPoints: {
       sw: 'src/sw/sw.ts',
-      patch: 'src/patch/ws_patch.ts',
-      bridge: 'src/bridge/bridge.ts',
+      'assets/patch': 'src/patch/ws_patch.ts',
+      'assets/bridge': 'src/bridge/bridge.ts',
     },
     bundle: true,
     outdir: gwDir,

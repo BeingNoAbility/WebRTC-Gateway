@@ -32,6 +32,8 @@ type Config struct {
 type dcSlot struct {
 	mux       *Mux
 	isWS      bool
+	createdAt time.Time
+	onWSClose func()
 	lowNotify chan struct{}
 
 	sendMu sync.Mutex // serializes wire frames on this DC and protects gen transition ordering
@@ -75,21 +77,59 @@ func (sl *dcSlot) sendForStream(s *Stream, wire []byte) error {
 	return dc.Send(wire)
 }
 
+func (sl *dcSlot) sendResetAndDetach(s *Stream, wire []byte) bool {
+	sl.sendMu.Lock()
+	sl.mu.Lock()
+	wasActive := sl.active == s
+	if !wasActive {
+		sl.mu.Unlock()
+		sl.sendMu.Unlock()
+		return false
+	}
+	sl.active = nil
+	closed := sl.closed
+	isWS := sl.isWS
+	dc := sl.dc
+	sl.mu.Unlock()
+
+	if !closed && dc != nil && len(wire) > 0 {
+		_ = dc.Send(wire)
+	}
+	sl.sendMu.Unlock()
+
+	if !isWS && !closed {
+		sl.mux.returnIdlePoolSlot(sl)
+	}
+	if isWS {
+		if sl.onWSClose != nil {
+			sl.onWSClose()
+		} else if dc != nil {
+			_ = dc.Close()
+		}
+	}
+	return true
+}
+
 func (sl *dcSlot) detachStream(s *Stream) {
 	sl.mu.Lock()
 	wasActive := sl.active == s
 	if wasActive {
 		sl.active = nil
 	}
+	closed := sl.closed
 	isWS := sl.isWS
 	dc := sl.dc
 	sl.mu.Unlock()
 
-	if wasActive && !isWS {
+	if wasActive && !isWS && !closed {
 		sl.mux.returnIdlePoolSlot(sl)
 	}
-	if wasActive && isWS && dc != nil {
-		_ = dc.Close()
+	if wasActive && isWS {
+		if sl.onWSClose != nil {
+			sl.onWSClose()
+		} else if dc != nil {
+			_ = dc.Close()
+		}
 	}
 }
 
@@ -119,10 +159,16 @@ func isMonotonicRemoteGen(gen, last uint32, isWS bool) bool {
 	if last == 0 {
 		return true
 	}
-	if last == 0xFFFFFFFF && gen == 1 {
-		return true
+	if gen == last {
+		return false
 	}
-	return gen > last
+	// RFC 1982 serial number arithmetic over [1..0xFFFFFFFF] (skipping 0):
+	// tolerates skipped generations across wrap-around while rejecting stale late frames.
+	delta := gen - last
+	if gen < last {
+		delta--
+	}
+	return delta > 0 && delta < 0x80000000
 }
 
 // Mux manages 1 Control DC + 32 Reusable Pre-Negotiated HTTP Pool DCs + Dynamic Dedicated WS DCs.
@@ -207,10 +253,19 @@ func (m *Mux) effectiveChunkSize() int {
 	return n
 }
 
+// MaxControlPayloadSize returns the maximum single control-plane JSON payload allowed right now.
+func (m *Mux) MaxControlPayloadSize() int {
+	maxCtrl := m.effectiveChunkSize()
+	if maxCtrl > protocol.MaxControlJSONSize {
+		maxCtrl = protocol.MaxControlJSONSize
+	}
+	return maxCtrl
+}
+
 // SetMaxMessageSize strictly clamps the frame payload ceiling DOWNWARD based on the negotiated
-// SCTP maxMessageSize or peer SETTINGS.
+// SCTP maxMessageSize or peer SETTINGS (ignoring values below MinNegotiatedMaxMsgSize = 4096).
 func (m *Mux) SetMaxMessageSize(maxMsg int) {
-	if maxMsg <= protocol.HeaderSize {
+	if maxMsg < protocol.MinNegotiatedMaxMsgSize {
 		return
 	}
 	candInt := maxMsg - protocol.HeaderSize
@@ -254,6 +309,15 @@ func (m *Mux) AttachPoolDC(slotIdx int, dc DataChannel) {
 	}
 }
 
+// HandlePoolClose marks a single HTTP pool DataChannel closed and immediately resets any
+// active stream (including long-lived SSE/NDJSON streams) so slots and goroutines never leak.
+func (m *Mux) HandlePoolClose(slotIdx int) {
+	if slotIdx < 0 || slotIdx >= len(m.poolSlots) {
+		return
+	}
+	m.poolSlots[slotIdx].closeAndResetActive()
+}
+
 func (m *Mux) returnIdlePoolSlot(sl *dcSlot) {
 	select {
 	case m.idleSlots <- sl:
@@ -262,7 +326,8 @@ func (m *Mux) returnIdlePoolSlot(sl *dcSlot) {
 }
 
 // AttachDynamicWSDC registers an incoming browser-opened "p2pws" DataChannel and returns
-// its message and close handlers. Enforces MaxWSConns cleanly.
+// its message and close handlers. Enforces MaxWSConns cleanly and tracks createdAt so idle
+// DCs that never send HEADERS are reaped after HeaderAssemblyTimeout (5s).
 func (m *Mux) AttachDynamicWSDC(dc DataChannel) (onMessage func([]byte), onClose func(), err error) {
 	if m.ctx.Err() != nil {
 		return nil, nil, ErrMuxClosed
@@ -275,9 +340,21 @@ func (m *Mux) AttachDynamicWSDC(dc DataChannel) (onMessage func([]byte), onClose
 	sl := &dcSlot{
 		mux:       m,
 		isWS:      true,
+		createdAt: time.Now(),
 		dc:        dc,
 		lowNotify: make(chan struct{}, 1),
 	}
+	var cleanupOnce sync.Once
+	onClose = func() {
+		cleanupOnce.Do(func() {
+			m.wsMu.Lock()
+			delete(m.wsSlots, sl)
+			m.wsMu.Unlock()
+			sl.closeAndResetActive()
+			m.activeWS.Add(-1)
+		})
+	}
+	sl.onWSClose = onClose
 	sl.wireLowWatermark(dc)
 
 	m.wsMu.Lock()
@@ -290,16 +367,6 @@ func (m *Mux) AttachDynamicWSDC(dc DataChannel) (onMessage func([]byte), onClose
 	m.wsSlots[sl] = struct{}{}
 	m.wsMu.Unlock()
 
-	var cleanupOnce sync.Once
-	onClose = func() {
-		cleanupOnce.Do(func() {
-			m.wsMu.Lock()
-			delete(m.wsSlots, sl)
-			m.wsMu.Unlock()
-			sl.closeAndResetActive()
-			m.activeWS.Add(-1)
-		})
-	}
 	onMessage = func(raw []byte) {
 		m.handleSlotMessage(sl, raw)
 	}
@@ -379,13 +446,13 @@ func (m *Mux) handleSlotMessage(sl *dcSlot, raw []byte) {
 	}
 	f, err := protocol.Decode(raw)
 	if err != nil {
-		// On strict wire decode failure (e.g., 0B non-final WS_CONT or CONTINUATION),
-		// reset active stream on this slot if present.
 		sl.mu.Lock()
 		active := sl.active
 		sl.mu.Unlock()
 		if active != nil {
 			active.Reset(protocol.ErrCodeProtocolError)
+		} else if sl.isWS && sl.onWSClose != nil {
+			sl.onWSClose()
 		}
 		return
 	}
@@ -396,13 +463,26 @@ func (m *Mux) handleSlotMessage(sl *dcSlot, raw []byte) {
 			sl.mu.Unlock()
 			if active != nil {
 				active.Reset(protocol.ErrCodeProtocolError)
-			} else if f.Gen != 0 {
-				_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeProtocolError)
+			} else {
+				if f.Gen != 0 {
+					_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeProtocolError)
+				}
+				if sl.onWSClose != nil {
+					sl.onWSClose()
+				}
 			}
 			return
 		}
 	} else {
 		if !protocol.IsPoolDataFrameType(f.Type) {
+			sl.mu.Lock()
+			active := sl.active
+			sl.mu.Unlock()
+			if active != nil {
+				active.Reset(protocol.ErrCodeProtocolError)
+			} else if f.Gen != 0 {
+				_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeProtocolError)
+			}
 			return
 		}
 	}
@@ -448,6 +528,12 @@ func (m *Mux) handleSlotMessage(sl *dcSlot, raw []byte) {
 		active := sl.active
 		sl.mu.Unlock()
 		if active == nil || active.gen != f.Gen || !active.isWS {
+			if sl.isWS && active == nil {
+				_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeProtocolError)
+				if sl.onWSClose != nil {
+					sl.onWSClose()
+				}
+			}
 			return
 		}
 		_ = active.deliverWSChunk(f.Type, f.Flags&protocol.FlagMsgFin != 0, f.Payload)
@@ -500,11 +586,25 @@ func (m *Mux) handleSlotHeaders(sl *dcSlot, f *protocol.Frame) {
 	// Slot is IDLE: enforce strictly monotonic remote gen (and Gen == 1 on p2pws).
 	if !isMonotonicRemoteGen(f.Gen, sl.lastRemoteGen, sl.isWS) {
 		sl.mu.Unlock()
+		if sl.isWS && sl.onWSClose != nil {
+			sl.onWSClose()
+		}
+		return
+	}
+	if sl.isWS && f.Flags&protocol.FlagFin != 0 {
+		sl.mu.Unlock()
+		_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeProtocolError)
+		if sl.onWSClose != nil {
+			sl.onWSClose()
+		}
 		return
 	}
 	if !m.tryAcquireStreamSlot() {
 		sl.mu.Unlock()
 		_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeRefusedStream)
+		if sl.isWS && sl.onWSClose != nil {
+			sl.onWSClose()
+		}
 		return
 	}
 	s := newStream(m, sl, f.Gen, sl.isWS, false, f.Flags&protocol.FlagFin != 0)
@@ -838,14 +938,24 @@ func (m *Mux) reaperLoop() {
 			}
 			m.wsMu.Lock()
 			var wsList []*Stream
+			var staleIdleWS []*dcSlot
 			for sl := range m.wsSlots {
 				sl.mu.Lock()
 				if sl.active != nil {
 					wsList = append(wsList, sl.active)
+				} else if !sl.createdAt.IsZero() && now.Sub(sl.createdAt) > HeaderAssemblyTimeout {
+					staleIdleWS = append(staleIdleWS, sl)
 				}
 				sl.mu.Unlock()
 			}
 			m.wsMu.Unlock()
+			for _, sl := range staleIdleWS {
+				if sl.onWSClose != nil {
+					sl.onWSClose()
+				} else {
+					sl.closeAndResetActive()
+				}
+			}
 			for _, s := range wsList {
 				if s.isHeaderAssemblyTimedOut(now) {
 					s.Reset(protocol.ErrCodeProtocolError)

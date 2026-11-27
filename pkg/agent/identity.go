@@ -10,8 +10,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -42,27 +44,39 @@ func GenerateEphemeralIdentity() (*Identity, error) {
 	return &Identity{PublicKey: pub, PrivateKey: priv}, nil
 }
 
-// LoadOrCreateIdentity loads an Ed25519 PKCS#8 PEM private key from keyPath, or creates
-// and saves a new one with strict 0600 permissions if the file does not exist.
-func LoadOrCreateIdentity(keyPath string) (*Identity, error) {
-	raw, err := os.ReadFile(filepath.Clean(keyPath)) // #nosec G304 -- operator-configured persistent Ed25519 identity key path
-	if err == nil {
-		block, _ := pem.Decode(raw)
-		if block == nil {
-			return nil, fmt.Errorf("invalid PEM in identity key %q", keyPath)
+func loadIdentityFromFile(cleanPath, origPath string) (*Identity, error) {
+	if runtime.GOOS != "windows" {
+		if fi, serr := os.Stat(cleanPath); serr == nil && fi.Mode().Perm()&0077 != 0 {
+			log.Printf("[Agent] WARNING: identity key %q has overly broad permissions (%04o); recommend chmod 0600", origPath, fi.Mode().Perm())
 		}
-		parsed, perr := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if perr != nil {
-			return nil, fmt.Errorf("parse PKCS8 key %q: %w", keyPath, perr)
-		}
-		priv, ok := parsed.(ed25519.PrivateKey)
-		if !ok {
-			return nil, fmt.Errorf("identity key %q is not Ed25519", keyPath)
-		}
-		pub := priv.Public().(ed25519.PublicKey)
-		return &Identity{PublicKey: pub, PrivateKey: priv, KeyPath: keyPath}, nil
 	}
-	if !os.IsNotExist(err) {
+	raw, err := os.ReadFile(cleanPath) // #nosec G304 -- operator-configured persistent Ed25519 identity key path
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		return nil, fmt.Errorf("invalid PEM in identity key %q", origPath)
+	}
+	parsed, perr := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if perr != nil {
+		return nil, fmt.Errorf("parse PKCS8 key %q: %w", origPath, perr)
+	}
+	priv, ok := parsed.(ed25519.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("identity key %q is not Ed25519", origPath)
+	}
+	pub := priv.Public().(ed25519.PublicKey)
+	return &Identity{PublicKey: pub, PrivateKey: priv, KeyPath: origPath}, nil
+}
+
+// LoadOrCreateIdentity loads an Ed25519 PKCS#8 PEM private key from keyPath, or atomically
+// creates and fsyncs a new one (O_CREATE|O_EXCL, 0600) if the file does not exist.
+func LoadOrCreateIdentity(keyPath string) (*Identity, error) {
+	cleanPath := filepath.Clean(keyPath)
+	if id, err := loadIdentityFromFile(cleanPath, keyPath); err == nil {
+		return id, nil
+	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
 
@@ -75,11 +89,30 @@ func LoadOrCreateIdentity(keyPath string) (*Identity, error) {
 		return nil, err
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0700); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(keyPath, pemBytes, 0600); err != nil {
+	f, err := os.OpenFile(cleanPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- operator-configured persistent Ed25519 identity key path
+	if err != nil {
+		if os.IsExist(err) {
+			// Concurrent startup created the key first; load it cleanly without clobbering.
+			return loadIdentityFromFile(cleanPath, keyPath)
+		}
 		return nil, err
+	}
+	writeErr := func() error {
+		if _, werr := f.Write(pemBytes); werr != nil {
+			return werr
+		}
+		if serr := f.Sync(); serr != nil {
+			return serr
+		}
+		return f.Close()
+	}()
+	if writeErr != nil {
+		_ = f.Close()
+		_ = os.Remove(cleanPath)
+		return nil, writeErr
 	}
 	id.KeyPath = keyPath
 	return id, nil
@@ -150,9 +183,24 @@ func (id *Identity) MintCapability(p CapabilityPayload) (string, error) {
 	if p.JTI == "" || p.Node == "" || p.Exp <= 0 {
 		return "", errors.New("capability requires jti, node, and exp")
 	}
+	if len(p.JTI) > maxCapabilityJTILen {
+		return "", errors.New("capability jti exceeds maximum length")
+	}
+	if p.MaxConns < 0 {
+		return "", errors.New("capability max_conns cannot be negative")
+	}
+	if len(p.PathPrefix) > 512 {
+		return "", errors.New("capability path_prefix exceeds 512 bytes")
+	}
+	if strings.ContainsAny(p.PathPrefix, "\x00\r\n\\") || strings.ContainsAny(p.JTI, "\x00\r\n\\") {
+		return "", errors.New("capability contains forbidden control or backslash characters")
+	}
 	rawJSON, err := json.Marshal(p)
 	if err != nil {
 		return "", err
+	}
+	if len(rawJSON) > 4096 {
+		return "", errors.New("capability payload exceeds 4096 byte limit")
 	}
 	msg, err := signaling.AppendLenPrefixed([]byte("p2pgw-v7:cap-v2:"), string(rawJSON))
 	if err != nil {

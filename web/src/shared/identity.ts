@@ -176,7 +176,9 @@ export async function verifyPinnedOrTofuKey(
 }
 
 /**
- * Commits a verified TOFU public key hash after Ed25519 Answer & DTLS auth succeed.
+ * Atomically commits a verified TOFU public key hash after Ed25519 Answer & DTLS auth succeed.
+ * Runs in a single readwrite IndexedDB transaction and throws Fail-Closed if a different key was
+ * concurrently committed by another tab (prevents multi-tab TOCTOU overwrite/bypass).
  */
 export async function commitTofuKey(
   portalOrigin: string,
@@ -184,8 +186,42 @@ export async function commitTofuKey(
   pkHash: string
 ): Promise<void> {
   const scopeKey = `${portalOrigin}::${nodeId}`;
-  const stored = await getTofuKey(scopeKey);
-  if (!stored) {
-    await setTofuKey(scopeKey, pkHash);
+  const db = await openIDB();
+  if (!db) {
+    const existing = memFallback.get(scopeKey);
+    if (existing && existing !== pkHash) {
+      throw new Error(`TOFU key conflict for ${nodeId}: expected ${existing}, got ${pkHash}`);
+    }
+    memFallback.set(scopeKey, pkHash);
+    return;
+  }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      let conflictErr: Error | null = null;
+      const getReq = store.get(scopeKey);
+      getReq.onsuccess = () => {
+        const existing = typeof getReq.result === 'string' ? getReq.result : null;
+        if (existing && existing !== pkHash) {
+          conflictErr = new Error(`TOFU key conflict for ${nodeId}: expected ${existing}, got ${pkHash}`);
+          try {
+            tx.abort();
+          } catch {
+            // ignore
+          }
+          return;
+        }
+        if (!existing) {
+          store.put(pkHash, scopeKey);
+        }
+      };
+      getReq.onerror = () => reject(getReq.error || new Error('IndexedDB get failed'));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(conflictErr || tx.error || new Error('IndexedDB commit failed'));
+      tx.onabort = () => reject(conflictErr || tx.error || new Error('IndexedDB commit aborted'));
+    });
+  } finally {
+    db.close();
   }
 }

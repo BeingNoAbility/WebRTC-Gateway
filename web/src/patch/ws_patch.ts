@@ -400,10 +400,17 @@ function buildPatchedRequestInit(
     body,
     mode: init?.mode ?? (input.mode === 'navigate' ? 'same-origin' : input.mode),
     credentials: init?.credentials ?? input.credentials,
+    cache: init?.cache ?? input.cache,
     redirect: init?.redirect ?? input.redirect,
+    referrer: init?.referrer ?? input.referrer,
+    referrerPolicy: init?.referrerPolicy ?? input.referrerPolicy,
+    integrity: init?.integrity ?? input.integrity,
+    keepalive: init?.keepalive ?? input.keepalive,
     signal: init?.signal ?? input.signal,
   };
-  if (reqInit.body !== null && reqInit.body !== undefined) {
+  // Set `duplex: 'half'` ONLY when body is an actual ReadableStream (never force streaming mode
+  // onto string/Blob/ArrayBuffer/FormData bodies — preserves Content-Length & 307/308 redirects!).
+  if (typeof ReadableStream !== 'undefined' && reqInit.body instanceof ReadableStream) {
     reqInit.duplex = 'half';
   }
   return reqInit;
@@ -443,7 +450,24 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
   }
 
   let mutSeq = 0;
-  const unsyncedMuts: Array<{ seq: number; mut: ClientCookieMutation }> = [];
+  const unsyncedMuts: Array<{ seq: number; ts: number; mut: ClientCookieMutation }> = [];
+
+  const pruneUnsyncedUpTo = (maxSeq: number) => {
+    if (maxSeq <= 0 || unsyncedMuts.length === 0) return;
+    while (unsyncedMuts.length > 0 && unsyncedMuts[0].seq <= maxSeq) {
+      unsyncedMuts.shift();
+    }
+  };
+
+  const notifyPortalSwEvicted = () => {
+    if (window.parent && window.parent !== window) {
+      try {
+        window.parent.postMessage({ type: 'P2P_SW_EVICTED' }, cfg.portalOrigin || '*');
+      } catch {
+        // ignore
+      }
+    }
+  };
 
   const postCookieMutationToSW = (seq: number, mut: ClientCookieMutation) => {
     if (!swHandle) return;
@@ -467,7 +491,6 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
         }
       };
       ch.port1.onmessage = onAck;
-      // Only close port on timeout — keep mutation in `unsyncedMuts` if SW didn't ACK!
       setTimeout(cleanup, 5_000);
       try {
         target.postMessage({ type: 'SW_COOKIE_MUTATE', seq, mutations: [mut] }, [ch.port2]);
@@ -487,6 +510,18 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
     }
   };
 
+  const postCookieDeltasToSW = (deltas: CookieDelta[]) => {
+    if (!swHandle || deltas.length === 0) return;
+    const ctrl = swHandle.getController();
+    if (ctrl) {
+      try {
+        ctrl.postMessage({ type: 'SW_COOKIE_SYNC', deltas });
+      } catch {
+        // ignore
+      }
+    }
+  };
+
   const cookieDescriptor: PropertyDescriptor = {
     configurable: true,
     enumerable: true,
@@ -502,7 +537,7 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
       if (!mut) return;
       mirror.applyMutation(mut);
       const seq = ++mutSeq;
-      unsyncedMuts.push({ seq, mut });
+      unsyncedMuts.push({ seq, ts: Date.now(), mut });
       if (unsyncedMuts.length > 128) unsyncedMuts.shift();
       postCookieMutationToSW(seq, mut);
     },
@@ -524,7 +559,12 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
   if (swHandle) {
     swHandle.addMessageListener((ev: MessageEvent) => {
       const data = ev.data;
-      if (!isRecord(data) || data.type !== 'P2P_COOKIE_MIRROR_UPDATE' || !Array.isArray(data.deltas)) {
+      if (!isRecord(data) || typeof data.type !== 'string') return;
+      if (data.type === 'P2P_SW_EVICTED') {
+        notifyPortalSwEvicted();
+        return;
+      }
+      if (data.type !== 'P2P_COOKIE_MIRROR_UPDATE' || !Array.isArray(data.deltas)) {
         return;
       }
       mirror.applyDeltas(data.deltas.filter(isCookieDelta));
@@ -541,6 +581,10 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
   }
 
   const getUnsyncedMutationsPayload = (): { b64: string; maxSeq: number; list: ClientCookieMutation[] } => {
+    const cutoff = Date.now() - 30_000;
+    while (unsyncedMuts.length > 0 && unsyncedMuts[0].ts < cutoff) {
+      unsyncedMuts.shift();
+    }
     if (unsyncedMuts.length === 0) return { b64: '', maxSeq: 0, list: [] };
     const list = unsyncedMuts.map((x) => x.mut);
     const maxSeq = unsyncedMuts[unsyncedMuts.length - 1].seq;
@@ -548,7 +592,8 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
     return { b64, maxSeq, list };
   };
 
-  // 2. Patch fetch() with Fetch-spec-compliant `Request + init` override & inline cookie mutations.
+  // 2. Patch fetch() with Fetch-spec-compliant `Request + init` override, inline cookie mutations,
+  //    and SW eviction recovery notification.
   const origFetch = window.fetch.bind(window);
   window.fetch = function (input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const ctx = makeRewriteCtx(cfg);
@@ -570,27 +615,37 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
         : { b64: '', maxSeq: 0, list: [] };
     const attachMuts = Boolean(pending.b64);
 
+    let promise: Promise<Response>;
     if (!isReq) {
       if (!attachMuts) {
-        return origFetch(rewrittenUrl, init);
+        promise = origFetch(rewrittenUrl, init);
+      } else {
+        const headers = new Headers(init?.headers);
+        headers.set('x-p2p-cookie-mutations', pending.b64);
+        headers.set('x-p2p-cookie-seq', String(pending.maxSeq));
+        promise = origFetch(rewrittenUrl, { ...init, headers });
       }
-      const headers = new Headers(init?.headers);
-      headers.set('x-p2p-cookie-mutations', pending.b64);
-      headers.set('x-p2p-cookie-seq', String(pending.maxSeq));
-      return origFetch(rewrittenUrl, { ...init, headers });
+    } else if (rewrittenUrl === input.url && !attachMuts) {
+      promise = origFetch(input, init);
+    } else {
+      const extra = attachMuts
+        ? {
+            'x-p2p-cookie-mutations': pending.b64,
+            'x-p2p-cookie-seq': String(pending.maxSeq),
+          }
+        : undefined;
+      promise = origFetch(new Request(rewrittenUrl, buildPatchedRequestInit(input, init, extra)));
     }
 
-    if (rewrittenUrl === input.url && !attachMuts) {
-      return origFetch(input, init);
-    }
-
-    const extra = attachMuts
-      ? {
-          'x-p2p-cookie-mutations': pending.b64,
-          'x-p2p-cookie-seq': String(pending.maxSeq),
-        }
-      : undefined;
-    return origFetch(new Request(rewrittenUrl, buildPatchedRequestInit(input, init, extra)));
+    if (!isSameOrigin) return promise;
+    return promise.then((resp) => {
+      if (resp.headers.get('x-p2p-sw-evicted') === '1') {
+        notifyPortalSwEvicted();
+      } else if (attachMuts && resp.status !== 502 && resp.status !== 503) {
+        pruneUnsyncedUpTo(pending.maxSeq);
+      }
+      return resp;
+    });
   };
 
   // 3. Patch XMLHttpRequest (URL rewrite + ASCII base64url inline cookie mutations).
@@ -629,6 +684,17 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
         try {
           this.setRequestHeader('X-P2P-Cookie-Mutations', pending.b64);
           this.setRequestHeader('X-P2P-Cookie-Seq', String(pending.maxSeq));
+          this.addEventListener(
+            'load',
+            () => {
+              if (this.getResponseHeader('x-p2p-sw-evicted') === '1') {
+                notifyPortalSwEvicted();
+              } else if (this.status !== 502 && this.status !== 503) {
+                pruneUnsyncedUpTo(pending.maxSeq);
+              }
+            },
+            { once: true }
+          );
         } catch {
           // ignore
         }
@@ -638,9 +704,19 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
   };
 
   // 4. Patch virtual WebSocket routed via private Service Worker handle.
-  installVirtualWebSocket(cfg, swHandle, () => getUnsyncedMutationsPayload().list, (deltas) => {
-    mirror.applyDeltas(deltas);
-  });
+  installVirtualWebSocket(
+    cfg,
+    swHandle,
+    () => {
+      const p = getUnsyncedMutationsPayload();
+      return p;
+    },
+    (maxSeq) => pruneUnsyncedUpTo(maxSeq),
+    (deltas) => {
+      mirror.applyDeltas(deltas);
+      postCookieDeltasToSW(deltas);
+    }
+  );
 
   // 5. Rewrite target="_blank", target="_top"/"_parent" -> "_self", window.open, and <form action>.
   const origWindowOpen = window.open.bind(window);
@@ -648,15 +724,20 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
     if (url) {
       const ctx = makeRewriteCtx(cfg);
       const normTarget = target === '_top' || target === '_parent' ? '_self' : target;
-      if (normTarget === '_self') {
-        return origWindowOpen(rewriteBackendUrl(String(url), ctx), '_self', features);
+      // Only wrap true new-window/tab opens (`undefined`, `""`, or `"_blank"`) into Portal URLs;
+      // preserve `_self` and named child iframes (e.g. `window.open(url, 'previewFrame')`) as backend URLs!
+      if (!normTarget || normTarget === '_blank') {
+        const popup = resolvePortalPopupUrl(String(url), ctx);
+        if (popup) return origWindowOpen(popup, normTarget || '_blank', features);
+      } else {
+        return origWindowOpen(rewriteBackendUrl(String(url), ctx), normTarget, features);
       }
-      const popup = resolvePortalPopupUrl(String(url), ctx);
-      if (popup) return origWindowOpen(popup, normTarget, features);
     }
     return origWindowOpen(url, target, features);
   };
 
+  // Use BUBBLE phase (capture = false) so SPA routers calling `ev.preventDefault()` run first,
+  // and never hijack `<a download>` links into Portal popups!
   document.addEventListener(
     'click',
     (ev: MouseEvent) => {
@@ -671,7 +752,7 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
       if (tgt === '_top' || tgt === '_parent') {
         anchor.setAttribute('target', '_self');
       }
-      if (tgt === '_blank' || ev.ctrlKey || ev.metaKey) {
+      if (!anchor.hasAttribute('download') && (tgt === '_blank' || ev.ctrlKey || ev.metaKey)) {
         const popup = resolvePortalPopupUrl(rawHref, ctx);
         if (popup) {
           ev.preventDefault();
@@ -684,7 +765,7 @@ function installWindowPatches(cfg: RuntimePatchConfig): void {
         anchor.setAttribute('href', rewritten);
       }
     },
-    true
+    false
   );
 
   document.addEventListener(
@@ -769,7 +850,8 @@ function canonicalizeWebSocketUrl(rawUrl: string): string {
 function installVirtualWebSocket(
   cfg: RuntimePatchConfig,
   swHandle: PrivateSWHandle | null,
-  getPendingMutations: () => ClientCookieMutation[],
+  getPendingMutations: () => { list: ClientCookieMutation[]; maxSeq: number },
+  onMutationsSent: (maxSeq: number) => void,
   onCookieDeltas: (deltas: CookieDelta[]) => void
 ): void {
   const NativeWS = window.WebSocket;
@@ -885,11 +967,12 @@ function installVirtualWebSocket(
       this.port.start?.();
       openSockets.add(this);
 
+      const pendingMuts = getPendingMutations();
       const openPayload = {
         type: 'SW_WS_OPEN',
         target,
         protocols: protoList,
-        mutations: getPendingMutations(),
+        mutations: pendingMuts.list,
       };
 
       const dispatchToSW = (sw: ServiceWorker | null) => {
@@ -900,6 +983,9 @@ function installVirtualWebSocket(
         }
         try {
           sw.postMessage(openPayload, [ch.port2]);
+          if (pendingMuts.maxSeq > 0) {
+            onMutationsSent(pendingMuts.maxSeq);
+          }
         } catch {
           ch.port2.close();
           queueMicrotask(() => this.dispatchErrorAndClose('Failed to post SW_WS_OPEN'));

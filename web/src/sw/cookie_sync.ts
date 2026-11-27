@@ -45,7 +45,8 @@ export function cookiePathMatches(reqPath: string, cookiePath: string): boolean 
 
 export class CookieMirror {
   private readonly entries = new Map<string, MirrorCookieEntry>();
-  private readonly pendingMutations = new Map<string, ClientCookieMutation>();
+  private readonly pendingMutations = new Map<string, { mut: ClientCookieMutation; ver: number }>();
+  private mutVerSeq = 0;
   private readonly clientLastSeq = new Map<string, number>();
 
   applyDeltas(deltas: CookieDelta[], now = Date.now()): void {
@@ -99,7 +100,10 @@ export class CookieMirror {
         const delDelta: CookieDelta = { op: 'del', name: m.name, path };
         deltas.push(delDelta);
         if (opts.queueForUpstream !== false) {
-          this.pendingMutations.set(key, { op: 'del', name: m.name, path });
+          this.pendingMutations.set(key, {
+            mut: { op: 'del', name: m.name, path },
+            ver: ++this.mutVerSeq,
+          });
         }
       } else {
         if (!this.entries.has(key) && this.entries.size >= MAX_MIRROR_COOKIES) {
@@ -111,18 +115,42 @@ export class CookieMirror {
         this.entries.set(key, { name: m.name, value: val, path, expires: exp });
         deltas.push({ op: 'set', name: m.name, value: val, path, expires: exp || undefined });
         if (opts.queueForUpstream !== false) {
-          this.pendingMutations.set(key, { op: 'set', name: m.name, value: val, path, expires: exp || undefined });
+          this.pendingMutations.set(key, {
+            mut: { op: 'set', name: m.name, value: val, path, expires: exp || undefined },
+            ver: ++this.mutVerSeq,
+          });
         }
       }
     }
     return deltas;
   }
 
+  /**
+   * Non-destructively peeks queued client mutations along with a watermark version so
+   * failed tunnel sends never lose pending mutations. Call `commitPendingMutations(watermark)`
+   * only after the tunnel accepts the request.
+   */
+  peekPendingMutations(): { mutations: ClientCookieMutation[]; watermark: number } {
+    if (this.pendingMutations.size === 0) return { mutations: [], watermark: this.mutVerSeq };
+    const mutations: ClientCookieMutation[] = [];
+    for (const entry of this.pendingMutations.values()) {
+      mutations.push(entry.mut);
+    }
+    return { mutations, watermark: this.mutVerSeq };
+  }
+
+  commitPendingMutations(watermark: number): void {
+    for (const [k, entry] of this.pendingMutations) {
+      if (entry.ver <= watermark) {
+        this.pendingMutations.delete(k);
+      }
+    }
+  }
+
   drainPendingMutations(): ClientCookieMutation[] {
-    if (this.pendingMutations.size === 0) return [];
-    const list = Array.from(this.pendingMutations.values());
-    this.pendingMutations.clear();
-    return list;
+    const { mutations, watermark } = this.peekPendingMutations();
+    this.commitPendingMutations(watermark);
+    return mutations;
   }
 
   snapshot(now = Date.now()): CookieDelta[] {

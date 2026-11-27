@@ -33,7 +33,8 @@ import { SmartPill } from './ui/smart_pill';
 
 const APP_IFRAME_SANDBOX =
   'allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox allow-pointer-lock';
-const APP_IFRAME_ALLOW = 'clipboard-read; clipboard-write; fullscreen';
+const APP_IFRAME_ALLOW = 'clipboard-write; fullscreen';
+const BRIDGE_IFRAME_SANDBOX = 'allow-scripts allow-same-origin';
 
 const metaCfg = readPortalMetaConfig();
 let icePrefs: IcePreferences = loadIcePreferences();
@@ -67,8 +68,8 @@ let activeAuthInfo: AuthSuccessInfo | null = null;
 let activeIsCap = false;
 let activeNodeId = '';
 let currentAppPath = '/';
-let bridgeReadyResolver: (() => void) | null = null;
 let mountGeneration = 0;
+let recoveringSw = false;
 
 // Portal-side live cookie mirror snapshot so SW sleep/wake never rolls back cookies.
 const liveCookieSnapshot = new Map<string, CookieDelta>();
@@ -133,6 +134,12 @@ const pill = new SmartPill(hudHostEl, {
     if (!activeNodeId || !activeAuthInfo || activeIsCap || metaCfg.sandboxMode === 'fixed') return;
     resetNodeSandboxSalt(activeNodeId);
     activeSandboxOrigin = '';
+    liveCookieSnapshot.clear();
+    if (activeBridge) {
+      activeBridge.detachWindowListener();
+      activeBridge.destroy();
+      activeBridge = null;
+    }
     pill.appendLog(`[Portal] Rotated 128-bit sandbox salt for node=${activeNodeId}; remounting`);
     void mountSandboxAndApp(activeAuthInfo, false);
   },
@@ -196,45 +203,116 @@ function teardownSession(): void {
   activeIsCap = false;
   activeNodeId = '';
   liveCookieSnapshot.clear();
-  bridgeReadyResolver = null;
+  recoveringSw = false;
 }
 
-function sendFreshBridgePort(sandboxOrigin: string, meta: BackendMeta): void {
-  if (!bridgeFrame?.contentWindow || !activeBridge) return;
-  const ch = new MessageChannel();
-  activeBridge.attachBridgePort(ch.port1);
-  const freshMeta: BackendMeta = {
-    ...meta,
-    initialCookies: exportLiveCookieSnapshot(),
-  };
-  bridgeFrame.contentWindow.postMessage(
-    {
-      type: 'P2P_PORTAL_INIT',
-      tabId,
-      meta: freshMeta,
-    },
-    sandboxOrigin,
-    [ch.port2]
-  );
-}
-
-// Listen for Bridge iframe lifecycle messages (`P2P_BRIDGE_READY` & `P2P_BRIDGE_NEED_PORT`).
-window.addEventListener('message', (ev: MessageEvent) => {
-  if (!activeSandboxOrigin || ev.origin !== activeSandboxOrigin) return;
-  if (!bridgeFrame || ev.source !== bridgeFrame.contentWindow) return;
-  const data = ev.data;
-  if (!isRecord(data) || typeof data.type !== 'string') return;
-  if (data.tabId !== tabId) return;
-
-  if (data.type === 'P2P_BRIDGE_READY') {
-    const res = bridgeReadyResolver;
-    bridgeReadyResolver = null;
-    res?.();
-  } else if (data.type === 'P2P_BRIDGE_NEED_PORT' && activeMeta) {
-    pill.appendLog('[Bridge] Service Worker requested fresh bridgePort — reattaching');
-    sendFreshBridgePort(activeSandboxOrigin, activeMeta);
+/**
+ * Mounts an ephemeral, zero-temporal-overlap `bridgeFrame` strictly when `appFrame` is NOT
+ * mounted, transfers a fresh `bridgePort` to the sandbox Service Worker, waits for
+ * `P2P_BRIDGE_READY`, and IMMEDIATELY removes `bridgeFrame` from the DOM in `finally`.
+ * Guarantees untrusted `appFrame` JS can NEVER access `bridgeFrame` or `window.parent[bridge]`.
+ */
+async function attachEphemeralBridge(
+  sandboxOrigin: string,
+  meta: BackendMeta,
+  myMountGen: number
+): Promise<void> {
+  if (!activeBridge) throw new Error('TunnelBridge not initialized');
+  if (appFrame) {
+    appFrame.remove();
+    appFrame = null;
+    activeBridge.setAppFrame(null);
   }
-});
+  if (bridgeFrame) {
+    bridgeFrame.remove();
+    bridgeFrame = null;
+  }
+
+  const bFrame = document.createElement('iframe');
+  bFrame.className = 'p2p-hidden-bridge';
+  bFrame.setAttribute('aria-hidden', 'true');
+  bFrame.setAttribute('sandbox', BRIDGE_IFRAME_SANDBOX);
+  bFrame.setAttribute('allow', '');
+  bFrame.src = `${sandboxOrigin}/__p2p_gw__/bridge.html?tab=${encodeURIComponent(tabId)}`;
+  bridgeFrame = bFrame;
+
+  const readyPromise = new Promise<void>((resolve, reject) => {
+    const onMessage = (ev: MessageEvent) => {
+      if (ev.isTrusted === false) return;
+      if (ev.origin !== sandboxOrigin || ev.source !== bFrame.contentWindow) return;
+      const data = ev.data;
+      if (!isRecord(data) || data.type !== 'P2P_BRIDGE_READY' || data.tabId !== tabId) return;
+      cleanup();
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('Timed out waiting for sandbox Service Worker bridge to initialize'));
+    }, 15_000);
+    const cleanup = () => {
+      clearTimeout(timer);
+      window.removeEventListener('message', onMessage);
+    };
+    window.addEventListener('message', onMessage);
+
+    bFrame.addEventListener(
+      'load',
+      () => {
+        if (myMountGen !== mountGeneration || bridgeFrame !== bFrame || !bFrame.contentWindow || !activeBridge) {
+          return;
+        }
+        const ch = new MessageChannel();
+        activeBridge.attachBridgePort(ch.port1);
+        const freshMeta: BackendMeta = {
+          ...meta,
+          initialCookies: exportLiveCookieSnapshot(),
+        };
+        bFrame.contentWindow.postMessage(
+          {
+            type: 'P2P_PORTAL_INIT',
+            tabId,
+            meta: freshMeta,
+          },
+          sandboxOrigin,
+          [ch.port2]
+        );
+      },
+      { once: true }
+    );
+  });
+
+  stageEl.appendChild(bFrame);
+  try {
+    await readyPromise;
+  } finally {
+    // Destroy bridgeFrame unconditionally BEFORE returning (zero temporal overlap with appFrame!).
+    bFrame.remove();
+    if (bridgeFrame === bFrame) {
+      bridgeFrame = null;
+    }
+  }
+}
+
+async function recoverEvictedSw(): Promise<void> {
+  if (recoveringSw || !activeBridge || !activeAuthInfo || !activeSandboxOrigin || !activeMeta) return;
+  // Verify the SW actually lost its bridgePort before acting (blocks untrusted appFrame DoS!).
+  if (await activeBridge.pingSw(800)) {
+    return;
+  }
+  if (recoveringSw || !activeAuthInfo) return;
+  recoveringSw = true;
+  try {
+    pill.appendLog('[Bridge] Service Worker was evicted by browser — re-bootstrapping sandbox cleanly');
+    if (appFrame) {
+      appFrame.remove();
+      appFrame = null;
+      activeBridge.setAppFrame(null);
+    }
+    await mountSandboxAndApp(activeAuthInfo, activeIsCap);
+  } finally {
+    recoveringSw = false;
+  }
+}
 
 async function mountSandboxAndApp(info: AuthSuccessInfo, isCap: boolean): Promise<void> {
   const myMountGen = ++mountGeneration;
@@ -283,18 +361,26 @@ async function mountSandboxAndApp(info: AuthSuccessInfo, isCap: boolean): Promis
       onCookieDeltas: (deltas) => {
         mergeCookieDeltas(deltas);
       },
+      onSwEvicted: () => {
+        void recoverEvictedSw();
+      },
       onLog: (line) => pill.appendLog(line),
     });
     activeBridge.attachWindowListener();
   }
 
-  // If sandbox origin matches an already-mounted bridge (silent reconnect),
-  // reuse the live app iframe & re-bind the fresh PoolMux + bridgePort so SPA route stays intact!
-  if (activeSandboxOrigin === nextSandboxOrigin && bridgeFrame && appFrame) {
-    activeBridge.setContext(mux, openWSDC, nextSandboxOrigin, activeMeta, appFrame);
-    sendFreshBridgePort(nextSandboxOrigin, activeMeta);
-    setBanner(false);
-    return;
+  // Silent WebRTC reconnect fast path: if `appFrame` is already mounted on the same sandbox origin
+  // AND the Service Worker still holds our live `bridgePort`, swap the PoolMux seamlessly with zero
+  // DOM flicker and zero `bridgeFrame` remount!
+  if (activeSandboxOrigin === nextSandboxOrigin && appFrame) {
+    const swAlive = await activeBridge.pingSw(1_500);
+    if (myMountGen !== mountGeneration || transport !== activeTransport) return;
+    if (swAlive && appFrame) {
+      activeBridge.setContext(mux, openWSDC, nextSandboxOrigin, activeMeta, appFrame);
+      setBanner(false);
+      return;
+    }
+    pill.appendLog('[Bridge] SW inactive during silent reconnect — detaching appFrame for clean re-bootstrap');
   }
 
   activeSandboxOrigin = nextSandboxOrigin;
@@ -309,34 +395,9 @@ async function mountSandboxAndApp(info: AuthSuccessInfo, isCap: boolean): Promis
 
   activeBridge.setContext(mux, openWSDC, nextSandboxOrigin, activeMeta, null);
 
-  // 1. Mount hidden non-navigable bridge iframe (`/__p2p_gw__/bridge.html?tab=...`).
-  const bFrame = document.createElement('iframe');
-  bFrame.className = 'p2p-hidden-bridge';
-  bFrame.setAttribute('aria-hidden', 'true');
-  bFrame.setAttribute('allow', '');
-  bFrame.src = `${nextSandboxOrigin}/__p2p_gw__/bridge.html?tab=${encodeURIComponent(tabId)}`;
-  bridgeFrame = bFrame;
-
-  const readyPromise = new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      bridgeReadyResolver = null;
-      reject(new Error('Timed out waiting for sandbox Service Worker bridge to initialize'));
-    }, 15_000);
-    bridgeReadyResolver = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-  });
-
-  bFrame.addEventListener('load', () => {
-    if (myMountGen === mountGeneration && bridgeFrame === bFrame && activeMeta) {
-      sendFreshBridgePort(nextSandboxOrigin, activeMeta);
-    }
-  });
-  stageEl.appendChild(bFrame);
-
+  // 1. Ephemeral zero-temporal-overlap bridge handshake: mount -> attach bridgePort -> destroy!
   try {
-    await readyPromise;
+    await attachEphemeralBridge(nextSandboxOrigin, activeMeta, myMountGen);
   } catch (err) {
     if (myMountGen !== mountGeneration) return;
     const msg = err instanceof Error ? err.message : 'Bridge initialization failed';
@@ -360,7 +421,7 @@ async function mountSandboxAndApp(info: AuthSuccessInfo, isCap: boolean): Promis
   }
   if (myMountGen !== mountGeneration || transport !== activeTransport) return;
 
-  // 3. Mount the isolated sandboxed app iframe (NO allow-top-navigation*).
+  // 3. Mount the isolated sandboxed app iframe (NO allow-top-navigation*, NO sibling bridgeFrame!).
   const aFrame = document.createElement('iframe');
   aFrame.className = 'p2p-app-frame';
   aFrame.setAttribute('sandbox', APP_IFRAME_SANDBOX);

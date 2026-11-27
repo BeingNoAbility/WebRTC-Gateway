@@ -15,7 +15,10 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-var originHostRegex = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
+var (
+	originHostRegex = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
+	sbxLabelRegex   = regexp.MustCompile(`^sbx-[a-z0-9]{1,59}$`)
+)
 
 type SandboxMode string
 
@@ -36,7 +39,8 @@ type DomainPolicy struct {
 	SandboxDomain        string // wildcard base domain (Tier 2/3) or exact fixed host[:port] (Tier 1)
 	SandboxHost          string // lowercase host without port
 	SandboxPort          string // optional explicit port
-	AllowSameSiteSandbox bool   // Tier 2 explicit opt-in (-allow-same-site-sandbox)
+	AllowSameSiteSandbox bool   // Tier 2 CLI opt-in
+	IsSameSite           bool   // True ONLY when active sandbox actually shares eTLD+1 with portal (Tier 2)
 	LocalDevMode         bool   // automatic RFC 6761 *.localhost on loopback
 	AllowAllOrigins      bool
 	TrustedProxies       []netip.Prefix
@@ -204,6 +208,7 @@ func NewDomainPolicy(
 		dp.SandboxDomain = sFixFull
 		dp.SandboxHost = sFixHost
 		dp.SandboxPort = sFixPort
+		dp.IsSameSite = false
 		return dp, nil
 	}
 
@@ -216,6 +221,7 @@ func NewDomainPolicy(
 		dp.SandboxDomain = pFull
 		dp.SandboxHost = pHost
 		dp.SandboxPort = pPort
+		dp.IsSameSite = true
 		return dp, nil
 	}
 
@@ -228,6 +234,7 @@ func NewDomainPolicy(
 	dp.SandboxDomain = sDomFull
 	dp.SandboxHost = sDomHost
 	dp.SandboxPort = sDomPort
+	dp.IsSameSite = pSite == sSite
 	return dp, nil
 }
 
@@ -282,8 +289,10 @@ func splitHostPortLower(rawHost string) (host, port string, ok bool) {
 	return s, "", true
 }
 
-func formatOriginHostPort(host, port string) string {
-	if port != "" {
+func formatOriginHostPort(scheme, host, port string) string {
+	// Canonically omit standard scheme default ports (https:443, http:80) so browser
+	// Origin / CSP frame-ancestors / frame-src exact-match rules always align.
+	if port != "" && port != defaultPort(scheme) {
 		return net.JoinHostPort(host, port)
 	}
 	if strings.Contains(host, ":") {
@@ -306,14 +315,22 @@ func isSingleLabelSubdomain(host, base string) (label string, ok bool) {
 
 func portMatchesConfigured(gotPort, configuredPort string) bool {
 	if configuredPort != "" {
-		return gotPort == configuredPort
+		if gotPort == configuredPort {
+			return true
+		}
+		// Browsers omit default ports (:443 / :80) from HTTP Host headers even if operator
+		// explicitly configured portal.example.com:443 or portal.example.com:80.
+		if gotPort == "" && (configuredPort == "443" || configuredPort == "80") {
+			return true
+		}
+		return false
 	}
 	// When no explicit port is configured in production, accept only implicit or standard HTTP(S) ports.
 	return gotPort == "" || gotPort == "443" || gotPort == "80"
 }
 
 // ClassifyHost determines whether r.Host is the EXACT authorized Portal host, an authorized
-// Sandbox host (Tier 1 fixed host or Tier 2/3/Local sbx-* single-label subdomain), or rejected (421).
+// Sandbox host (Tier 1 fixed host or Tier 2/3/Local strict sbx-[a-z0-9]+ single-label subdomain), or rejected (421).
 func (dp *DomainPolicy) ClassifyHost(rawHost string) HostClass {
 	host, port, ok := splitHostPortLower(rawHost)
 	if !ok {
@@ -324,7 +341,7 @@ func (dp *DomainPolicy) ClassifyHost(rawHost string) HostClass {
 		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
 			return HostPortal
 		}
-		if lbl, sub := isSingleLabelSubdomain(host, "localhost"); sub && strings.HasPrefix(lbl, "sbx-") {
+		if lbl, sub := isSingleLabelSubdomain(host, "localhost"); sub && sbxLabelRegex.MatchString(lbl) {
 			return HostSandbox
 		}
 		return HostRejected
@@ -340,7 +357,7 @@ func (dp *DomainPolicy) ClassifyHost(rawHost string) HostClass {
 		return HostRejected
 	}
 	if lbl, sub := isSingleLabelSubdomain(host, dp.SandboxHost); sub && portMatchesConfigured(port, dp.SandboxPort) {
-		if strings.HasPrefix(lbl, "sbx-") {
+		if sbxLabelRegex.MatchString(lbl) {
 			return HostSandbox
 		}
 	}
@@ -377,13 +394,21 @@ func (dp *DomainPolicy) IsHTTPS(r *http.Request) bool {
 }
 
 // CheckWSOrigin strictly validates browser Origin headers for /ws/* endpoints.
-func (dp *DomainPolicy) CheckWSOrigin(r *http.Request, requireBrowserOrigin bool) bool {
+// Rejects multiple Origin headers Fail-Closed; allows absent Origin for non-browser CLI/Agent clients.
+func (dp *DomainPolicy) CheckWSOrigin(r *http.Request) bool {
 	if dp.ClassifyHost(r.Host) != HostPortal {
 		return false
 	}
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	origins := r.Header.Values("Origin")
+	if len(origins) == 0 {
+		return true
+	}
+	if len(origins) > 1 {
+		return false
+	}
+	origin := strings.TrimSpace(origins[0])
 	if origin == "" {
-		return !requireBrowserOrigin
+		return true
 	}
 	u, err := url.Parse(origin)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -437,15 +462,15 @@ func (dp *DomainPolicy) SandboxFrameSrc(r *http.Request) string {
 	scheme := schemeFromBool(dp.IsHTTPS(r))
 	if dp.LocalDevMode {
 		_, rPort, ok := splitHostPortLower(r.Host)
-		if ok && rPort != "" {
+		if ok && rPort != "" && rPort != defaultPort(scheme) {
 			return fmt.Sprintf("%s://*.localhost:%s", scheme, rPort)
 		}
 		return fmt.Sprintf("%s://*.localhost", scheme)
 	}
 	if dp.Mode == SandboxModeFixed {
-		return fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(dp.SandboxHost, dp.SandboxPort))
+		return fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(scheme, dp.SandboxHost, dp.SandboxPort))
 	}
-	if dp.SandboxPort != "" {
+	if dp.SandboxPort != "" && dp.SandboxPort != defaultPort(scheme) {
 		return fmt.Sprintf("%s://*.%s:%s", scheme, dp.SandboxHost, dp.SandboxPort)
 	}
 	return fmt.Sprintf("%s://*.%s", scheme, dp.SandboxHost)
@@ -462,13 +487,13 @@ func (dp *DomainPolicy) AllowedPortalOriginsList(r *http.Request) []string {
 			rPort = ""
 		}
 		return []string{
-			fmt.Sprintf("%s://%s", scheme, formatOriginHostPort("localhost", rPort)),
-			fmt.Sprintf("%s://%s", scheme, formatOriginHostPort("127.0.0.1", rPort)),
-			fmt.Sprintf("%s://%s", scheme, formatOriginHostPort("::1", rPort)),
+			fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(scheme, "localhost", rPort)),
+			fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(scheme, "127.0.0.1", rPort)),
+			fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(scheme, "::1", rPort)),
 		}
 	}
 	return []string{
-		fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(dp.PortalHost, dp.PortalPort)),
+		fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(scheme, dp.PortalHost, dp.PortalPort)),
 	}
 }
 

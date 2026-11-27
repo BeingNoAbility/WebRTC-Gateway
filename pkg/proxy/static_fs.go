@@ -124,11 +124,11 @@ func (h *StaticFSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if fi.IsDir() {
 		if !strings.HasSuffix(cleanReqPath, "/") {
-			// Construct redirect path strictly from os.Root-verified resolvedRel so an open
-			// redirect (`//host/...`) is structurally impossible.
+			// Construct redirect path strictly from the cleaned virtual request path (never leaking
+			// resolved symlink targets) while rejecting any `//` protocol-relative open redirect.
 			targetPath := "/"
-			if resolvedRel != "." {
-				targetPath = "/" + resolvedRel + "/"
+			if cleanVirtual := strings.Trim(cleanReqPath, "/"); cleanVirtual != "" {
+				targetPath = "/" + cleanVirtual + "/"
 			}
 			redir := (&url.URL{Path: targetPath}).EscapedPath()
 			if !strings.HasPrefix(redir, "/") || strings.HasPrefix(redir, "//") {
@@ -138,7 +138,7 @@ func (h *StaticFSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if r.URL.RawQuery != "" {
 				redir += "?" + r.URL.RawQuery
 			}
-			http.Redirect(w, r, redir, http.StatusMovedPermanently) // #nosec G710 -- root-relative path built from os.Root-verified resolvedRel with // prefix rejected
+			http.Redirect(w, r, redir, http.StatusMovedPermanently) // #nosec G710 -- root-relative path built from cleaned virtual request path with // prefix rejected
 			return
 		}
 		idxRel := "index.html"
@@ -155,6 +155,11 @@ func (h *StaticFSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = idxFile.Close()
 		}
 		h.serveDirListing(w, r, f, resolvedRel, cleanReqPath)
+		return
+	}
+
+	if strings.HasSuffix(cleanReqPath, "/") {
+		http.NotFound(w, r)
 		return
 	}
 

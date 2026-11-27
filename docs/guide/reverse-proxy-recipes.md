@@ -199,7 +199,7 @@ http://127.0.0.1:18082 {
 
 ### 4.1 强制 HTTPS 代理语义（`X-Forwarded-Proto`）
 
-当 `Agent -target` 指向明文 `http://127.0.0.1:...` 时，Agent 按目标协议发出 `X-Forwarded-Proto: http`。若上游应用要求感知访客端为 HTTPS（常见于部分自托管云盘、智能家居与 Web 框架），由本机回环反代显式覆盖转发头，并在目标应用配置中将 `127.0.0.1` 加入受信任代理列表：
+当 `Agent -target` 指向明文 `http://127.0.0.1:...` 时，Agent 按目标协议发出 `X-Forwarded-Proto: http`。若上游应用要求感知访客端为 HTTPS（常见于部分自托管云盘、智能家居与 Web 框架），由本机回环反代显式覆盖转发头，并在目标应用配置中将 `127.0.0.1` 加入受信任代理列表。Agent 的 `ProxyCookieJar` 遵循 W3C 潜在可信回环源语义（`127.0.0.0/8`、`::1`、`localhost`、`*.localhost`），因此上游在此模式下下发的 `Secure`、`__Host-` 与 `__Secure-` 登录 Cookie 可正常保存与回传：
 
 ```nginx
 # /etc/nginx/conf.d/p2p-https-proto.conf

@@ -164,8 +164,16 @@ function prepareCookies(entries: CookieTLVEntry[] | undefined, maxCount: number)
     ) {
       throw new Error('invalid cookie TLV entry');
     }
-    const expNum = Number.isFinite(c.expiresMs) ? Math.trunc(c.expiresMs) : 0;
-    list[i] = { op: c.op, name, value, path, expiresMs: BigInt(expNum) };
+    if (
+      typeof c.expiresMs !== 'number' ||
+      !Number.isFinite(c.expiresMs) ||
+      !Number.isInteger(c.expiresMs) ||
+      c.expiresMs < 0 ||
+      c.expiresMs > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new RangeError(`invalid cookie expiresMs: ${c.expiresMs}`);
+    }
+    list[i] = { op: c.op, name, value, path, expiresMs: BigInt(c.expiresMs) };
     byteSize += 1 + 1 + name.byteLength + 2 + value.byteLength + 2 + path.byteLength + 8;
   }
   return { list, byteSize };
@@ -233,7 +241,11 @@ function decodeCookies(
     const path = textDecoder.decode(pBytes);
     pos += pLen;
 
-    const expiresMs = Number(view.getBigInt64(pos, false));
+    const rawExp = view.getBigInt64(pos, false);
+    if (rawExp < 0n || rawExp > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new RangeError(`invalid cookie expiresMs: ${rawExp}`);
+    }
+    const expiresMs = Number(rawExp);
     pos += 8;
     cookies[i] = { op: op as CookieOpValue, name, value, path, expiresMs };
   }
@@ -244,10 +256,11 @@ export function encodeRequestHeaders(req: RequestHeaders): Uint8Array {
   if (req.kind !== StreamKind.HTTP && req.kind !== StreamKind.WS) {
     throw new Error(`invalid stream kind: ${req.kind}`);
   }
-  const fetchCtx = (req.fetchCtx ?? 0) & 0xff;
-  if ((fetchCtx & ~FETCH_CTX_VALID_MASK) !== 0) {
-    throw new Error(`invalid fetchCtx flags: 0x${fetchCtx.toString(16)}`);
+  const rawFetchCtx = req.fetchCtx ?? 0;
+  if (!Number.isInteger(rawFetchCtx) || rawFetchCtx < 0 || rawFetchCtx > 0xff || (rawFetchCtx & ~FETCH_CTX_VALID_MASK) !== 0) {
+    throw new Error(`invalid fetchCtx flags: ${rawFetchCtx}`);
   }
+  const fetchCtx = rawFetchCtx;
   // Validate strict ASCII RFC 9110 tchar BEFORE uppercasing.
   const rawMethodBytes = textEncoder.encode(req.method);
   if (rawMethodBytes.byteLength === 0 || rawMethodBytes.byteLength > MAX_METHOD_LEN || !isValidRFC9110TokenBytes(rawMethodBytes)) {
@@ -376,10 +389,11 @@ export function encodeResponseHeaders(resp: ResponseHeaders): Uint8Array {
   if (!Number.isInteger(resp.status) || resp.status < 100 || resp.status > 599) {
     throw new RangeError(`invalid HTTP status: ${resp.status}`);
   }
-  const respFlags = (resp.respFlags ?? 0) & 0xff;
-  if ((respFlags & ~RESP_FLAGS_VALID_MASK) !== 0) {
-    throw new Error(`invalid respFlags: 0x${respFlags.toString(16)}`);
+  const rawRespFlags = resp.respFlags ?? 0;
+  if (!Number.isInteger(rawRespFlags) || rawRespFlags < 0 || rawRespFlags > 0xff || (rawRespFlags & ~RESP_FLAGS_VALID_MASK) !== 0) {
+    throw new Error(`invalid respFlags: ${rawRespFlags}`);
   }
+  const respFlags = rawRespFlags;
   if (resp.headers.length > MAX_HEADER_COUNT) {
     throw new Error('too many headers');
   }

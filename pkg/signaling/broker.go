@@ -25,6 +25,7 @@ const (
 	DefaultMaxClientLifetime    = 2 * time.Minute
 	DefaultBoundKeyOfflineTTL   = 7 * 24 * time.Hour
 	MaxBoundNodeKeys            = 10000
+	MaxGlobalUnknownWaiting     = 512 // Cap total waiting clients targeting completely unknown nodes
 	brokerCloseAllGraceTimeout  = 2 * time.Second
 )
 
@@ -33,6 +34,7 @@ var (
 	ErrNodeWaitingQueueFull  = errors.New("signaling: offline waiting queue full for node")
 	ErrNodeClientLimitFull   = errors.New("signaling: concurrent client limit reached for node")
 	ErrBoundKeyCapacityFull  = errors.New("signaling: bound node key registry at capacity")
+	ErrBrokerClosed          = errors.New("signaling: broker is shutting down")
 )
 
 type boundKeyEntry struct {
@@ -48,6 +50,7 @@ type persistedBoundKey struct {
 // SignalBroker coordinates registered Agents, visitor Clients, and Ed25519 public-key ownership.
 type SignalBroker struct {
 	mu                   sync.RWMutex
+	closed               bool
 	agents               map[string]*Session            // nodeID -> active Agent
 	clients              map[string]*Session            // sessionID -> Client
 	nodeClients          map[string]map[string]*Session // nodeID -> sessionID -> Client
@@ -73,6 +76,10 @@ func NewSignalBrokerWithFile(boundKeysFile string) (*SignalBroker, error) {
 	var store *state.AtomicFileStore
 	if boundKeysFile != "" {
 		store = state.NewAtomicFileStore(boundKeysFile)
+		if err := store.CheckWritable(); err != nil {
+			cancel()
+			return nil, err
+		}
 	}
 	b := &SignalBroker{
 		agents:               make(map[string]*Session),
@@ -172,7 +179,7 @@ func (b *SignalBroker) persistBoundKeys(ver uint64, snapshot map[string]persiste
 	if b.boundKeysStore == nil || snapshot == nil {
 		return
 	}
-	raw, err := json.MarshalIndent(snapshot, "", "  ")
+	raw, err := json.Marshal(snapshot)
 	if err != nil {
 		log.Printf("[Signal] Marshal bound keys failed: %v", err)
 		return
@@ -198,12 +205,16 @@ func (b *SignalBroker) ClientCount() int {
 
 // RegisterAgent binds a verified Ed25519 public key to nodeID, evicting any prior socket of
 // the SAME identity key (or rotating when allowForceRekey is true).
-// NEVER evicts unexpired offline bindings within the 7-day TTL when at capacity!
+// PeerStatusDTO broadcasts are enqueued inside b.mu before disk persistence so JoinedDTO
+// and online/offline transitions are strictly ordered without adding any new lock.
 func (b *SignalBroker) RegisterAgent(sess *Session, pk ed25519.PublicKey, requireVisitorAuth, allowForceRekey bool) error {
 	now := time.Now()
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return ErrBrokerClosed
+	}
 
-	// Prune expired offline key bindings for this node first.
 	if entry, ok := b.boundKeys[sess.NodeID]; ok {
 		if !entry.lastOffline.IsZero() && now.Sub(entry.lastOffline) > DefaultBoundKeyOfflineTTL {
 			delete(b.boundKeys, sess.NodeID)
@@ -221,7 +232,6 @@ func (b *SignalBroker) RegisterAgent(sess *Session, pk ed25519.PublicKey, requir
 		entry.lastOffline = time.Time{}
 	} else {
 		if len(b.boundKeys) >= MaxBoundNodeKeys {
-			// Sweep ONLY expired offline bindings (> 7d TTL). NEVER evict live or unexpired offline keys!
 			for nid, ent := range b.boundKeys {
 				if _, online := b.agents[nid]; online {
 					continue
@@ -239,16 +249,26 @@ func (b *SignalBroker) RegisterAgent(sess *Session, pk ed25519.PublicKey, requir
 	}
 
 	oldAgent := b.agents[sess.NodeID]
+	if oldAgent != nil && oldAgent != sess {
+		oldAgent.MarkEvicted()
+	}
 	b.agents[sess.NodeID] = sess
 	sess.MarkRegistered(pk, requireVisitorAuth)
 	pkB64 := sess.AgentPKBase64()
 	snapVer, snap := b.snapshotBoundKeysLocked()
 
-	var notifyList []*Session
+	// Enqueue PeerStatusDTO inside b.mu (TrySend is lock-free & non-blocking) so it can NEVER
+	// race ahead of JoinedDTO or arrive after a subsequent offline CleanupSession!
 	if cmap := b.nodeClients[sess.NodeID]; len(cmap) > 0 {
-		notifyList = make([]*Session, 0, len(cmap))
+		statusMsg := PeerStatusDTO{
+			Type:               TypePeerStatus,
+			NodeID:             sess.NodeID,
+			Online:             true,
+			RequireVisitorAuth: requireVisitorAuth,
+			AgentPK:            pkB64,
+		}
 		for _, c := range cmap {
-			notifyList = append(notifyList, c)
+			_ = c.TrySend(statusMsg)
 		}
 	}
 	b.mu.Unlock()
@@ -258,33 +278,43 @@ func (b *SignalBroker) RegisterAgent(sess *Session, pk ed25519.PublicKey, requir
 	if oldAgent != nil && oldAgent != sess {
 		oldAgent.SendErrorAndCloseAsync("AGENT_REPLACED", "agent replaced by newer authenticated connection", websocket.StatusCode(4001))
 	}
-
-	statusMsg := PeerStatusDTO{
-		Type:               TypePeerStatus,
-		NodeID:             sess.NodeID,
-		Online:             true,
-		RequireVisitorAuth: requireVisitorAuth,
-		AgentPK:            pkB64,
-	}
-	for _, c := range notifyList {
-		_ = c.TrySend(statusMsg)
-	}
 	return nil
 }
 
-// JoinClient attaches an immutable client session to its target node.
+// JoinClient attaches an immutable client session to its target node and enqueues its initial
+// JoinedDTO strictly inside b.mu so no PeerStatusDTO can ever overtake JoinedDTO.
 func (b *SignalBroker) JoinClient(sess *Session) (online bool, requireVisitorAuth bool, agentPK string, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if b.closed {
+		return false, false, "", ErrBrokerClosed
+	}
+
 	agent := b.agents[sess.NodeID]
 	cmap := b.nodeClients[sess.NodeID]
-	if agent == nil && len(cmap) >= MaxWaitingPerNode {
-		return false, false, "", ErrNodeWaitingQueueFull
-	}
-	if agent != nil && len(cmap) >= MaxClientsPerNode {
+	if agent == nil {
+		if len(cmap) >= MaxWaitingPerNode {
+			return false, false, "", ErrNodeWaitingQueueFull
+		}
+		// Bound waiting clients targeting completely unknown nodes to resist anonymous queue floods.
+		if _, known := b.boundKeys[sess.NodeID]; !known {
+			unknownWaiters := 0
+			for nid, m := range b.nodeClients {
+				if b.agents[nid] == nil {
+					if _, k := b.boundKeys[nid]; !k {
+						unknownWaiters += len(m)
+					}
+				}
+			}
+			if unknownWaiters >= MaxGlobalUnknownWaiting {
+				return false, false, "", ErrNodeWaitingQueueFull
+			}
+		}
+	} else if len(cmap) >= MaxClientsPerNode {
 		return false, false, "", ErrNodeClientLimitFull
 	}
+
 	if cmap == nil {
 		cmap = make(map[string]*Session)
 		b.nodeClients[sess.NodeID] = cmap
@@ -293,9 +323,28 @@ func (b *SignalBroker) JoinClient(sess *Session) (online bool, requireVisitorAut
 	b.clients[sess.ID] = sess
 
 	if agent != nil {
-		return true, agent.RequireVisitorAuth(), agent.AgentPKBase64(), nil
+		online = true
+		requireVisitorAuth = agent.RequireVisitorAuth()
+		agentPK = agent.AgentPKBase64()
 	}
-	return false, false, "", nil
+	if sess.outCh != nil {
+		if sendErr := sess.TrySend(JoinedDTO{
+			Type:               TypeJoined,
+			NodeID:             sess.NodeID,
+			SessionID:          sess.ID,
+			Online:             online,
+			RequireVisitorAuth: requireVisitorAuth,
+			AgentPK:            agentPK,
+		}); sendErr != nil {
+			delete(b.clients, sess.ID)
+			delete(cmap, sess.ID)
+			if len(cmap) == 0 {
+				delete(b.nodeClients, sess.NodeID)
+			}
+			return false, false, "", sendErr
+		}
+	}
+	return online, requireVisitorAuth, agentPK, nil
 }
 
 // GetAgent returns the active Agent for nodeID.
@@ -317,9 +366,8 @@ func (b *SignalBroker) GetClientForNode(nodeID, sessionID string) *Session {
 	return c
 }
 
-// CleanupSession removes an Agent or Client cleanly.
+// CleanupSession removes an Agent or Client cleanly and enqueues offline notifications under b.mu.
 func (b *SignalBroker) CleanupSession(sess *Session) {
-	var offlineNotify []*Session
 	var snapVer uint64
 	var snap map[string]persistedBoundKey
 
@@ -333,10 +381,15 @@ func (b *SignalBroker) CleanupSession(sess *Session) {
 			}
 			snapVer, snap = b.snapshotBoundKeysLocked()
 			if cmap := b.nodeClients[sess.NodeID]; len(cmap) > 0 {
-				offlineNotify = make([]*Session, 0, len(cmap))
+				msg := PeerStatusDTO{
+					Type:               TypePeerStatus,
+					NodeID:             sess.NodeID,
+					Online:             false,
+					RequireVisitorAuth: false,
+				}
 				for _, c := range cmap {
 					c.ClearOfferPending()
-					offlineNotify = append(offlineNotify, c)
+					_ = c.TrySend(msg)
 				}
 			}
 		}
@@ -352,18 +405,6 @@ func (b *SignalBroker) CleanupSession(sess *Session) {
 	b.mu.Unlock()
 
 	b.persistBoundKeys(snapVer, snap)
-
-	if len(offlineNotify) > 0 {
-		msg := PeerStatusDTO{
-			Type:               TypePeerStatus,
-			NodeID:             sess.NodeID,
-			Online:             false,
-			RequireVisitorAuth: false,
-		}
-		for _, c := range offlineNotify {
-			_ = c.TrySend(msg)
-		}
-	}
 }
 
 func (b *SignalBroker) reaperLoop() {
@@ -426,17 +467,26 @@ func (b *SignalBroker) reapTimedOutClients(now time.Time) {
 			})
 			continue
 		}
-		if maxLife > 0 && now.Sub(c.JoinedAt()) > maxLife {
-			victims = append(victims, timedOutEntry{
-				sess:   c,
-				code:   "SIGNAL_LIFETIME_EXCEEDED",
-				reason: "client signaling session lifetime exceeded",
-			})
+		// Apply post-offer maximum lifetime ONLY after an Offer has been sent so online visitors
+		// typing their password get the full DefaultOnlineUnOfferTimeout (5m) window!
+		if c.HasSentOffer() && maxLife > 0 {
+			offerSince := c.FirstOfferAt()
+			if offerSince.IsZero() {
+				offerSince = c.JoinedAt()
+			}
+			if now.Sub(offerSince) > maxLife {
+				victims = append(victims, timedOutEntry{
+					sess:   c,
+					code:   "SIGNAL_LIFETIME_EXCEEDED",
+					reason: "client signaling session lifetime exceeded",
+				})
+			}
 		}
 	}
 	b.mu.RUnlock()
 
 	for _, v := range victims {
+		v.sess.MarkEvicted()
 		v.sess.SendErrorAndCloseAsync(v.code, v.reason, websocket.StatusCode(4008))
 		b.CleanupSession(v.sess)
 	}
@@ -447,17 +497,28 @@ func (b *SignalBroker) reapTimedOutClients(now time.Time) {
 func (b *SignalBroker) CloseAll() {
 	b.cancel()
 	b.mu.Lock()
+	b.closed = true
 	var all []*Session
-	for _, ag := range b.agents {
+	now := time.Now()
+	for nodeID, ag := range b.agents {
+		ag.MarkEvicted()
 		all = append(all, ag)
+		if ent, ok := b.boundKeys[nodeID]; ok {
+			ent.lastOffline = now
+		}
 	}
 	for _, cl := range b.clients {
+		cl.MarkEvicted()
 		all = append(all, cl)
 	}
 	b.agents = make(map[string]*Session)
 	b.clients = make(map[string]*Session)
 	b.nodeClients = make(map[string]map[string]*Session)
+	snapVer, snap := b.snapshotBoundKeysLocked()
 	b.mu.Unlock()
+
+	// Single consolidated flush on shutdown instead of N concurrent fsync storms!
+	b.persistBoundKeys(snapVer, snap)
 
 	if len(all) == 0 {
 		return
@@ -477,11 +538,9 @@ func (b *SignalBroker) CloseAll() {
 		close(done)
 	}()
 
-	timer := time.NewTimer(brokerCloseAllGraceTimeout)
-	defer timer.Stop()
 	select {
 	case <-done:
-	case <-timer.C:
+	case <-time.After(brokerCloseAllGraceTimeout):
 		for _, s := range all {
 			s.CloseNow()
 		}

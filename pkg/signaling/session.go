@@ -46,11 +46,13 @@ type Session struct {
 	closeOnce   sync.Once
 	errSendOnce sync.Once
 	closed      atomic.Bool
+	evicted     atomic.Bool
 
 	stateMu         sync.Mutex
 	joinedAt        time.Time
 	lastActivity    time.Time
 	hasSentOffer    bool
+	firstOfferAt    time.Time
 	offerPendingAt  time.Time
 	offerTimestamps []time.Time
 	candidateCount  int
@@ -78,6 +80,15 @@ func NewSession(parentCtx context.Context, conn *websocket.Conn, role SessionRol
 }
 
 func (s *Session) Context() context.Context { return s.ctx }
+
+// MarkEvicted immediately disables further inbound message forwarding before async close completes.
+func (s *Session) MarkEvicted() {
+	s.evicted.Store(true)
+}
+
+func (s *Session) IsEvicted() bool {
+	return s.evicted.Load() || s.closed.Load()
+}
 
 func (s *Session) writeLoop() {
 	pingTicker := time.NewTicker(25 * time.Second)
@@ -109,16 +120,24 @@ func (s *Session) writeLoop() {
 // TrySend non-blockingly serializes and enqueues v.
 // Returning ErrQueueFull NEVER closes an Agent session.
 func (s *Session) TrySend(v any) error {
-	if s.closed.Load() {
+	if s.closed.Load() || s.outCh == nil {
 		return ErrSessionClosed
 	}
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
+	if s.ctx != nil {
+		select {
+		case <-s.ctx.Done():
+			return ErrSessionClosed
+		case s.outCh <- raw:
+			return nil
+		default:
+			return ErrQueueFull
+		}
+	}
 	select {
-	case <-s.ctx.Done():
-		return ErrSessionClosed
 	case s.outCh <- raw:
 		return nil
 	default:
@@ -140,6 +159,7 @@ func truncateUTF8Bytes(s string, maxBytes int) string {
 // Close closes the WebSocket with a clean status code and stops the writer loop.
 func (s *Session) Close(status websocket.StatusCode, reason string) {
 	s.closeOnce.Do(func() {
+		s.evicted.Store(true)
 		s.closed.Store(true)
 		if s.cancel != nil {
 			s.cancel()
@@ -153,6 +173,7 @@ func (s *Session) Close(status websocket.StatusCode, reason string) {
 
 // CloseNow immediately aborts the underlying WebSocket connection without waiting on peer close handshake.
 func (s *Session) CloseNow() {
+	s.evicted.Store(true)
 	s.closed.Store(true)
 	if s.cancel != nil {
 		s.cancel()
@@ -165,6 +186,7 @@ func (s *Session) CloseNow() {
 // SendErrorAndClose best-effort transmits an ErrorDTO before closing the connection
 // synchronously (use SendErrorAndCloseAsync from shared loops like reaperLoop).
 func (s *Session) SendErrorAndClose(code, msg string, wsStatus websocket.StatusCode) {
+	s.evicted.Store(true)
 	s.errSendOnce.Do(func() {
 		if !s.closed.Load() && s.conn != nil {
 			if raw, err := json.Marshal(ErrorDTO{
@@ -189,6 +211,7 @@ func (s *Session) SendErrorAndClose(code, msg string, wsStatus websocket.StatusC
 // SendErrorAndCloseAsync performs SendErrorAndClose without blocking callers such as
 // RegisterAgent or reaperLoop (prevents 64 slow-read sockets from stalling the broker reaper).
 func (s *Session) SendErrorAndCloseAsync(code, msg string, wsStatus websocket.StatusCode) {
+	s.evicted.Store(true)
 	go s.SendErrorAndClose(code, msg, wsStatus)
 }
 
@@ -215,7 +238,7 @@ func (s *Session) AgentPKBase64() string {
 
 // RecordOffer checks the per-session offer rate cap (6/60s), marks hasSentOffer=true,
 // and starts the half-open SDP timer WITHOUT resetting candidateCount.
-func (s *Session) RecordOffer(now time.Time) (allowed bool, prevHasSentOffer bool) {
+func (s *Session) RecordOffer(now time.Time) (allowed bool, prevHasSentOffer bool, prevOfferPendingAt time.Time) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 
@@ -228,24 +251,31 @@ func (s *Session) RecordOffer(now time.Time) (allowed bool, prevHasSentOffer boo
 	}
 	if len(kept) >= MaxOffersPerWindow {
 		s.offerTimestamps = kept
-		return false, s.hasSentOffer
+		return false, s.hasSentOffer, s.offerPendingAt
 	}
-	prev := s.hasSentOffer
+	prevHas := s.hasSentOffer
+	prevPend := s.offerPendingAt
 	s.offerTimestamps = append(kept, now)
 	s.hasSentOffer = true
+	if s.firstOfferAt.IsZero() {
+		s.firstOfferAt = now
+	}
 	s.lastActivity = now
 	if s.offerPendingAt.IsZero() {
 		s.offerPendingAt = now
 	}
-	return true, prev
+	return true, prevHas, prevPend
 }
 
-// RollbackOffer restores hasSentOffer when an offer could not be forwarded (PEER_OFFLINE / AGENT_BUSY),
-// preventing attackers from gaining post-offer immunity via rejected offers.
-func (s *Session) RollbackOffer(prevHasSentOffer bool) {
+// RollbackOffer restores hasSentOffer and offerPendingAt when an offer could not be forwarded
+// (PEER_OFFLINE / AGENT_BUSY), preserving any earlier unanswered Offer's 30s SDP timeout.
+func (s *Session) RollbackOffer(prevHasSentOffer bool, prevOfferPendingAt time.Time) {
 	s.stateMu.Lock()
 	s.hasSentOffer = prevHasSentOffer
-	s.offerPendingAt = time.Time{}
+	if !prevHasSentOffer {
+		s.firstOfferAt = time.Time{}
+	}
+	s.offerPendingAt = prevOfferPendingAt
 	s.stateMu.Unlock()
 }
 
@@ -278,6 +308,13 @@ func (s *Session) OfferPendingSince() time.Time {
 func (s *Session) JoinedAt() time.Time {
 	s.stateMu.Lock()
 	t := s.joinedAt
+	s.stateMu.Unlock()
+	return t
+}
+
+func (s *Session) FirstOfferAt() time.Time {
+	s.stateMu.Lock()
+	t := s.firstOfferAt
 	s.stateMu.Unlock()
 	return t
 }

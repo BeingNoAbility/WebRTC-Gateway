@@ -1,12 +1,10 @@
 /**
  * Tab-Scoped Service Worker Session Registry
- * - Pins `portalOrigin` strictly to server-injected `self.__P2P_GW_PORTAL_ORIGINS__`.
+ * - Pins `portalOrigin` strictly Fail-Closed to server-injected `self.__P2P_GW_PORTAL_ORIGINS__`.
  * - Binds fetch authorization strictly to authenticated clientId / one-time enterNonce tokens.
- * - Requires one-time 128-bit `enterNonce` (registered over `bridgePort`) for `/__p2p_gw__/enter`,
- *   validates `next` via `new URL(rawNext, reqUrl.origin)` (same-origin, non-`/__p2p_gw__/`, CTL-free),
- *   and emits strictly ASCII percent-encoded `location`.
- * - `evictDeadPort` keeps `cookieMirror` & `clientIds` intact while detaching the dead port.
- * - Exposes `ensureLivePort` for shared use by HTTP (`stream_bridge.ts`) & WebSocket (`SW_WS_OPEN`).
+ * - Actively garbage-collects closed tabs (`removeSession` / `pruneDeadSessions`) so reloading
+ *   Portal never leaks zombie sessions or bricks single-tab static `-dir` navigation.
+ * - Zero reliance on a permanently resident `bridge.html` iframe (ephemeral bootstrap model).
  */
 
 import type { BackendMeta } from '../shared/ipc';
@@ -24,22 +22,15 @@ export interface TabSession {
   attachedAt: number;
 }
 
-interface PortWaiter {
-  tabId: string;
-  resolve: (sess: TabSession) => void;
-  reject: (err: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
 interface EnterNonceEntry {
   tabId: string;
   expiresAt: number;
 }
 
-const REATTACH_TIMEOUT_MS = 4_000;
 const ENTER_NONCE_TTL_MS = 30_000;
 const MAX_ENTER_NONCES = 64;
 const CLIENT_PRUNE_INTERVAL_MS = 30_000;
+const ORPHAN_SESSION_GRACE_MS = 10_000;
 
 export function readServerInjectedPortalOrigins(): Set<string> {
   const out = new Set<string>();
@@ -108,31 +99,33 @@ export class SessionRegistry {
   private sessions = new Map<string, TabSession>();
   private clientToTab = new Map<string, string>();
   private enterNonces = new Map<string, EnterNonceEntry>();
-  private waiters: PortWaiter[] = [];
   private pingWaiters = new Map<
     string,
     { resolve: (alive: boolean) => void; timer: ReturnType<typeof setTimeout> }
   >();
   private pingSeq = 0;
   private lastClientPruneAt = 0;
+  private pruneInFlight: Promise<void> | null = null;
   private readonly allowedPortalOrigins: Set<string>;
 
   constructor(allowedPortalOrigins?: Set<string>) {
     this.allowedPortalOrigins = allowedPortalOrigins ?? readServerInjectedPortalOrigins();
   }
 
+  /**
+   * Strictly Fail-Closed portalOrigin check: empty allowlist ALWAYS rejects, and `origin`
+   * must match `new URL(origin).origin` exactly (blocks CSP `frame-ancestors` injection).
+   */
   isAllowedPortalOrigin(origin: string): boolean {
-    if (!origin) return false;
-    // When server-injected allowlist is present, enforce it strictly (Fail-Closed).
-    if (this.allowedPortalOrigins.size > 0) {
-      return this.allowedPortalOrigins.has(origin);
-    }
+    if (!origin || this.allowedPortalOrigins.size === 0) return false;
     try {
       const u = new URL(origin);
-      return u.protocol === 'http:' || u.protocol === 'https:';
+      if (u.origin !== origin) return false;
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
     } catch {
       return false;
     }
+    return this.allowedPortalOrigins.has(origin);
   }
 
   attachPort(tabId: string, portalOrigin: string, meta: BackendMeta, port: MessagePort): boolean {
@@ -198,6 +191,14 @@ export class SessionRegistry {
           clearTimeout(pw.timer);
           pw.resolve(true);
         }
+      } else if (data.type === 'PORTAL_PING' && typeof data.pingId === 'string') {
+        try {
+          port.postMessage({ type: 'PORTAL_PONG', pingId: data.pingId });
+        } catch {
+          // ignore
+        }
+      } else if (data.type === 'BRIDGE_TAB_CLOSE') {
+        this.removeSession(tabId);
       } else if (data.type === 'BRIDGE_REGISTER_ENTER_NONCE' && typeof data.nonce === 'string') {
         const nonce = data.nonce.trim();
         if (nonce.length >= 16 && nonce.length <= 128) {
@@ -213,22 +214,10 @@ export class SessionRegistry {
     port.start?.();
 
     this.sessions.set(tabId, session);
-
-    const remaining: PortWaiter[] = [];
-    for (const w of this.waiters) {
-      if (w.tabId === tabId) {
-        clearTimeout(w.timer);
-        w.resolve(session);
-      } else {
-        remaining.push(w);
-      }
-    }
-    this.waiters = remaining;
     return true;
   }
 
   registerEnterNonce(nonce: string, tabId: string, now = Date.now()): void {
-    // Prune expired nonces
     for (const [k, v] of this.enterNonces) {
       if (v.expiresAt <= now) {
         this.enterNonces.delete(k);
@@ -352,6 +341,34 @@ export class SessionRegistry {
     return this.sessions.values().next().value ?? null;
   }
 
+  removeSession(tabId: string): void {
+    const sess = this.sessions.get(tabId);
+    if (!sess) return;
+    this.sessions.delete(tabId);
+    if (sess.port) {
+      const old = sess.port;
+      sess.port = null;
+      try {
+        old.onmessage = null;
+        old.close();
+      } catch {
+        // ignore
+      }
+    }
+    for (const cid of sess.clientIds) {
+      if (this.clientToTab.get(cid) === tabId) {
+        this.clientToTab.delete(cid);
+      }
+    }
+    sess.clientIds.clear();
+    sess.wsByClient.clear();
+    for (const [nonce, entry] of this.enterNonces) {
+      if (entry.tabId === tabId) {
+        this.enterNonces.delete(nonce);
+      }
+    }
+  }
+
   registerClientWebSocket(session: TabSession, clientId: string, wsId: string): void {
     if (!clientId || !wsId) return;
     let set = session.wsByClient.get(clientId);
@@ -382,6 +399,49 @@ export class SessionRegistry {
     }
   }
 
+  /**
+   * Probes existing sessions (optionally excluding a freshly attached tabId) and deletes any
+   * whose Portal bridgePort is dead and no longer responds to `BRIDGE_PING`.
+   * Single-flight deduplicated so concurrent callers share one active sweep.
+   */
+  pruneDeadSessions(
+    swScope: ServiceWorkerGlobalScope,
+    excludeTabId = ''
+  ): Promise<void> {
+    if (this.pruneInFlight) {
+      return this.pruneInFlight;
+    }
+    const run = (async () => {
+      await this.pruneDeadClientWebSockets(swScope);
+      for (const [tabId, sess] of Array.from(this.sessions.entries())) {
+        if (tabId === excludeTabId) continue;
+        for (const cid of Array.from(sess.clientIds)) {
+          const client = await swScope.clients.get(cid).catch(() => undefined);
+          if (!client) {
+            sess.clientIds.delete(cid);
+            if (this.clientToTab.get(cid) === tabId) {
+              this.clientToTab.delete(cid);
+            }
+          }
+        }
+        if (!sess.port) {
+          this.removeSession(tabId);
+          continue;
+        }
+        const alive = await this.pingBridgePort(sess, 500);
+        if (!alive && this.sessions.get(tabId) === sess) {
+          this.removeSession(tabId);
+        }
+      }
+    })();
+    this.pruneInFlight = run.finally(() => {
+      if (this.pruneInFlight === run) {
+        this.pruneInFlight = null;
+      }
+    });
+    return this.pruneInFlight;
+  }
+
   async maybePruneClosedClients(swScope: ServiceWorkerGlobalScope): Promise<void> {
     const now = Date.now();
     if (now - this.lastClientPruneAt < CLIENT_PRUNE_INTERVAL_MS) return;
@@ -392,6 +452,19 @@ export class SessionRegistry {
       if (!client) {
         this.clientToTab.delete(cid);
         this.sessions.get(tabId)?.clientIds.delete(cid);
+      }
+    }
+    for (const [tabId, sess] of Array.from(this.sessions.entries())) {
+      if (sess.clientIds.size > 0) continue;
+      if (!sess.port) {
+        this.removeSession(tabId);
+        continue;
+      }
+      if (now - sess.attachedAt >= ORPHAN_SESSION_GRACE_MS) {
+        const alive = await this.pingBridgePort(sess, 500);
+        if (!alive && this.sessions.get(tabId) === sess) {
+          this.removeSession(tabId);
+        }
       }
     }
   }
@@ -416,91 +489,28 @@ export class SessionRegistry {
   }
 
   /**
-   * Detaches a dead MessagePort while PRESERVING `cookieMirror`, `clientIds`, and `wsByClient`
-   * so reattaching a fresh bridgePort never loses session cookies or client bindings.
+   * Detaches a dead MessagePort and removes the session when no live port can serve it.
    */
   evictDeadPort(tabId: string, deadPort: MessagePort | null): void {
     const cur = this.sessions.get(tabId);
-    if (cur && cur.port && (deadPort === null || cur.port === deadPort)) {
-      const old = cur.port;
-      cur.port = null;
-      try {
-        old.onmessage = null;
-        old.close();
-      } catch {
-        // ignore
-      }
+    if (!cur) return;
+    if (deadPort === null || cur.port === deadPort) {
+      this.removeSession(tabId);
     }
   }
 
   /**
-   * Ensures the specified tab session has a live attached `bridgePort`, requesting a fresh
-   * port from `/__p2p_gw__/bridge.html?tab=<tabId>` if detached.
+   * Checks whether `clientId` belongs to a live same-origin nested `appFrame` or worker
+   * (never `/__p2p_gw__/*`, never top-level, never cross-site). Used ONLY to decide whether
+   * to emit a `P2P_SW_EVICTED` recovery hint when the SW wakes up with `sessions.size === 0`.
    */
-  async ensureLivePort(
+  async isLiveNestedAppClient(
     swScope: ServiceWorkerGlobalScope,
-    tabId: string,
-    timeoutMs = REATTACH_TIMEOUT_MS
-  ): Promise<TabSession> {
-    const existing = this.sessions.get(tabId);
-    if (existing && existing.port) {
-      return existing;
+    clientId: string
+  ): Promise<Client | null> {
+    if (!clientId || !swScope?.clients || typeof swScope.clients.get !== 'function') {
+      return null;
     }
-
-    try {
-      const clients = await swScope.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      for (const c of clients) {
-        let u: URL;
-        try {
-          u = new URL(c.url);
-        } catch {
-          continue;
-        }
-        if (u.pathname !== '/__p2p_gw__/bridge.html') continue;
-        const cTab = u.searchParams.get('tab') || '';
-        if (cTab && cTab !== tabId) continue;
-        c.postMessage({ type: 'SW_NEED_PORT', tabId });
-      }
-    } catch {
-      // ignore
-    }
-
-    // Re-check after awaiting `matchAll` / `postMessage` in case the port attached concurrently or synchronously.
-    const ready = this.sessions.get(tabId);
-    if (ready && ready.port) {
-      return ready;
-    }
-
-    return new Promise<TabSession>((resolve, reject) => {
-      const waiter: PortWaiter = {
-        tabId,
-        resolve,
-        reject,
-        timer: setTimeout(() => {
-          const idx = this.waiters.indexOf(waiter);
-          if (idx >= 0) this.waiters.splice(idx, 1);
-          reject(new Error('Service Worker bridge port unavailable (timeout waiting for Portal reattach)'));
-        }, timeoutMs),
-      };
-      this.waiters.push(waiter);
-    });
-  }
-
-  /**
-   * Recovers from Service Worker idle termination (when in-memory `sessions` is empty):
-   * ONLY runs when `clientId` resolves via `swScope.clients.get(clientId)` to a live same-origin
-   * nested `appFrame` window or worker (never `/__p2p_gw__/*`, never top-level, never cross-site!).
-   * Wakes live `/__p2p_gw__/bridge.html?tab=...` windows and re-binds ONLY when unambiguous (`1` tab).
-   */
-  async recoverColdStartClient(
-    swScope: ServiceWorkerGlobalScope,
-    clientId: string,
-    resultingClientId: string,
-    timeoutMs = REATTACH_TIMEOUT_MS
-  ): Promise<TabSession | null> {
-    if (this.sessions.size > 0 || !clientId) return null;
-    if (!swScope?.clients || typeof swScope.clients.get !== 'function') return null;
-
     let caller: Client | undefined;
     try {
       caller = await swScope.clients.get(clientId);
@@ -508,7 +518,6 @@ export class SessionRegistry {
       return null;
     }
     if (!caller || typeof caller.url !== 'string') return null;
-
     try {
       const cu = new URL(caller.url);
       if (cu.origin !== swScope.location.origin) return null;
@@ -516,53 +525,12 @@ export class SessionRegistry {
     } catch {
       return null;
     }
-
     if (caller.type === 'window') {
-      const frameType = (caller as WindowClient).frameType;
-      if (frameType !== 'nested') return null;
-    } else if (caller.type !== 'worker' && caller.type !== 'sharedworker') {
-      return null;
+      return (caller as WindowClient).frameType === 'nested' ? caller : null;
     }
-
-    let allWindows: readonly WindowClient[];
-    try {
-      allWindows = (await swScope.clients.matchAll({
-        type: 'window',
-        includeUncontrolled: true,
-      })) as readonly WindowClient[];
-    } catch {
-      return null;
+    if (caller.type === 'worker' || caller.type === 'sharedworker') {
+      return caller;
     }
-
-    const bridgeTabs: string[] = [];
-    for (const w of allWindows) {
-      let wu: URL;
-      try {
-        wu = new URL(w.url);
-      } catch {
-        continue;
-      }
-      if (wu.origin !== swScope.location.origin || wu.pathname !== '/__p2p_gw__/bridge.html') {
-        continue;
-      }
-      const tab = (wu.searchParams.get('tab') || '').trim();
-      if (tab && !bridgeTabs.includes(tab)) {
-        bridgeTabs.push(tab);
-      }
-    }
-
-    // Only unambiguous single-tab sandbox can safely re-bind a cold-restarted client!
-    if (bridgeTabs.length !== 1) return null;
-    const onlyTabId = bridgeTabs[0];
-
-    try {
-      const sess = await this.ensureLivePort(swScope, onlyTabId, timeoutMs);
-      if (this.sessions.size !== 1) return null;
-      this.bindClient(clientId, sess.tabId);
-      if (resultingClientId) this.bindClient(resultingClientId, sess.tabId);
-      return sess;
-    } catch {
-      return null;
-    }
+    return null;
   }
 }

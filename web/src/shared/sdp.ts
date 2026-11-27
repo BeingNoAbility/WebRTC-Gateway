@@ -22,6 +22,8 @@ const FP_HEX_RE = /^[0-9a-f]{64}$/;
 const ICE_UFRAG_RE = /^[A-Za-z0-9+/]{4,256}$/;
 const ICE_PWD_RE = /^[A-Za-z0-9+/]{22,256}$/;
 const MID_RE = /^[A-Za-z0-9_-]{1,16}$/;
+const STRICT_UINT_RE = /^\d+$/;
+const MAX_SAFE_SDP_VER = 2 ** 50;
 
 export function validateSessionDescriptor(desc: unknown, isOffer: boolean): desc is SessionDescriptor {
   if (!desc || typeof desc !== 'object') return false;
@@ -50,7 +52,7 @@ export function validateSessionDescriptor(desc: unknown, isOffer: boolean): desc
     typeof d.sdp_ver !== 'number' ||
     !Number.isInteger(d.sdp_ver) ||
     d.sdp_ver < 2 ||
-    d.sdp_ver > Number.MAX_SAFE_INTEGER
+    d.sdp_ver > MAX_SAFE_SDP_VER
   ) {
     return false;
   }
@@ -150,14 +152,16 @@ export function extractSessionDescriptor(rawSdp: string, sdpVer = 2): SessionDes
         if (inMedia) mid = val;
         break;
       case 'sctp-port': {
-        const n = Number.parseInt(val, 10);
-        if (!Number.isInteger(n)) throw new Error(`Invalid sctp-port: ${val}`);
+        if (!STRICT_UINT_RE.test(val)) throw new Error(`Invalid sctp-port: ${val}`);
+        const n = Number(val);
+        if (!Number.isSafeInteger(n)) throw new Error(`Invalid sctp-port: ${val}`);
         sctpPort = n;
         break;
       }
       case 'max-message-size': {
-        const n = Number.parseInt(val, 10);
-        if (!Number.isInteger(n)) throw new Error(`Invalid max-message-size: ${val}`);
+        if (!STRICT_UINT_RE.test(val)) throw new Error(`Invalid max-message-size: ${val}`);
+        const n = Number(val);
+        if (!Number.isSafeInteger(n)) throw new Error(`Invalid max-message-size: ${val}`);
         maxMsgSize = n;
         break;
       }
@@ -172,7 +176,16 @@ export function extractSessionDescriptor(rawSdp: string, sdpVer = 2): SessionDes
   }
   const fp = mediaFP || sessFP;
   if (!mid) mid = '0';
-  const clampedMMS = Math.min(1073741824, Math.max(MIN_NEGOTIATED_MAX_MSG_SIZE, maxMsgSize));
+  // RFC 8841 §6.6: max-message-size:0 denotes unlimited -> normalize to 262144;
+  // positive values below MIN_NEGOTIATED_MAX_MSG_SIZE (4096) fail closed.
+  let normalizedMMS: number;
+  if (maxMsgSize === 0) {
+    normalizedMMS = 262144;
+  } else if (maxMsgSize < MIN_NEGOTIATED_MAX_MSG_SIZE) {
+    throw new Error(`max-message-size ${maxMsgSize} below minimum ${MIN_NEGOTIATED_MAX_MSG_SIZE}`);
+  } else {
+    normalizedMMS = Math.min(1073741824, maxMsgSize);
+  }
   const ver = Math.max(2, Math.floor(sdpVer));
 
   const desc: SessionDescriptor = {
@@ -182,7 +195,7 @@ export function extractSessionDescriptor(rawSdp: string, sdpVer = 2): SessionDes
     setup: setup as SessionDescriptor['setup'],
     mid,
     sctp_port: sctpPort,
-    max_msg_size: clampedMMS,
+    max_msg_size: normalizedMMS,
     sdp_ver: ver,
   };
   if (!validateSessionDescriptor(desc, setup === 'actpass')) {
@@ -291,8 +304,15 @@ export async function verifyPeerDtlsCertificate(
   expectedFpHex: string
 ): Promise<boolean> {
   const dtlsTransport = pc.sctp?.transport;
+  const rtcDtlsCtor = (globalThis as { RTCDtlsTransport?: { prototype?: { getRemoteCertificates?: unknown } } })
+    .RTCDtlsTransport;
+  const runtimeSupportsDtlsCerts =
+    typeof rtcDtlsCtor !== 'undefined' &&
+    typeof rtcDtlsCtor.prototype?.getRemoteCertificates === 'function';
   if (!dtlsTransport || typeof dtlsTransport.getRemoteCertificates !== 'function') {
-    return true;
+    // Fail-Closed when browser exposes RTCDtlsTransport.getRemoteCertificates (Chromium/Firefox)
+    // but pc.sctp or transport is missing; degrade gracefully only on engines lacking the API (e.g. Safari).
+    return !runtimeSupportsDtlsCerts;
   }
   const certs = dtlsTransport.getRemoteCertificates();
   if (!certs || certs.length === 0) {

@@ -199,7 +199,7 @@ http://127.0.0.1:18082 {
 
 ### 4.1 Forcing HTTPS Proxy Semantics (`X-Forwarded-Proto`)
 
-When `Agent -target` points to plaintext `http://127.0.0.1:...`, Agent sends `X-Forwarded-Proto: http` matching the target scheme. If an upstream app expects visitor-facing HTTPS semantics (common in self-hosted drives, home automation hubs, and web frameworks), override forwarding headers in the loopback reverse proxy and add `127.0.0.1` to the application's trusted-proxy configuration:
+When `Agent -target` points to plaintext `http://127.0.0.1:...`, Agent sends `X-Forwarded-Proto: http` matching the target scheme. If an upstream app expects visitor-facing HTTPS semantics (common in self-hosted drives, home automation hubs, and web frameworks), override forwarding headers in the loopback reverse proxy and add `127.0.0.1` to the application's trusted-proxy configuration. Agent's `ProxyCookieJar` honors W3C potentially trustworthy loopback origins (`127.0.0.0/8`, `::1`, `localhost`, `*.localhost`), so `Secure`, `__Host-`, and `__Secure-` login cookies issued under this pattern are stored and replayed normally:
 
 ```nginx
 # /etc/nginx/conf.d/p2p-https-proto.conf

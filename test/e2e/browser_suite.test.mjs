@@ -119,6 +119,7 @@ function startMockAppBackend() {
           'Content-Type': 'text/html; charset=utf-8',
           'Set-Cookie': [
             'secret_session=httponly-v7-val; Path=/; HttpOnly; SameSite=Strict',
+            'lax_session=httponly-lax-val; Path=/; HttpOnly; SameSite=Lax',
             'theme=dark; Path=/',
           ],
         });
@@ -556,7 +557,15 @@ test('V7 Suite 1: Embedded DistFS & 3-Tier Sandbox Deployment (Local / Tier 1 Fi
     const sbxSw = await fetch(`http://sbx-check.localhost:${localPort}/__p2p_gw__/sw.js`);
     assert.equal(sbxSw.status, 200, 'Sandbox origin must serve embedded sw.js');
     assert.equal(sbxSw.headers.get('service-worker-allowed'), '/');
-    await sbxSw.body?.cancel();
+    const swBody = await sbxSw.text();
+    const patchMatch = swBody.match(/\/__p2p_gw__\/assets\/patch\.[0-9a-f]{10}\.js/);
+    assert.ok(patchMatch, 'Embedded sw.js preamble must reference /__p2p_gw__/assets/patch.<hash>.js');
+    const patchAsSw = await fetch(`http://sbx-check.localhost:${localPort}${patchMatch[0]}`, {
+      headers: { 'Sec-Fetch-Dest': 'serviceworker' },
+    });
+    assert.equal(patchAsSw.status, 403, 'P0-1 defense-in-depth: assets/patch.<hash>.js must reject Sec-Fetch-Dest: serviceworker');
+    assert.ok((patchAsSw.headers.get('vary') || '').toLowerCase().includes('sec-fetch-dest'));
+    await patchAsSw.body?.cancel();
 
     // Start 3 agents (local ws://, Tier 1 wss:// via CONNECT proxy -> portal.example.com, Tier 3 wss://)
     localAgent = spawnLoggedProcess(agentBin, [
@@ -974,11 +983,17 @@ test('V7 Suite 4: Adversarial CSRF Matrix, Worker/Back/Reload, top.location Bloc
       's4 app READY'
     );
 
-    // 4A. Positive Legitimate Flows inside appFrame:
+    // 4A. Positive Legitimate Flows inside appFrame + P0-1 structural proof (zero resident bridgeFrame):
+    //     - Zero temporal overlap: Portal DOM contains ONLY appFrame (window.parent.length === 1, no bridge.html sibling!)
     //     - Same-origin Web Worker fetch('/whoami')
     //     - Navigation /page2 -> history.back() -> location.reload()
     //     - top.location block via iframe sandbox attribute
     //     - PWA navigator.serviceWorker self-destruct defense
+    const portalIframeCount = await tab.eval(`document.querySelectorAll('iframe').length`);
+    assert.equal(portalIframeCount, 1, 'P0-1: Portal MUST destroy ephemeral bridgeFrame before mounting appFrame');
+    const appParentFramesLen = await tab.evalInChildFrame(isDemoFrame, `window.parent.length`);
+    assert.equal(appParentFramesLen, 1, 'P0-1: appFrame must see zero sibling bridgeFrame in window.parent');
+
     const workerRes = await tab.evalInChildFrame(isDemoFrame, `new Promise((resolve, reject) => {
       const w = new Worker('/worker.js');
       const t = setTimeout(() => reject(new Error('worker timeout')), 10000);
@@ -1089,15 +1104,7 @@ test('V7 Suite 4: Adversarial CSRF Matrix, Worker/Back/Reload, top.location Bloc
     const swProbeTab = await openPageTab(chrome.client, `${portalOrigin}/`);
     await waitFor(() => swProbeTab.eval(`document.readyState === 'complete'`), 5_000, 'swProbeTab ready');
 
-    // 2a. Unbound subresource fetch from unbound `bridge.html` inside the exact SW partition -> SW MUST return exact 403!
-    const bridgeFetchStatus = await tab.evalInChildFrame(
-      (u) => u.startsWith(sandboxOrigin) && u.includes('/__p2p_gw__/bridge.html'),
-      `fetch('/whoami?atk=sw-fetch').then(r => r.status)`
-    );
-    assert.equal(bridgeFetchStatus, 403, 'SW Anti-CSRF Gate must return exact 403 for unbound subresource fetch');
-    assert.equal(backend.whoamiRequests.some((r) => r.url.includes('atk=sw-fetch')), false);
-
-    // 2b. Unbound navigate <form method="POST"> from a disposable unbound iframe in the same SW partition -> SW MUST return exact 403!
+    // Mount a disposable unbound bridge.html iframe in swProbeTab (same SW partition) for 2a & 2b probes:
     await swProbeTab.eval(`(() => {
       const f = document.createElement('iframe');
       f.src = ${JSON.stringify(`${sandboxOrigin}/__p2p_gw__/bridge.html?tab=disposable-post`)};
@@ -1109,24 +1116,40 @@ test('V7 Suite 4: Adversarial CSRF Matrix, Worker/Back/Reload, top.location Bloc
       8_000,
       'disposable bridge iframe ready'
     );
-    swProbeTab.clearCapturedResponses();
-    await swProbeTab.evalInChildFrame(isDisposableBridge, `(() => {
+
+    // 2a. Unbound subresource fetch from unbound `bridge.html` inside the exact SW partition -> SW MUST return exact 403!
+    const bridgeFetchStatus = await swProbeTab.evalInChildFrame(
+      isDisposableBridge,
+      `fetch('/whoami?atk=sw-fetch').then(r => r.status)`
+    );
+    assert.equal(bridgeFetchStatus, 403, 'SW Anti-CSRF Gate must return exact 403 for unbound subresource fetch');
+    assert.equal(backend.whoamiRequests.some((r) => r.url.includes('atk=sw-fetch')), false);
+
+    // 2b. Unbound POST from a disposable unbound bridge.html in the same SW partition:
+    //     - <form method="POST"> is blocked upfront by bridge.html CSP `form-action 'none'`
+    //     - Direct POST fetch hits SW Anti-CSRF Gate and MUST return exact 403!
+    const bridgeCspViolated = await swProbeTab.evalInChildFrame(isDisposableBridge, `new Promise((resolve) => {
+      const onCsp = (ev) => {
+        if (ev.violatedDirective === 'form-action') resolve(true);
+      };
+      document.addEventListener('securitypolicyviolation', onCsp, { once: true });
       const form = document.createElement('form');
       form.method = 'POST';
       form.action = '/echo-post?atk=sw-formpost';
       document.body.appendChild(form);
       form.submit();
-    })()`);
-    const swFormResp = await waitFor(
-      () => swProbeTab.getCapturedResponses().find((r) => r.url.includes('atk=sw-formpost')),
-      8_000,
-      'SW unbound form POST 403'
+      setTimeout(() => resolve(false), 1500);
+    })`);
+    assert.equal(bridgeCspViolated, true, "bridge.html CSP must enforce form-action 'none'");
+    const swPostStatus = await swProbeTab.evalInChildFrame(
+      isDisposableBridge,
+      `fetch('/echo-post?atk=sw-formpost', { method: 'POST', body: 'x' }).then(r => r.status)`
     );
-    assert.equal(swFormResp.status, 403, 'SW Anti-CSRF Gate must return exact 403 for unbound form POST');
+    assert.equal(swPostStatus, 403, 'SW Anti-CSRF Gate must return exact 403 for unbound POST');
     assert.equal(backend.postEchoRequests.length, 0);
 
-    // 2c. Unbound <iframe referrerpolicy="no-referrer"> while sessions.size === 1:
-    //     MUST NOT leak SameSite=Strict `secret_session` AND response MUST carry CSP `frame-ancestors`!
+    // 2c. P0-2 Fail-Closed Anti-CSRF: Unbound <iframe referrerpolicy="no-referrer"> in `-target` proxy mode
+    //     MUST return immediate exact 403 even when sessions.size === 1 (zero backend hit, zero SameSite=Lax/Strict leak)!
     swProbeTab.clearCapturedResponses();
     await swProbeTab.eval(`(() => {
       const f = document.createElement('iframe');
@@ -1137,18 +1160,17 @@ test('V7 Suite 4: Adversarial CSRF Matrix, Worker/Back/Reload, top.location Bloc
     const singleIframeResp = await waitFor(
       () => swProbeTab.getCapturedResponses().find((r) => r.url === `${sandboxOrigin}/whoami?atk=iframe-single`),
       8_000,
-      'SW single-tab no-referrer iframe response'
+      'SW single-tab no-referrer iframe 403'
     );
-    assert.match(
-      singleIframeResp.headers['content-security-policy'] || '',
-      new RegExp(`frame-ancestors 'self' ${portalOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
-      'iframe response MUST include CSP frame-ancestors pinning Portal'
+    assert.equal(
+      singleIframeResp.status,
+      403,
+      'P0-2: unbound empty-referrer iframe in -target proxy mode MUST be rejected with 403'
     );
-    const singleHit = backend.whoamiRequests.find((r) => r.url.includes('atk=iframe-single'));
-    assert.ok(singleHit, 'single-tab empty-referrer iframe should reach backend without SameSite=Strict');
-    assert.ok(
-      !singleHit.cookie.includes('secret_session='),
-      `SameSite=Strict cookie MUST NOT leak on empty-referrer iframe: ${singleHit.cookie}`
+    assert.equal(
+      backend.whoamiRequests.some((r) => r.url.includes('atk=iframe-single')),
+      false,
+      'P0-2: unbound empty-referrer iframe MUST NEVER reach backend or send SameSite=Lax cookies'
     );
 
     // 2d. Open 2nd Portal tab (sessions.size === 2 on Tier 1 fixed origin!) ->
@@ -1261,8 +1283,12 @@ test('V7 Suite 5: Capability Live Revocation, Restart Persistence, StaticFS Hard
   fs.symlinkSync('hop2', path.join(staticDir, 'hop1'));
   fs.writeFileSync(path.join(staticDir, 'payload'), '<!doctype html><html><body><script>alert(1)</script></body></html>');
   fs.writeFileSync(
+    path.join(staticDir, 'sub.html'),
+    '<!doctype html><html><body><h1 id="sub-h1">SUB-OK</h1></body></html>'
+  );
+  fs.writeFileSync(
     path.join(staticDir, 'index.html'),
-    '<!doctype html><html><body><h1 id="static-h1">STATIC-OK</h1><script>window.__INLINE_RAN__=true;</script></body></html>'
+    '<!doctype html><html><body><h1 id="static-h1">STATIC-OK</h1><a id="sub-link" href="/sub.html">sub</a><script>window.__INLINE_RAN__=true;</script></body></html>'
   );
 
   const signalProc = spawnLoggedProcess(signalBin, [
@@ -1483,6 +1509,29 @@ test('V7 Suite 5: Capability Live Revocation, Restart Persistence, StaticFS Hard
     const payloadResp = await navStatic('/payload');
     assert.equal(payloadResp.status, 200);
     assert.match(payloadResp.headers['content-security-policy'] || '', /\bsandbox\b/i);
+
+    // P1-25: Reloading Portal on `-dir` MUST prune the previous dead session so opaque-origin
+    // link navigation (`<a href="/sub.html">`) continues returning 200 (never 403)!
+    await staticTab.reload();
+    await waitFor(
+      () => staticTab.evalInChildFrame(isStaticApp, `document.getElementById('static-h1')?.textContent === 'STATIC-OK'`),
+      20_000,
+      'staticnode index.html after Portal reload'
+    );
+    staticTab.clearCapturedResponses();
+    await staticTab.evalInChildFrame(isStaticApp, `document.getElementById('sub-link').click()`);
+    const subResp = await waitFor(
+      () => staticTab.getCapturedResponses().find((r) => r.url === `${staticOrigin}/sub.html`),
+      10_000,
+      'staticnode /sub.html after reload'
+    );
+    assert.equal(subResp.status, 200, 'P1-25: -dir link navigation after Portal reload must return 200');
+    const subH1 = await waitFor(
+      () => staticTab.evalInChildFrame((u) => u === `${staticOrigin}/sub.html`, `document.getElementById('sub-h1')?.textContent || ''`),
+      10_000,
+      'staticnode /sub.html DOM'
+    );
+    assert.equal(subH1, 'SUB-OK', 'P1-25: -dir linked page must render cleanly after Portal reload');
 
     assert.deepEqual(staticTab.getGatewayErrors(), []);
     assert.deepEqual(staticTab.getExceptions(), []);

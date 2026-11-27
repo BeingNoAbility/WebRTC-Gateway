@@ -224,16 +224,27 @@ async function waitHealthz(port, hostHeader) {
 test('Go Signal V7 Conformance: HTTP air-gap, double-decode block, exact bridge CSP, WS register-v2, Answer.PK bind & bound-keys persistence', async (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p2p-sig-v7-conf-'));
   const staticDir = path.join(tmpDir, 'dist');
-  fs.mkdirSync(path.join(staticDir, '__p2p_gw__'), { recursive: true });
+  fs.mkdirSync(path.join(staticDir, '__p2p_gw__', 'assets'), { recursive: true });
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<!doctype html><html><head></head><body>ok</body></html>');
   fs.writeFileSync(path.join(staticDir, '__p2p_gw__', 'portal.js'), 'console.log(1);');
   fs.writeFileSync(path.join(staticDir, '__p2p_gw__', 'portal.css'), 'body{}');
   fs.writeFileSync(path.join(staticDir, '__p2p_gw__', 'sw.js'), 'console.log("sw");');
   fs.writeFileSync(
     path.join(staticDir, '__p2p_gw__', 'bridge.html'),
-    '<!doctype html><html><head></head><body><script src="/__p2p_gw__/bridge.js"></script></body></html>'
+    '<!doctype html><html><head></head><body><script src="/__p2p_gw__/assets/bridge.js"></script></body></html>'
   );
-  fs.writeFileSync(path.join(staticDir, '__p2p_gw__', 'bridge.js'), 'console.log("br");');
+  fs.writeFileSync(path.join(staticDir, '__p2p_gw__', 'assets', 'bridge.js'), 'console.log("br");');
+  fs.writeFileSync(path.join(staticDir, '__p2p_gw__', 'assets', 'patch.js'), 'console.log("pt");');
+  fs.writeFileSync(
+    path.join(staticDir, '__p2p_gw__', 'manifest.json'),
+    JSON.stringify({
+      portal_js: '/__p2p_gw__/portal.js',
+      portal_css: '/__p2p_gw__/portal.css',
+      bridge_js: '/__p2p_gw__/assets/bridge.js',
+      patch_js: '/__p2p_gw__/assets/patch.js',
+      sw_js: '/__p2p_gw__/sw.js',
+    })
+  );
 
   const boundKeysFile = path.join(tmpDir, 'bound-keys.json');
   const nodeSecretsFile = path.join(tmpDir, 'node-secrets.json');
@@ -263,9 +274,20 @@ test('Go Signal V7 Conformance: HTTP air-gap, double-decode block, exact bridge 
       }
     );
 
+  const stopProc = async (p) => {
+    if (!p || p.exitCode !== null) return;
+    const exited = new Promise((resolve) => p.once('exit', resolve));
+    p.kill('SIGTERM');
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 2000))]);
+    if (p.exitCode === null) {
+      p.kill('SIGKILL');
+      await new Promise((resolve) => p.once('exit', resolve));
+    }
+  };
+
   let proc = spawnSignal();
-  t.after(() => {
-    proc?.kill('SIGTERM');
+  t.after(async () => {
+    await stopProc(proc);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -300,6 +322,43 @@ test('Go Signal V7 Conformance: HTTP air-gap, double-decode block, exact bridge 
   assert.ok(brCsp.includes(`frame-ancestors http://${portalHost}`));
   assert.ok(!brCsp.includes('*.portal.example.com'), `bridge CSP must not wildcard Portal: ${brCsp}`);
   assert.ok(br.body.includes('name="p2p-portal-origins"'), 'bridge.html must receive p2p-portal-origins meta');
+
+  const swResp = await rawHttpRequest({
+    port,
+    hostHeader: sandboxHost,
+    rawPath: '/__p2p_gw__/sw.js',
+    extraHeaders: { 'Sec-Fetch-Dest': 'serviceworker', 'Service-Worker': 'script' },
+  });
+  assert.equal(swResp.status, 200);
+  assert.ok((swResp.headers['vary'] || '').toLowerCase().includes('x-forwarded-proto'));
+  assert.equal(swResp.headers['service-worker-allowed'], '/');
+
+  // 3b. Sandbox /__p2p_gw__/assets/* serves normal script requests with Vary, and blocks ServiceWorker registration!
+  const patchOk = await rawHttpRequest({
+    port,
+    hostHeader: sandboxHost,
+    rawPath: '/__p2p_gw__/assets/patch.js',
+    extraHeaders: { 'Sec-Fetch-Dest': 'script' },
+  });
+  assert.equal(patchOk.status, 200);
+  assert.ok((patchOk.headers['vary'] || '').toLowerCase().includes('service-worker'));
+  assert.ok((patchOk.headers['vary'] || '').toLowerCase().includes('sec-fetch-dest'));
+
+  const patchAsSw = await rawHttpRequest({
+    port,
+    hostHeader: sandboxHost,
+    rawPath: '/__p2p_gw__/assets/patch.js',
+    extraHeaders: { 'Sec-Fetch-Dest': 'serviceworker' },
+  });
+  assert.equal(patchAsSw.status, 403, 'assets/patch.js must reject Sec-Fetch-Dest: serviceworker');
+
+  const bridgeAsSw = await rawHttpRequest({
+    port,
+    hostHeader: sandboxHost,
+    rawPath: '/__p2p_gw__/assets/bridge.js',
+    extraHeaders: { 'Service-Worker': 'script' },
+  });
+  assert.equal(bridgeAsSw.status, 403, 'assets/bridge.js must reject Service-Worker: script');
 
   // 4. Per-node secret enforcement: global fallback rejected for 'nas', per-node secret accepted!
   const wrongSecret = await connectRawWS({
@@ -412,8 +471,16 @@ test('Go Signal LocalDev Conformance: rejects *.localhost WebSocket CSWSH Origin
 
   const port = await getFreePort();
   const proc = spawn(binPath, ['-addr', `127.0.0.1:${port}`, '-allow-anonymous-agents'], { stdio: 'pipe' });
-  t.after(() => {
-    proc.kill('SIGTERM');
+  t.after(async () => {
+    if (proc.exitCode === null) {
+      const exited = new Promise((resolve) => proc.once('exit', resolve));
+      proc.kill('SIGTERM');
+      await Promise.race([exited, new Promise((r) => setTimeout(r, 2000))]);
+      if (proc.exitCode === null) {
+        proc.kill('SIGKILL');
+        await new Promise((resolve) => proc.once('exit', resolve));
+      }
+    }
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
   await waitHealthz(port, `localhost:${port}`);

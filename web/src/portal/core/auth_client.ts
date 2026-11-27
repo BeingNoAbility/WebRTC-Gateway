@@ -8,7 +8,7 @@
  * - Strictly validates paginated `CAP_RESP` payloads at runtime.
  */
 
-import { FrameType, HEADER_SIZE, type Frame } from '../../protocol/frame';
+import { FrameType, HEADER_SIZE, MIN_CHUNK_SIZE, type Frame } from '../../protocol/frame';
 import type { PoolMux } from '../../protocol/mux';
 import { base64UrlDecode, base64UrlEncode, randomBase64Url } from '../../shared/crypto';
 import { commitTofuKey, type KeyVerifyResult } from '../../shared/identity';
@@ -216,7 +216,11 @@ export class AuthClient {
 
     switch (frame.type) {
       case FrameType.SETTINGS: {
-        if (typeof parsed.max_frame_payload === 'number' && parsed.max_frame_payload > 0) {
+        if (
+          typeof parsed.max_frame_payload === 'number' &&
+          Number.isInteger(parsed.max_frame_payload) &&
+          parsed.max_frame_payload >= MIN_CHUNK_SIZE
+        ) {
           ctx.mux.setMaxMessageSize(parsed.max_frame_payload + HEADER_SIZE);
         }
         break;
@@ -308,13 +312,15 @@ export class AuthClient {
         }
 
         // Commit TOFU key ONLY AFTER Ed25519 signature + DTLS cert + strict channel auth succeed!
+        // Fail-Closed if IndexedDB commit fails or detects a concurrent conflicting key.
         if (!this.pinnedPkHash && ctx.verifiedPkHash) {
           try {
             await commitTofuKey(this.portalOrigin, this.nodeId, ctx.verifiedPkHash);
           } catch (err) {
-            this.callbacks.onLog(
-              `[Security] Warning: failed to persist TOFU key: ${err instanceof Error ? err.message : String(err)}`
+            this.failSecurity(
+              `Failed to commit TOFU identity key: ${err instanceof Error ? err.message : String(err)}`
             );
+            return;
           }
         }
         if (gen !== this.channelGen || this.channelCtx !== ctx) return;
@@ -447,37 +453,44 @@ export class AuthClient {
       resp.cookie_resume_token = this.cookieResumeToken;
     }
 
-    if (method === 'cap') {
-      resp.cap_token = this.capToken;
-    } else if (method === 'spake2p') {
-      if (!this.spakeCreds || this.spakeCredsAgentPk !== ctx.agentPkB64 || !this.currentShareVB64) {
-        return;
+    try {
+      if (method === 'cap') {
+        resp.cap_token = this.capToken;
+      } else if (method === 'spake2p') {
+        if (!this.spakeCreds || this.spakeCredsAgentPk !== ctx.agentPkB64 || !this.currentShareVB64) {
+          return;
+        }
+        const spakeCtx = buildSPAKE2PContext(
+          this.nodeId,
+          ctx.offerDesc.fp,
+          ctx.answerDesc.fp,
+          ctx.agentPkB64,
+          ctx.visitorNonce,
+          this.currentAgentNonce
+        );
+        const res = await spake2pProverCompute(
+          this.spakeCreds,
+          spakeCtx,
+          base64UrlDecode(this.currentShareVB64)
+        );
+        if (gen !== this.channelGen || this.channelCtx !== ctx || this.state !== 'WAIT_CHALLENGE') {
+          return;
+        }
+        this.expectedConfirmV = res.expectedConfirmV;
+        resp.share_p = base64UrlEncode(res.shareP);
+        resp.confirm_p = base64UrlEncode(res.confirmP);
       }
-      const spakeCtx = buildSPAKE2PContext(
-        this.nodeId,
-        ctx.offerDesc.fp,
-        ctx.answerDesc.fp,
-        ctx.agentPkB64,
-        ctx.visitorNonce,
-        this.currentAgentNonce
-      );
-      const res = await spake2pProverCompute(
-        this.spakeCreds,
-        spakeCtx,
-        base64UrlDecode(this.currentShareVB64)
-      );
-      if (gen !== this.channelGen || this.channelCtx !== ctx || this.state !== 'WAIT_CHALLENGE') {
-        return;
-      }
-      this.expectedConfirmV = res.expectedConfirmV;
-      resp.share_p = base64UrlEncode(res.shareP);
-      resp.confirm_p = base64UrlEncode(res.confirmP);
-    }
 
-    // Transition WAIT_CHALLENGE -> WAIT_RESULT strictly BEFORE sending wire frame.
-    this.sentMethod = method;
-    this.state = 'WAIT_RESULT';
-    ctx.mux.sendControlFrame(FrameType.AUTH_RESPONSE, textEncoder.encode(JSON.stringify(resp)));
+      // Transition WAIT_CHALLENGE -> WAIT_RESULT strictly BEFORE sending wire frame.
+      this.sentMethod = method;
+      this.state = 'WAIT_RESULT';
+      ctx.mux.sendControlFrame(FrameType.AUTH_RESPONSE, textEncoder.encode(JSON.stringify(resp)));
+    } catch (err) {
+      if (gen !== this.channelGen || this.channelCtx !== ctx) return;
+      this.failSecurity(
+        `Failed to construct auth response: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   }
 
   private failSecurity(reason: string): void {

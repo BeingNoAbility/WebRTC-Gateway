@@ -71,7 +71,7 @@ $$\text{Gen}_{\text{next}} = (\text{Gen}_{\text{prev}} + 1) \bmod 2^{32}, \quad 
 - **Gen（4 字节）**：控制通道固定为 `0`；HTTP 池通道为该槽位严格递增的非零代际号（`>= 1`）；专用 `"p2pws"` 通道固定为 `1`。
 - **Type（1 字节）**：帧类型码；未知类型或错放通道立即拒绝。
 - **Flags（1 字节）**：仅定义 `FlagFin = 0x01`、`FlagMsgFin = 0x02`（用于 `WS_TEXT`/`WS_BINARY`/`WS_CONT` 标记完整消息结束）与 `FlagMoreHeaders = 0x04`，其余保留位必须为 `0`。
-- **Payload Length（2 字节）**：上限 `MaxPayloadSize = 65535` 字节（`uint16` 最大值）；默认分块为 `DefaultChunkSize = 32760` 字节，并随 SCTP `maxMessageSize` 仅允许单调向下收窄（下限 `MinMaxMessageSize = 4096` 字节，分块下限 `MinChunkSize = 1024` 字节）。
+- **Payload Length（2 字节）**：上限 `MaxPayloadSize = 65535` 字节（`uint16` 最大值）；默认分块为 `DefaultChunkSize = 32760` 字节，并随 SCTP `maxMessageSize` 仅允许单调向下收窄（下限 `MinMaxMessageSize = 4096` 字节，分块下限 `MinChunkSize = 4088` 字节，拒绝 `< 4096` 的协商值并确保 `17 * 4088 >= 64 KiB` 头块完整传输）。
 
 ---
 
@@ -104,7 +104,7 @@ $$\text{Gen}_{\text{next}} = (\text{Gen}_{\text{prev}} + 1) \bmod 2^{32}, \quad 
 
 ### 1. 请求与响应 TLV 编码
 
-请求头与响应头采用二进制大端编码，内嵌 `FetchCtx`（`SameOriginClient`、`TopLevelNav`、`ClientDecompressGzip`、`CredentialsOmit`）、`RespFlags`（`DecompressGzip`）与行内 Cookie 变更/差量 TLV（消除带外竞态），天然保留多值 Header（如多条 `Content-Security-Policy` 或 `Vary`），并严格拒绝控制字符、CR/LF/NUL 与请求目标中的 ASCII 空格（`0x20`）：
+请求头与响应头采用二进制大端编码，内嵌 `FetchCtx`（`SameOriginClient`、`TopLevelNav` 仅对 `mode === 'navigate' && destination === 'document'` 置位、`ClientDecompressGzip`、`CredentialsOmit` 抑制 Cookie 变更与响应 Cookie 保存）、`RespFlags`（`DecompressGzip`）与行内 Cookie 变更/差量 TLV（消除带外竞态，严格校验 `0 <= expiresMs <= Number.MAX_SAFE_INTEGER`），天然保留多值 Header（如多条 `Content-Security-Policy` 或 `Vary`），并严格拒绝控制字符、CR/LF/NUL 与请求目标中的 ASCII 空格（`0x20`）：
 
 ```text
 Request TLV:
@@ -133,7 +133,7 @@ Close:
   Frame  : [Gen=1][Type=WS_CLOSE]         [Flags=0x00]           [u16 code][reason <= 123B]
 ```
 
-接收端每收到分片即在 `16 MiB` 硬上限内按需回补 `CREDIT`，确保 > `2 MiB` 的单条大消息可平滑流式转发而绝不触发窗口死锁；超过 `16 MiB` 时立即返回关闭码 `1009`。
+接收端每收到分片即在 `16 MiB` 硬上限与单消息 `16384` 片上限内按需回补 `CREDIT`（兼容 `4088` 字节最小分片下的完整 `16 MiB` 消息组装），确保 > `2 MiB` 的单条大消息可平滑流式转发而绝不触发窗口死锁；超过 `16 MiB` 时立即返回关闭码 `1009`。
 
 ---
 

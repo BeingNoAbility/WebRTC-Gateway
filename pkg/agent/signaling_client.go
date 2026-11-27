@@ -81,15 +81,14 @@ func (a *Agent) RunSignalingLoop(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		start := time.Now()
-		connErr := a.runOneSignalingConn(ctx, dialURL, redactedURL)
+		registeredAt, connErr := a.runOneSignalingConn(ctx, dialURL, redactedURL)
 		a.sigRegistered.Store(false)
 		if ctx.Err() != nil {
 			a.Close()
 			return ctx.Err()
 		}
-		// Reset backoff if connection stayed healthy for >= 15 seconds.
-		if time.Since(start) >= 15*time.Second {
+		// Reset backoff ONLY if registration succeeded and stayed healthy for >= 15 seconds.
+		if !registeredAt.IsZero() && time.Since(registeredAt) >= 15*time.Second {
 			backoff = 1 * time.Second
 		}
 		wait := jitterDuration(backoff)
@@ -112,7 +111,7 @@ func (a *Agent) RunSignalingLoop(ctx context.Context) error {
 	}
 }
 
-func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL string) error {
+func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL string) (registeredAt time.Time, runErr error) {
 	hdr := http.Header{}
 	if a.cfg.SignalSecret != "" {
 		hdr.Set("Authorization", "Bearer "+a.cfg.SignalSecret)
@@ -127,10 +126,16 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 		_ = resp.Body.Close()
 	}
 	if err != nil {
-		return fmt.Errorf("dial %s: %w", redactedURL, err)
+		return time.Time{}, fmt.Errorf("dial %s: %w", redactedURL, err)
 	}
 	conn.SetReadLimit(signaling.MaxWSMessageBytes)
-	defer conn.Close(websocket.StatusNormalClosure, "agent stopping")
+	defer func() {
+		if ctx.Err() != nil {
+			_ = conn.Close(websocket.StatusNormalClosure, "agent stopping")
+		} else {
+			_ = conn.CloseNow()
+		}
+	}()
 
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
@@ -218,12 +223,12 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 	_, chRaw, err := conn.Read(hctx)
 	hcancel()
 	if err != nil {
-		return fmt.Errorf("read challenge: %w", err)
+		return time.Time{}, fmt.Errorf("read challenge: %w", err)
 	}
 	lastAlive.Store(time.Now().UnixNano())
 	var ch signaling.ChallengeDTO
 	if err := json.Unmarshal(chRaw, &ch); err != nil || ch.Type != signaling.TypeChallenge || ch.Nonce == "" {
-		return errors.New("invalid signaling challenge")
+		return time.Time{}, errors.New("invalid signaling challenge")
 	}
 
 	sigBytes := ed25519.Sign(a.cfg.Identity.PrivateKey, signaling.RegisterSignPayload(a.cfg.NodeID, ch.Nonce))
@@ -235,25 +240,26 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 		"force_rekey":          a.cfg.ForceRekey,
 	}
 	if err := enqueue(regMsg); err != nil {
-		return err
+		return time.Time{}, err
 	}
 
 	ackCtx, ackCancel := context.WithTimeout(connCtx, 10*time.Second)
 	_, ackRaw, err := conn.Read(ackCtx)
 	ackCancel()
 	if err != nil {
-		return fmt.Errorf("read register ack: %w", err)
+		return time.Time{}, fmt.Errorf("read register ack: %w", err)
 	}
 	lastAlive.Store(time.Now().UnixNano())
 	var ack signaling.InboundEnvelope
 	if err := json.Unmarshal(ackRaw, &ack); err != nil || ack.Type != signaling.TypeRegistered {
-		return fmt.Errorf("registration rejected: %s (%s)", ack.Code, ack.Error)
+		return time.Time{}, fmt.Errorf("registration rejected: %s (%s)", ack.Code, ack.Error)
 	}
 
 	a.sigMu.Lock()
 	a.sigSend = enqueue
 	a.sigMu.Unlock()
 	a.sigRegistered.Store(true)
+	registeredAt = time.Now()
 	defer func() {
 		a.sigRegistered.Store(false)
 		a.sigMu.Lock()
@@ -267,7 +273,7 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 	for {
 		_, raw, err := conn.Read(connCtx)
 		if err != nil {
-			return err
+			return registeredAt, err
 		}
 		lastAlive.Store(time.Now().UnixNano())
 		var env signaling.InboundEnvelope
@@ -279,14 +285,19 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 		case signaling.TypeOffer:
 			var offer signaling.OfferRelayDTO
 			if json.Unmarshal(raw, &offer) == nil {
-				go func(o signaling.OfferRelayDTO) {
-					defer func() {
-						if rec := recover(); rec != nil {
-							log.Printf("[Agent] Recovered panic in HandleOffer (session=%s): %v", o.SessionID, rec)
-						}
-					}()
-					a.HandleOffer(o)
-				}(offer)
+				// Synchronously stage handshaking session before spawning heavy WebRTC setup so
+				// immediately following TypeCandidate frames never race and get dropped.
+				if offerSDP, sess, ok := a.prepareOffer(offer); ok {
+					go func(o signaling.OfferRelayDTO, sdp string, s *VisitorSession) {
+						defer func() {
+							if rec := recover(); rec != nil {
+								log.Printf("[Agent] Recovered panic in completeOffer (session=%s): %v", o.SessionID, rec)
+								a.closeSession(s)
+							}
+						}()
+						a.completeOffer(o, sdp, s)
+					}(offer, offerSDP, sess)
+				}
 			}
 		case signaling.TypeCandidate:
 			var cand signaling.CandidateRelayDTO

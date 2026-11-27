@@ -328,3 +328,66 @@ func TestHTTPProxyMultiEncodingStrongETagAndContentLength(t *testing.T) {
 		t.Fatalf("POST Content-Length: 0 mismatch: status=%d cl=%d", rPost0.Status, sawZeroBodyLen)
 	}
 }
+
+func TestHTTPProxyCredentialsOmitIgnoresMutationsAndSetCookie(t *testing.T) {
+	var sawCookie string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawCookie = r.Header.Get("Cookie")
+		w.Header().Add("Set-Cookie", "leaked=from-omit; Path=/")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	pol, err := NewDestinationPolicy(srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hp, err := NewHTTPProxy(HTTPProxyOptions{Policy: pol})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar := NewProxyCookieJar()
+	jar.SaveResponseCookies(pol.EffectiveBaseURL(), []string{"existing=secret; Path=/; HttpOnly"})
+
+	cm, sm := newTestMuxPair(t)
+	go func() {
+		st, err := sm.AcceptStream(context.Background())
+		if err != nil {
+			return
+		}
+		rh, _ := protocol.DecodeRequestHeaders(st.HeadersRaw())
+		hp.HandleStream(st, rh, "198.51.100.1", jar, nil)
+	}()
+
+	tlv, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
+		Kind:     protocol.StreamKindHTTP,
+		FetchCtx: protocol.FetchCtxSameOriginClient | protocol.FetchCtxCredentialsOmit,
+		Method:   "GET",
+		Target:   "/omit-test",
+		CookieMutations: []protocol.CookieEntry{
+			{Op: protocol.CookieOpSet, Name: "jsmut", Value: "should-not-apply", Path: "/"},
+		},
+	})
+	s, err := cm.OpenHTTPStream(context.Background(), tlv, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, err := s.ReadResponseHeaders(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := protocol.DecodeResponseHeaders(rb)
+	_, _ = io.ReadAll(s)
+	_ = s.Close()
+
+	if sawCookie != "" {
+		t.Fatalf("credentials:omit sent Cookie header: %q", sawCookie)
+	}
+	if len(resp.CookieDeltas) != 0 {
+		t.Fatalf("credentials:omit emitted CookieDeltas: %+v", resp.CookieDeltas)
+	}
+	stored := jar.BuildCookieHeaderWithContext(pol.EffectiveBaseURL(), CookieRequestContext{Method: "GET", SameOriginClient: true})
+	if strings.Contains(stored, "leaked=") || strings.Contains(stored, "jsmut=") {
+		t.Fatalf("credentials:omit mutated jar: %q", stored)
+	}
+}

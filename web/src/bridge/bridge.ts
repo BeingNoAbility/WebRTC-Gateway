@@ -1,10 +1,10 @@
 /**
- * V7 Hidden Non-Navigable Sandbox Bridge (/__p2p_gw__/bridge.html)
+ * V7 Ephemeral Sandbox Bootstrap Bridge (/__p2p_gw__/bridge.html)
+ * - Mounted ONLY for the brief SW-registration + MessagePort handoff, then IMMEDIATELY removed
+ *   from Portal's DOM BEFORE `appFrame` is created (zero temporal overlap with untrusted app JS!).
  * - Strictly validates `ev.origin` against Go Signal-injected `<meta name="p2p-portal-origins">`
  *   allowlist (Fail-Closed when meta tag is missing or empty!).
- * - Zero `location.reload()` / `sessionStorage` loop (Safari ITP & Firefox ETP safe!).
- * - Prunes any non-`/__p2p_gw__/sw.js` Service Worker registrations on startup.
- * - Minimal MessagePort relay between Portal and the sandbox Service Worker.
+ * - Prunes any non-`/__p2p_gw__/sw.js` Service Worker registrations before attaching.
  */
 
 import { isBackendMeta, isRecord } from '../shared/ipc';
@@ -41,8 +41,6 @@ export function isAllowedPortalOrigin(origin: string, allowlist: Set<string>): b
   return allowlist.has(origin);
 }
 
-let activeTabId = '';
-let portalOrigin = '';
 let swRegPromise: Promise<ServiceWorkerRegistration> | null = null;
 
 async function pruneStrayServiceWorkers(): Promise<void> {
@@ -73,9 +71,6 @@ function initBridgeRuntime(): void {
 
   const allowedPortalOrigins = readAllowedPortalOrigins(document);
   const urlTabId = new URLSearchParams(location.search).get('tab') || '';
-  if (urlTabId) {
-    activeTabId = urlTabId;
-  }
 
   async function ensureServiceWorkerReady(): Promise<ServiceWorker> {
     if (!('serviceWorker' in navigator)) {
@@ -105,7 +100,7 @@ function initBridgeRuntime(): void {
   }
 
   window.addEventListener('message', async (ev: MessageEvent) => {
-    if (ev.source !== window.parent) return;
+    if (!ev.isTrusted || ev.source !== window.parent) return;
     if (!isAllowedPortalOrigin(ev.origin, allowedPortalOrigins)) {
       ev.ports?.[0]?.close();
       return;
@@ -122,9 +117,6 @@ function initBridgeRuntime(): void {
     }
     const bridgePort = ev.ports?.[0];
     if (!bridgePort) return;
-
-    activeTabId = data.tabId;
-    portalOrigin = ev.origin;
 
     try {
       const sw = await ensureServiceWorkerReady();
@@ -145,16 +137,7 @@ function initBridgeRuntime(): void {
   });
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.addEventListener('message', (ev: MessageEvent) => {
-      const data = ev.data;
-      if (!isRecord(data) || data.type !== 'SW_NEED_PORT') return;
-      if (!portalOrigin || !activeTabId) return;
-      const reqTab = typeof data.tabId === 'string' ? data.tabId : '';
-      if (reqTab && reqTab !== activeTabId) return;
-      window.parent.postMessage({ type: 'P2P_BRIDGE_NEED_PORT', tabId: activeTabId }, portalOrigin);
-    });
-
-    // Proactively kick off SW registration & stray SW pruning on bridge load.
+    // Proactively kick off SW registration & stray SW pruning on ephemeral bridge load.
     ensureServiceWorkerReady().catch(() => {});
   }
 }

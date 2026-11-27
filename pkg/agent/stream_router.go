@@ -26,6 +26,10 @@ func (a *Agent) serveMuxStreams(sess *VisitorSession, m *mux.Mux) {
 }
 
 func (a *Agent) dispatchStream(sess *VisitorSession, stream *mux.Stream) {
+	if stream.Context().Err() != nil {
+		_ = stream.Close()
+		return
+	}
 	reqHdr, err := protocol.DecodeRequestHeaders(stream.HeadersRaw())
 	if err != nil {
 		stream.Reset(protocol.ErrCodeProtocolError)

@@ -21,6 +21,7 @@ function createIsolatedFixtureRoot() {
     'docs/package-lock.json',
     'docs/RELEASE_NOTES.md',
     'CHANGELOG.md',
+    'docker-compose.yml',
   ];
   for (const rel of relFiles) {
     const src = path.join(rootDir, rel);
@@ -74,6 +75,21 @@ test('Release hygiene gate: flags docs/package.json version tampering', () => {
         ((err.stdout || '') + (err.stderr || '')).includes(
           'FAIL: docs/package.json version (9.9.9-tampered) matches VERSION'
         )
+    );
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('Release hygiene gate: flags docker-compose.yml image tag drift', () => {
+  const tmpRoot = createIsolatedFixtureRoot();
+  try {
+    const composePath = path.join(tmpRoot, 'docker-compose.yml');
+    const drifted = fs.readFileSync(composePath, 'utf8').replace(/webrtc-p2p-agent:v[^\s]+/, 'webrtc-p2p-agent:v0.0.1');
+    fs.writeFileSync(composePath, drifted);
+    assert.throws(
+      () => runGate([], { HYGIENE_ROOT_DIR: tmpRoot }),
+      (err) => ((err.stdout || '') + (err.stderr || '')).includes('FAIL: docker-compose.yml image tags match')
     );
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });

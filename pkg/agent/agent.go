@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ const (
 	DefaultMaxGlobalStreams   = 512
 	MaxConcurrentSessions     = 128
 	MaxHandshakingSessions    = 32
+	MaxHandshakingPerIP       = 4
 	MaxOfferConcurrency       = 32
 	UnauthSessionTimeout      = 10 * time.Second
 	MaxStagedCandBytesSession = 32 * 1024
@@ -75,12 +77,13 @@ type VisitorSession struct {
 	authDone        atomic.Bool // Fast atomic gate blocking pre-auth Pool & WS DC frames!
 	role            string      // "owner", "capability", or "public"
 
-	visitorFP    string
-	agentFP      string
-	visitorNonce string
-	agentNonce   string
-	spakeSess    *SPAKE2PVerifierSession
-	authAttempt  bool
+	visitorFP      string
+	agentFP        string
+	visitorNonce   string
+	agentNonce     string
+	spakeSess      *SPAKE2PVerifierSession
+	challengeReady bool // True ONLY after DTLS cert FP verified and challenge state populated.
+	authAttempt    bool
 
 	capScope  *proxy.CapabilityScope
 	capJTI    string
@@ -138,6 +141,9 @@ func New(cfg Config) (*Agent, error) {
 
 	if cfg.AccessSecret == "" && !cfg.AllowPublic {
 		return nil, errors.New("agent: ACCESS_SECRET is required unless -allow-public is explicitly set (Fail-Closed)")
+	}
+	if cfg.AccessSecret != "" && cfg.AllowPublic {
+		return nil, errors.New("agent: ACCESS_SECRET and -allow-public are mutually exclusive (Fail-Closed)")
 	}
 	if cfg.Identity == nil {
 		return nil, errors.New("agent: persistent Ed25519 Identity is required")
@@ -243,7 +249,13 @@ func New(cfg Config) (*Agent, error) {
 
 func isLoopbackHost(host string) bool {
 	h := strings.ToLower(strings.Trim(host, "[]"))
-	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	if ip, err := netip.ParseAddr(h); err == nil && ip.IsLoopback() {
+		return true
+	}
+	return false
 }
 
 func (a *Agent) Identity() *Identity         { return a.cfg.Identity }

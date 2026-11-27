@@ -174,3 +174,87 @@ func TestCookieJarSplitPoolInjectionAndEvictionBlocked(t *testing.T) {
 		t.Fatal("SessionCookieManager resurrected idle-expired cookie jar after 2h TTL")
 	}
 }
+
+func TestCookieJarSecurityRegressions(t *testing.T) {
+	// P1-20: Pre-login JS cookie on specific path /api MUST NOT shadow post-login HttpOnly/Secure cookie on /.
+	jar := NewProxyCookieJar()
+	apiURL, _ := url.Parse("https://app.example.com/api/profile")
+	rootURL, _ := url.Parse("https://app.example.com/")
+
+	jar.ApplyClientMutations(rootURL, []ClientCookieMutation{
+		{Op: "set", Name: "sid", Value: "evil-prelogin", Path: "/api"},
+		{Op: "set", Name: "csrf", Value: "evil-csrf", Path: "/api"},
+	})
+	deltas := jar.SaveResponseCookies(rootURL, []string{
+		"sid=real-admin; Path=/; HttpOnly; Secure; SameSite=Strict",
+		"csrf=real-csrf; Path=/; Secure",
+	})
+	hdr := jar.BuildCookieHeaderWithContext(apiURL, CookieRequestContext{Method: "POST", SameOriginClient: true})
+	if strings.Contains(hdr, "evil-prelogin") || strings.Contains(hdr, "evil-csrf") {
+		t.Fatalf("P1-20 regression: pre-login JS /api cookie shadowed protected server cookie: %q", hdr)
+	}
+	if !strings.Contains(hdr, "sid=real-admin") || !strings.Contains(hdr, "csrf=real-csrf") {
+		t.Fatalf("expected protected server cookies present, got %q", hdr)
+	}
+	sawSidDel := false
+	sawCsrfDel := false
+	for _, d := range deltas {
+		if d.Op == "del" && d.Name == "sid" && d.Path == "/api" {
+			sawSidDel = true
+		}
+		if d.Op == "del" && d.Name == "csrf" && d.Path == "/api" {
+			sawCsrfDel = true
+		}
+	}
+	if !sawSidDel || !sawCsrfDel {
+		t.Fatalf("expected del deltas scrubbing swept /api JS cookies, got %+v", deltas)
+	}
+
+	// P1-21a: Mode 4.1 loopback HTTP target (e.g. local Nginx setting X-Forwarded-Proto: https) MUST support Secure cookies.
+	loopbackURL, _ := url.Parse("http://127.0.0.1:18083/login")
+	jarLoop := NewProxyCookieJar()
+	jarLoop.SaveResponseCookies(loopbackURL, []string{
+		"sid=loopback-secure; Path=/; HttpOnly; Secure; SameSite=Lax",
+		"__Host-token=host-tok; Path=/; Secure",
+	})
+	loopHdr := jarLoop.BuildCookieHeaderWithContext(loopbackURL, CookieRequestContext{Method: "GET", SameOriginClient: true})
+	if !strings.Contains(loopHdr, "sid=loopback-secure") || !strings.Contains(loopHdr, "__Host-token=host-tok") {
+		t.Fatalf("P1-21 regression: loopback Mode 4.1 dropped Secure/__Host- cookies: %q", loopHdr)
+	}
+	// Non-loopback plaintext HTTP must STILL reject Secure cookies ("Leave Secure Cookies Alone").
+	lanHTTPURL, _ := url.Parse("http://192.0.2.20:8080/login")
+	jarLAN := NewProxyCookieJar()
+	jarLAN.SaveResponseCookies(lanHTTPURL, []string{"sid=lan-sec; Path=/; HttpOnly; Secure"})
+	if lanHdr := jarLAN.BuildCookieHeaderWithContext(lanHTTPURL, CookieRequestContext{Method: "GET", SameOriginClient: true}); lanHdr != "" {
+		t.Fatalf("non-loopback plaintext HTTP must reject Secure cookie, got %q", lanHdr)
+	}
+
+	// P1-21b: JS MUST be able to update ordinary non-HttpOnly non-Secure server cookies (no split-brain).
+	jarJS := NewProxyCookieJar()
+	jarJS.SaveResponseCookies(rootURL, []string{"theme=dark; Path=/"})
+	jarJS.ApplyClientMutations(rootURL, []ClientCookieMutation{
+		{Op: "set", Name: "theme", Value: "light", Path: "/"},
+	})
+	jsHdr := jarJS.BuildCookieHeaderWithContext(rootURL, CookieRequestContext{Method: "GET", SameOriginClient: true})
+	if jsHdr != "theme=light" {
+		t.Fatalf("P1-21 regression: JS update to non-HttpOnly non-Secure cookie failed (split-brain): %q", jsHdr)
+	}
+
+	// P2-21: Release() updates LRU order so recently released session is NOT evicted ahead of older idle session.
+	mgr := NewSessionCookieManager(4) // owner=1, guest=3
+	k1, tok1, _ := mgr.AcquireOrMint("guest", "")
+	k2, tok2, _ := mgr.AcquireOrMint("guest", "")
+	k3, tok3, _ := mgr.AcquireOrMint("guest", "")
+	// Release k2 and k3 first, then release k1 LAST so k1 is most-recently-used.
+	mgr.Release(k2)
+	mgr.Release(k3)
+	mgr.Release(k1)
+	// Minting a 4th guest session must evict k2 (oldest released), NOT k1!
+	k4, _, _ := mgr.AcquireOrMint("guest", "")
+	defer mgr.Release(k4)
+	r1, _, _ := mgr.AcquireOrMint("guest", tok1)
+	if r1 != k1 {
+		t.Fatalf("P2-21 regression: most-recently-released session %q was evicted (got %q; tok2=%q tok3=%q)", k1, r1, tok2, tok3)
+	}
+	mgr.Release(r1)
+}

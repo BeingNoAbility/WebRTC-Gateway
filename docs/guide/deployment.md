@@ -10,7 +10,7 @@ WebRTC Gateway 以单一权威 Go 信令服务（`cmd/signal`）统一交付内�
 
 | 档位 | 配置参数 | 必需 DNS 记录 | TLS 证书要求 | 隔离特性 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Tier 1：跨站双固定域** | `-portal-domain portal.example.com` + `-sandbox-host app.example.net` | 两条普通 `A`/`AAAA`/`CNAME` | 两张普通 ACME HTTP-01 单域证书（零泛域证书） | 跨站站点级隔离（不同 eTLD+1）；所有应用共享固定沙箱源 |
+| **Tier 1：跨站双固定域** | `-portal-domain portal.example.com` + `-sandbox-host app.example.net` | 两条普通 `A`/`AAAA`/`CNAME` | 单张含双域名 SAN 的 HTTP-01 证书（直连 `-tls-cert`），或由前置 Nginx/Caddy 分别托管两张单域证书（零泛域证书） | 跨站站点级隔离（不同 eTLD+1）；所有应用共享固定沙箱源 |
 | **Tier 2：单根域同站通配符** | `-portal-domain portal.example.com` + `-sandbox-domain sbx.example.com` + `-allow-same-site-sandbox` | `portal.example.com` + `*.sbx.example.com` | 泛域证书 `*.sbx.example.com` | 按节点独立 `sbx-<24hex>` 源 + `Origin-Agent-Cluster: ?1` 进程隔离（同站警示条） |
 | **Tier 3：跨站双域通配符（推荐）** | `-portal-domain portal.example.com` + `-sandbox-domain sandbox.example.net` | `portal.example.com` + `*.sandbox.example.net` | `portal.example.com` + 泛域 `*.sandbox.example.net` | 跨站站点级隔离 + 按节点本机私有盐 HMAC 派生 `sbx-<24hex>` 源 |
 
@@ -42,7 +42,7 @@ SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 
 ## 3. 容器化加固部署 (`docker-compose.yml`)
 
-仓库根目录提供的 `docker-compose.yml` 默认启用 `read_only: true`、`cap_drop: [ALL]`、`no-new-privileges:true` 与资源上限，并将信令节点公钥绑定表持久化至 `signal_state` 卷、将 Agent 的 Ed25519 私钥与能力吊销状态持久化至 `agent_identity` 卷：
+仓库根目录提供的 `docker-compose.yml` 默认仅将信令明文端口绑定在 `127.0.0.1:8888:8888`（供宿主机反代终止 TLS），默认启用 `read_only: true`、`cap_drop: [ALL]`、`no-new-privileges:true` 与资源上限，并将信令节点公钥绑定表持久化至 `signal_state` 卷、将 Agent 的 Ed25519 私钥与能力吊销状态持久化至 `agent_identity` 卷（宿主机反代经 Docker 网桥访问容器时，须将对应网桥 CIDR 如 `172.17.0.0/16` 加入 `TRUSTED_PROXIES`）：
 
 ```bash
 cat <<'EOF' > .env
@@ -59,7 +59,7 @@ docker compose up -d --build
 
 ## 4. 无通配符证书场景：Tier 1 双固定域部署示例
 
-若仅有普通 HTTP-01 单域证书，只需准备两个不同根域的固定主机名（如 `portal.example.com` 与 `app.example.net`），通过 `-sandbox-host` 启动即可享受跨站双域隔离与严格 W3C Fetch 抗 CSRF 门禁：
+若仅有普通 HTTP-01 证书能力，只需准备两个不同根域的固定主机名（如 `portal.example.com` 与 `app.example.net`），通过 `-sandbox-host` 启动即可享受跨站双域隔离与严格 W3C Fetch 抗 CSRF 门禁。直接通过 `cmd/signal` 的 `-tls-cert` 终止 TLS 时须提供同时覆盖两个域名的单张多 SAN 证书；若希望两个域名各自使用独立单域证书，请在前置 Nginx 或 Caddy 上按 SNI 终止 TLS 并反代至本机 `127.0.0.1:8888`：
 
 ```bash
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \

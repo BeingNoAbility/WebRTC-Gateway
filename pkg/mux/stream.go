@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -384,6 +383,9 @@ func (s *Stream) Read(p []byte) (int, error) {
 			if s.inboundOff >= len(head) {
 				s.inbound[0] = nil
 				s.inbound = s.inbound[1:]
+				if len(s.inbound) == 0 {
+					s.inbound = nil
+				}
 				s.inboundOff = 0
 				rel += PerChunkMemOverhead
 			}
@@ -391,8 +393,8 @@ func (s *Stream) Read(p []byte) (int, error) {
 			s.reservedBudget -= rel
 			s.consumedForCred += rel
 			if !s.readClosed && !s.purged && s.consumedForCred >= DefaultStreamWindowSize/4 {
-				if s.consumedForCred > math.MaxUint32 {
-					creditDelta = math.MaxUint32
+				if s.consumedForCred > 0x7FFFFFFF {
+					creditDelta = 0x7FFFFFFF
 				} else {
 					creditDelta = uint32(s.consumedForCred)
 				}
@@ -439,14 +441,17 @@ func (s *Stream) ReadWSChunk(ctx context.Context) (WSChunk, error) {
 			chunk := s.wsQueue[0]
 			s.wsQueue[0] = WSChunk{}
 			s.wsQueue = s.wsQueue[1:]
+			if len(s.wsQueue) == 0 {
+				s.wsQueue = nil
+			}
 			rel := int64(len(chunk.Payload)) + PerChunkMemOverhead
 			s.inboundBytes -= rel
 			s.reservedBudget -= rel
 			if chunk.Op != protocol.TypeWSClose {
 				s.consumedForCred += rel
 				if !s.readClosed && !s.purged && s.consumedForCred >= DefaultStreamWindowSize/8 {
-					if s.consumedForCred > math.MaxUint32 {
-						creditDelta = math.MaxUint32
+					if s.consumedForCred > 0x7FFFFFFF {
+						creditDelta = 0x7FFFFFFF
 					} else {
 						creditDelta = uint32(s.consumedForCred)
 					}
@@ -880,8 +885,17 @@ func (s *Stream) CloseWrite() error {
 
 // Close finishes outbound writes, unconditionally purges all unread inbound memory back to
 // GlobalMemoryBudget, and detaches the stream from its slot.
+// If the peer has not yet finished sending (readClosed == false), records ErrStreamClosed
+// BEFORE purging so any concurrent upload reader (e.g. http.Transport) receives an error
+// instead of a spurious clean io.EOF that would commit a truncated chunked request body!
 func (s *Stream) Close() error {
 	err := s.CloseWrite()
+	s.inboundMu.Lock()
+	incompleteInbound := !s.readClosed
+	s.inboundMu.Unlock()
+	if incompleteInbound {
+		s.setResetErr(ErrStreamClosed)
+	}
 	s.purgeInbound()
 	s.cancel()
 	s.detach()
@@ -889,14 +903,25 @@ func (s *Stream) Close() error {
 }
 
 // Reset aborts the stream immediately WITHOUT blocking on writeMu,
-// emits an in-band RESET frame, and unconditionally purges all inbound memory.
+// emits an in-band RESET frame atomically with slot detachment (preventing post-RESET DATA),
+// and unconditionally purges all inbound memory.
 func (s *Stream) Reset(code protocol.ErrorCode) {
 	s.setResetErr(ErrStreamReset)
 	s.writeCancel()
 	s.cancel()
 	s.purgeInbound()
-	_ = s.sendControlDirect(protocol.TypeReset, protocol.EncodeResetPayload(code))
-	s.detach()
+	var wire []byte
+	f := &protocol.Frame{
+		Gen:     s.gen,
+		Type:    protocol.TypeReset,
+		Flags:   protocol.FlagNone,
+		Payload: protocol.EncodeResetPayload(code),
+	}
+	wire, _ = f.Encode()
+	s.detachOnce.Do(func() {
+		s.slot.sendResetAndDetach(s, wire)
+		s.mux.releaseStreamSlot()
+	})
 }
 
 // markRemoteReset handles an incoming RESET frame from the peer.

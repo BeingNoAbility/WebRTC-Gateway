@@ -8,9 +8,9 @@
  *      - `destination === 'document'` (external `window.open` / top-level nav) -> `403`.
  *      - `destination === 'iframe'` + `GET`/`HEAD`: ONLY when `sessions.size === 1` AND
  *        (`referrer` matches `swOrigin`/`portalOrigin` with `SameOriginClient=true`, OR
- *        `referrer === ''` — needed for Portal `Referrer-Policy: no-referrer` & `-dir` `CSP: sandbox`
- *        opaque-origin links — with `SameOriginClient=false` and NO `resultingClientId` binding so
- *        `SameSite=Strict` cookies never leak and `CSP: frame-ancestors 'self' <portalOrigin>` blocks framing).
+ *        `referrer === ''` strictly in cookie-less static `-dir`/`-file` mode (`isStaticMode=true`)
+ *        with `resultingClientId` bound so static subresources work; proxy `-target` mode
+ *        always rejects unbound empty-referrer iframes to eliminate SameSite=Lax CSRF).
  *        Multi-tab (`sessions.size !== 1`) -> `403`.
  * - Strips `content-encoding` ONLY when `respFlags & DECOMPRESS_GZIP` (fixes Brotli/Deflate corruption).
  * - Always emits `Content-Security-Policy: frame-ancestors <portalOrigin>` on `-target` HTML responses.
@@ -28,7 +28,7 @@ import {
 import { pipeThroughBoundedDecompression } from './decompress_pipeline';
 import { createHtmlInjectorTransform, injectWorkerBootstrap } from './html_injector';
 import type { SessionRegistry, TabSession } from './session_registry';
-import { executeTunnelRequest } from './stream_bridge';
+import { DeadBridgePortError, executeTunnelRequest } from './stream_bridge';
 
 export const GATEWAY_ASSET_PREFIX = '/__p2p_gw__/';
 export const GATEWAY_ENTER_PATH = '/__p2p_gw__/enter';
@@ -48,6 +48,7 @@ const MULTI_VALUE_RESPONSE_HEADERS = new Set([
 const STRIPPED_FOR_APP_HEADERS = new Set([
   'content-security-policy-report-only',
   'x-frame-options',
+  'origin-agent-cluster',
   'set-cookie',
   'x-p2p-content-encoding',
   'x-p2p-cookie-delta',
@@ -162,6 +163,7 @@ export function buildSafeResponseHeaders(
     stripContentLength: boolean;
     stripContentEncoding?: boolean;
     frameAncestorsOrigin?: string;
+    originAgentCluster?: boolean;
   }
 ): {
   headers: Headers;
@@ -200,6 +202,11 @@ export function buildSafeResponseHeaders(
   // (intersects cleanly with static `CSP: sandbox` under CSP Level 3!).
   if (opts.frameAncestorsOrigin) {
     headers.append('content-security-policy', `frame-ancestors 'self' ${opts.frameAncestorsOrigin}`);
+  }
+
+  // Tier 2 same-site isolation: request dedicated origin-keyed agent cluster on every response.
+  if (opts.originAgentCluster) {
+    headers.set('origin-agent-cluster', '?1');
   }
 
   if (!headers.has('referrer-policy')) {
@@ -268,9 +275,21 @@ export function authorizeFetchRequest(
 
   const rawRef = (input.referrer || '').trim();
   if (rawRef === '' || rawRef === 'about:client') {
-    // Tightened Tier 1 rule: required for Portal `Referrer-Policy: no-referrer` and `-dir` `CSP: sandbox`
-    // opaque-origin link clicks. Allowed ONLY when `sessions.size === 1`, with `sameOriginClient: false`
-    // (SameSite=Strict cookies never leak!) and WITHOUT binding `resultingClientId`!
+    // P0-2 Fail-Closed Anti-CSRF Gate:
+    // - Proxy mode (`-target`, `isStaticMode === false`): NEVER permit unbound empty-referrer iframes!
+    //   Portal mounts `appFrame` via `/__p2p_gw__/enter` (already bound in step 1); rejecting empty
+    //   referrer eliminates cross-site `<iframe referrerpolicy="no-referrer">` SameSite=Lax CSRF completely!
+    // - Static mode (`-dir`/`-file`, cookie-less, `CSP: sandbox` opaque origin): permit ONLY when
+    //   `sessions.size === 1` AND bind `resultingClientId` so subresources (`<img>`/`<link>`) work!
+    if (!single.meta.isStaticMode) {
+      return {
+        allowed: false,
+        reason: 'Unbound empty-referrer iframe navigation blocked in proxy mode (CSRF protection)',
+      };
+    }
+    if (input.resultingClientId) {
+      registry.bindClient(input.resultingClientId, single.tabId);
+    }
     return { allowed: true, session: single, sameOriginClient: false };
   }
 
@@ -288,7 +307,7 @@ export function authorizeFetchRequest(
   return { allowed: false, reason: 'External iframe navigation blocked (CSRF protection)' };
 }
 
-function collectRequestHeaders(
+export function collectRequestHeaders(
   request: Request,
   swOrigin: string,
   extraMutations: ClientCookieMutation[],
@@ -299,7 +318,9 @@ function collectRequestHeaders(
   inlineMutationSeq: number;
   combinedMutations: ClientCookieMutation[];
   fetchCtx: number;
+  credentialsOmit: boolean;
 } {
+  const credentialsOmit = request.credentials === 'omit';
   const out: HeaderField[] = [];
   let inlineMutations: ClientCookieMutation[] = [];
   let inlineMutationSeq = 0;
@@ -314,7 +335,7 @@ function collectRequestHeaders(
       return;
     }
     if (lower === 'x-p2p-cookie-mutations') {
-      if (sameOriginClient) {
+      if (sameOriginClient && !credentialsOmit) {
         inlineMutations = inlineMutations.concat(decodeClientMutationsHeader(value));
       }
       return;
@@ -335,21 +356,24 @@ function collectRequestHeaders(
     }
   }
 
-  const combinedMutations = sameOriginClient ? extraMutations.concat(inlineMutations) : [];
+  const combinedMutations =
+    sameOriginClient && !credentialsOmit ? extraMutations.concat(inlineMutations) : [];
   let fetchCtx = 0;
   if (sameOriginClient) {
     fetchCtx |= FetchCtxFlag.SAME_ORIGIN_CLIENT;
   }
-  if (request.mode === 'navigate') {
+  // Per RFC 6265bis, ONLY top-level document navigations (`destination === 'document'`),
+  // NEVER nested `iframe` navigations, qualify for cross-site SameSite=Lax!
+  if (request.mode === 'navigate' && request.destination === 'document') {
     fetchCtx |= FetchCtxFlag.TOP_LEVEL_NAV;
   }
   if (typeof DecompressionStream === 'function') {
     fetchCtx |= FetchCtxFlag.CLIENT_DECOMPRESS_GZIP;
   }
-  if (request.credentials === 'omit') {
+  if (credentialsOmit) {
     fetchCtx |= FetchCtxFlag.CREDENTIALS_OMIT;
   }
-  return { headers: out, inlineMutations, inlineMutationSeq, combinedMutations, fetchCtx };
+  return { headers: out, inlineMutations, inlineMutationSeq, combinedMutations, fetchCtx, credentialsOmit };
 }
 
 export function isInjectableHtmlContentType(ct: string): boolean {
@@ -437,6 +461,31 @@ async function readBoundedWorkerBody(
   }
 }
 
+function buildSwEvictedResponse(isNavigate: boolean): Response {
+  if (isNavigate) {
+    const html =
+      '<!doctype html><html><head><meta charset="utf-8"><title>Reconnecting…</title></head>' +
+      '<body><script>try{window.parent.postMessage({type:"P2P_SW_EVICTED"},"*")}catch{}</script></body></html>';
+    return new Response(html, {
+      status: 503,
+      headers: {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'",
+        'x-p2p-sw-evicted': '1',
+      },
+    });
+  }
+  return new Response('Service Worker session evicted — reconnecting', {
+    status: 503,
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-p2p-sw-evicted': '1',
+    },
+  });
+}
+
 export async function handleFetchEvent(
   swScope: ServiceWorkerGlobalScope,
   registry: SessionRegistry,
@@ -448,13 +497,21 @@ export async function handleFetchEvent(
   // Periodically prune closed clients without blocking hot path.
   event.waitUntil(registry.maybePruneClosedClients(swScope).catch(() => {}));
 
-  // If the Service Worker was terminated while idle, transparently recover a live nested appFrame
-  // or worker client before enforcing the Anti-CSRF Gate (cross-site requests have clientId === '').
+  // If the Service Worker was terminated while idle (sessions.size === 0), check if the caller is
+  // a live nested appFrame/worker and signal Portal to cleanly re-bootstrap via ephemeral bridgeFrame.
   if (registry.getActiveSessionCount() === 0 && event.clientId) {
-    await registry.recoverColdStartClient(swScope, event.clientId, event.resultingClientId);
+    const liveCaller = await registry.isLiveNestedAppClient(swScope, event.clientId);
+    if (liveCaller) {
+      try {
+        liveCaller.postMessage({ type: 'P2P_SW_EVICTED' });
+      } catch {
+        // ignore
+      }
+      return buildSwEvictedResponse(req.mode === 'navigate');
+    }
   }
 
-  const auth = authorizeFetchRequest(registry, {
+  const authInput = {
     clientId: event.clientId,
     resultingClientId: event.resultingClientId,
     mode: req.mode,
@@ -462,7 +519,18 @@ export async function handleFetchEvent(
     method: req.method,
     referrer: req.referrer,
     swOrigin: swScope.location.origin,
-  });
+  };
+  let auth = authorizeFetchRequest(registry, authInput);
+  if (
+    !auth.allowed &&
+    req.mode === 'navigate' &&
+    req.destination === 'iframe' &&
+    registry.getActiveSessionCount() > 1
+  ) {
+    // Reap any crashed/reloaded previous Portal tab before rejecting ambiguous multi-tab navigation.
+    await registry.pruneDeadSessions(swScope);
+    auth = authorizeFetchRequest(registry, authInput);
+  }
   if (!auth.allowed) {
     return new Response(`Forbidden: ${auth.reason}`, {
       status: 403,
@@ -472,22 +540,19 @@ export async function handleFetchEvent(
 
   const session = auth.session;
   const target = `${reqUrl.pathname}${reqUrl.search}`;
-  const pendingMuts = auth.sameOriginClient ? session.cookieMirror.drainPendingMutations() : [];
+  const isOmit = req.credentials === 'omit';
+  const peeked =
+    auth.sameOriginClient && !isOmit
+      ? session.cookieMirror.peekPendingMutations()
+      : { mutations: [] as ClientCookieMutation[], watermark: 0 };
   const {
     headers: reqHeaders,
     inlineMutations,
     inlineMutationSeq,
     combinedMutations,
     fetchCtx,
-  } = collectRequestHeaders(req, swScope.location.origin, pendingMuts, auth.sameOriginClient);
-
-  if (auth.sameOriginClient && inlineMutations.length > 0) {
-    session.cookieMirror.applyClientMutations(inlineMutations, {
-      clientId: event.clientId,
-      seq: inlineMutationSeq,
-      queueForUpstream: false,
-    });
-  }
+    credentialsOmit,
+  } = collectRequestHeaders(req, swScope.location.origin, peeked.mutations, auth.sameOriginClient);
 
   const method = req.method.toUpperCase();
   const hasBody = method !== 'GET' && method !== 'HEAD' && req.body !== null;
@@ -509,11 +574,38 @@ export async function handleFetchEvent(
     activeSession = res.session;
     tunnelResp = res.response;
   } catch (err) {
+    if (err instanceof DeadBridgePortError) {
+      const liveCaller = event.clientId
+        ? await registry.isLiveNestedAppClient(swScope, event.clientId)
+        : null;
+      if (liveCaller) {
+        try {
+          liveCaller.postMessage({ type: 'P2P_SW_EVICTED' });
+        } catch {
+          // ignore
+        }
+        return buildSwEvictedResponse(req.mode === 'navigate');
+      }
+    }
     const msg = err instanceof Error ? err.message : 'Tunnel fetch failed';
     return new Response(msg, {
       status: 502,
       headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
     });
+  }
+
+  // Commit queued cookie mutations ONLY AFTER the tunnel accepted the request!
+  if (auth.sameOriginClient && !credentialsOmit) {
+    if (peeked.mutations.length > 0) {
+      activeSession.cookieMirror.commitPendingMutations(peeked.watermark);
+    }
+    if (inlineMutations.length > 0) {
+      activeSession.cookieMirror.applyClientMutations(inlineMutations, {
+        clientId: event.clientId,
+        seq: inlineMutationSeq,
+        queueForUpstream: false,
+      });
+    }
   }
 
   event.waitUntil(tunnelResp.done);
@@ -574,9 +666,10 @@ export async function handleFetchEvent(
       stripContentEncoding: decompressGzip,
       frameAncestorsOrigin:
         req.mode === 'navigate' || isAnyHtmlResponse ? activeSession.portalOrigin : undefined,
+      originAgentCluster: Boolean(activeSession.meta.sameSiteMode),
     });
 
-    const deltas = tunnelResp.cookieDeltas;
+    const deltas = credentialsOmit ? [] : tunnelResp.cookieDeltas;
     if (deltas.length > 0) {
       activeSession.cookieMirror.applyDeltas(deltas);
       if (!isNavigateHtml) {

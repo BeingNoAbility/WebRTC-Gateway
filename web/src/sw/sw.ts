@@ -10,7 +10,7 @@
 /// <reference lib="webworker" />
 
 import { FetchCtxFlag } from '../protocol/tlv';
-import { isBackendMeta, isClientCookieMutation, isRecord } from '../shared/ipc';
+import { isBackendMeta, isClientCookieMutation, isCookieDelta, isRecord } from '../shared/ipc';
 import { syncCookieDeltasToClients } from './cookie_sync';
 import {
   GATEWAY_ENTER_PATH,
@@ -60,7 +60,10 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
       port?.close();
       return;
     }
-    registry.attachPort(data.tabId, data.portalOrigin, data.meta, port);
+    if (registry.attachPort(data.tabId, data.portalOrigin, data.meta, port)) {
+      // Reap any closed/reloaded previous tabs immediately so sessions.size stays accurate!
+      event.waitUntil(registry.pruneDeadSessions(sw, data.tabId).catch(() => {}));
+    }
     return;
   }
 
@@ -94,7 +97,14 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
       (async () => {
         await registry.pruneDeadClientWebSockets(sw);
         if (registry.getActiveSessionCount() === 0 && clientId) {
-          await registry.recoverColdStartClient(sw, clientId, '');
+          const liveCaller = await registry.isLiveNestedAppClient(sw, clientId);
+          if (liveCaller) {
+            try {
+              liveCaller.postMessage({ type: 'P2P_SW_EVICTED' });
+            } catch {
+              // ignore
+            }
+          }
         }
         const bound = registry.getBoundSession(clientId, '');
         if (!bound) {
@@ -107,13 +117,16 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
           return;
         }
 
-        let liveSession = bound;
-        try {
-          if (!liveSession.port || !(await registry.pingBridgePort(liveSession, 500))) {
-            registry.evictDeadPort(liveSession.tabId, liveSession.port);
-            liveSession = await registry.ensureLivePort(sw, liveSession.tabId);
+        if (!bound.port || !(await registry.pingBridgePort(bound, 500))) {
+          registry.evictDeadPort(bound.tabId, bound.port);
+          const liveCaller = await registry.isLiveNestedAppClient(sw, clientId);
+          if (liveCaller) {
+            try {
+              liveCaller.postMessage({ type: 'P2P_SW_EVICTED' });
+            } catch {
+              // ignore
+            }
           }
-        } catch {
           try {
             wsPort.postMessage({ type: 'WS_ERROR', message: 'P2P Gateway session unavailable' });
           } catch {
@@ -123,23 +136,17 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
           return;
         }
 
-        const pendingMuts = liveSession.cookieMirror.drainPendingMutations();
-        if (inlineMutations.length > 0) {
-          liveSession.cookieMirror.applyClientMutations(inlineMutations, {
-            clientId,
-            queueForUpstream: false,
-          });
-        }
+        const { mutations: pendingMuts, watermark } = bound.cookieMirror.peekPendingMutations();
         const cookieMutations = pendingMuts.concat(inlineMutations);
         const wsId = `ws_${Date.now().toString(36)}_${(++wsSeq).toString(36)}`;
-        registry.registerClientWebSocket(liveSession, clientId, wsId);
+        registry.registerClientWebSocket(bound, clientId, wsId);
 
         try {
-          liveSession.port!.postMessage(
+          bound.port.postMessage(
             {
               type: 'TUNNEL_WS_OPEN',
               wsId,
-              tabId: liveSession.tabId,
+              tabId: bound.tabId,
               target,
               protocols,
               fetchCtx: FetchCtxFlag.SAME_ORIGIN_CLIENT,
@@ -147,8 +154,15 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
             },
             [wsPort]
           );
+          bound.cookieMirror.commitPendingMutations(watermark);
+          if (inlineMutations.length > 0) {
+            bound.cookieMirror.applyClientMutations(inlineMutations, {
+              clientId,
+              queueForUpstream: false,
+            });
+          }
         } catch {
-          registry.evictDeadPort(liveSession.tabId, liveSession.port);
+          registry.evictDeadPort(bound.tabId, bound.port);
           try {
             wsPort.postMessage({ type: 'WS_ERROR', message: 'Bridge port closed' });
           } catch {
@@ -161,6 +175,21 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
     return;
   }
 
+  if (data.type === 'SW_COOKIE_SYNC') {
+    const rawDeltas = Array.isArray(data.deltas) ? data.deltas.filter(isCookieDelta) : [];
+    if (rawDeltas.length === 0 || !clientId) return;
+    event.waitUntil(
+      (async () => {
+        const session = registry.getBoundSession(clientId, '');
+        if (!session) return;
+        session.cookieMirror.applyDeltas(rawDeltas);
+        const others = Array.from(session.clientIds).filter((id) => id !== clientId);
+        await syncCookieDeltasToClients(sw, '', others, rawDeltas);
+      })()
+    );
+    return;
+  }
+
   if (data.type === 'SW_COOKIE_MUTATE') {
     const rawMuts = Array.isArray(data.mutations) ? data.mutations.filter(isClientCookieMutation) : [];
     const seq = typeof data.seq === 'number' ? data.seq : undefined;
@@ -168,9 +197,6 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
 
     event.waitUntil(
       (async () => {
-        if (registry.getActiveSessionCount() === 0 && clientId) {
-          await registry.recoverColdStartClient(sw, clientId, '');
-        }
         const session = registry.getBoundSession(clientId, '');
         if (!session) {
           // NEVER ack when session is missing so caller retains mutation for inline fetch piggybacking!

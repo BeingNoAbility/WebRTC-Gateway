@@ -64,14 +64,24 @@ test('HTML5 Tokenizer V7: all 9 edge-case classes across 1B/3B/full chunk splits
       after: '</math><head>',
     },
     {
-      name: '6. <script> escaped & double-escaped <!-- <script></script> -->',
+      name: '6. <script> before <head> injects strictly BEFORE first executable <script>',
       html: '<!doctype html><html><script><!-- var s = "<script><head>fake</head></script><head>fake2</head>"; --></script><head><title>real</title></head></html>',
-      after: '--></script><head>',
+      before: '<script><!-- var s =',
     },
     {
       name: '7. Headless document injects BEFORE first <script>',
       html: '<!doctype html><div>hi</div><script>window.app=1;</script>',
       before: '<script>window.app=1;</script>',
+    },
+    {
+      name: '8. Foreign self-closing <svg><title/></svg> & CDATA do not swallow real <head>',
+      html: '<!doctype html><html><svg><title/><![CDATA[</svg><head>fake</head>]]></svg><head><title>real</title></head></html>',
+      after: ']]></svg><head>',
+    },
+    {
+      name: '9. Headless <script> before <body> injects BEFORE <script>',
+      html: '<!doctype html><script>window.early=1;</script><body>ok</body>',
+      before: '<script>window.early=1;</script>',
     },
   ];
 
@@ -123,6 +133,17 @@ test('HTML5 1024B <meta charset> prescan protection (when HTTP Content-Type omit
   // 5. Explicit HTTP charset -> injects IMMEDIATELY after <head> (before <meta charset>)!
   const out5 = runInject(html1, 3, { hasHttpCharset: true });
   assert.equal(out5.indexOf(SNIPPET), html1.indexOf('<head>') + '<head>'.length);
+
+  // 5b. No HTTP charset + <meta charset> inside <template> in <head> MUST NOT satisfy prescan early!
+  const htmlTpl =
+    '<!doctype html><html><head><template><meta charset="utf-8"></template><meta charset="utf-8"><title>real</title></head></html>';
+  const outTpl = runInject(htmlTpl, 3, { hasHttpCharset: false });
+  const realMetaEnd = htmlTpl.lastIndexOf('<meta charset="utf-8">') + '<meta charset="utf-8">'.length;
+  assert.equal(
+    outTpl.indexOf(SNIPPET),
+    realMetaEnd,
+    '<meta charset> inside <template> must be ignored by prescan'
+  );
 
   // 6. Boot payload filters expired cookies & stays bounded <= 16 KiB!
   const hugeCookies = [

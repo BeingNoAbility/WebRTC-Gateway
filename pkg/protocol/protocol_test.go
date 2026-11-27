@@ -56,6 +56,14 @@ type goldenFile struct {
 		CookieDeltas []goldenCookieEntry `json:"cookie_deltas"`
 		Hex          string              `json:"hex"`
 	} `json:"tlv_responses"`
+	InvalidTLVRequests []struct {
+		Name string `json:"name"`
+		Hex  string `json:"hex"`
+	} `json:"invalid_tlv_requests"`
+	InvalidTLVResponses []struct {
+		Name string `json:"name"`
+		Hex  string `json:"hex"`
+	} `json:"invalid_tlv_responses"`
 }
 
 func TestV7GoldenVectors(t *testing.T) {
@@ -161,6 +169,30 @@ func TestV7GoldenVectors(t *testing.T) {
 			if dec.Status != resp.Status || dec.RespFlags != resp.RespFlags ||
 				len(dec.Headers) != len(resp.Headers) || len(dec.CookieDeltas) != len(resp.CookieDeltas) {
 				t.Fatalf("decoded resp mismatch: %+v", dec)
+			}
+		})
+	}
+
+	for _, tc := range g.InvalidTLVRequests {
+		t.Run("invalid_tlv_req/"+tc.Name, func(t *testing.T) {
+			raw, err := hex.DecodeString(tc.Hex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if req, err := DecodeRequestHeaders(raw); err == nil {
+				t.Fatalf("expected invalid TLV request %s to fail, got %+v", tc.Name, req)
+			}
+		})
+	}
+
+	for _, tc := range g.InvalidTLVResponses {
+		t.Run("invalid_tlv_resp/"+tc.Name, func(t *testing.T) {
+			raw, err := hex.DecodeString(tc.Hex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp, err := DecodeResponseHeaders(raw); err == nil {
+				t.Fatalf("expected invalid TLV response %s to fail, got %+v", tc.Name, resp)
 			}
 		})
 	}

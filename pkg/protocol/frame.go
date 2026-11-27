@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 )
 
 const (
@@ -23,11 +24,12 @@ const (
 	// DefaultChunkSize aligns a single wire frame cleanly to 32 KiB (32760 + 8 = 32768).
 	DefaultChunkSize = 32760
 
-	// MinChunkSize prevents degenerate fragmentation on constrained SCTP peers.
-	MinChunkSize = 1024
-
-	// MinNegotiatedMaxMsgSize is the minimum SCTP maxMessageSize floor supported by V7.
+	// MinNegotiatedMaxMsgSize is the strict V7 minimum SCTP maxMessageSize floor (4096B).
 	MinNegotiatedMaxMsgSize = 4096
+
+	// MinChunkSize matches MinNegotiatedMaxMsgSize - HeaderSize (4088B) so 1 HEADERS + 16
+	// CONTINUATION frames always fit 64 KiB (17 * 4088 = 69,496B >= 65,536B).
+	MinChunkSize = MinNegotiatedMaxMsgSize - HeaderSize
 
 	// MaxTotalHeadersSize caps an assembled HEADERS + CONTINUATION block (64 KiB).
 	MaxTotalHeadersSize = 64 * 1024
@@ -261,6 +263,9 @@ func ValidateFrameMeta(gen uint32, frameType, flags uint8, payloadLen int) error
 		if flags & ^FlagFin != 0 {
 			return ErrInvalidFlags
 		}
+		if payloadLen == 0 && flags&FlagFin == 0 {
+			return ErrInvalidPayloadSize
+		}
 	case TypeWSText, TypeWSBinary:
 		if gen == 0 {
 			return ErrInvalidGen
@@ -439,6 +444,9 @@ func EncodeWSClosePayload(code uint16, reason string) []byte {
 
 func DecodeWSClosePayload(payload []byte) (code uint16, reason string, err error) {
 	if len(payload) < 2 || len(payload) > MaxWSClosePayloadBytes {
+		return 0, "", ErrInvalidPayloadSize
+	}
+	if !utf8.Valid(payload[2:]) {
 		return 0, "", ErrInvalidPayloadSize
 	}
 	return binary.BigEndian.Uint16(payload[0:2]), string(payload[2:]), nil
