@@ -13,14 +13,17 @@ import (
 )
 
 const (
-	DefaultMaxIPConns    = 64
-	DefaultMaxIPMessages = 120 // per 10 seconds
-	DefaultMaxIPUpgrades = 120 // per 60 seconds
-	DefaultMaxGlobalConn = 4096
-	maxTrackedIPs        = 16384
-	maxAuthFailedIPs     = 8192
-	authLockoutThreshold = 10
-	authLockoutDuration  = 5 * time.Minute
+	DefaultMaxIPConns          = 64
+	DefaultMaxIPMessages       = 120  // per 10 seconds (unauthenticated/visitor client IP)
+	DefaultMaxAgentSessionMsgs = 2000 // per 10 seconds (per authenticated Agent session)
+	DefaultMaxIPUpgrades       = 120  // per 60 seconds
+	DefaultMaxGlobalClientConn = 4096
+	DefaultMaxGlobalAgentConn  = 1024
+	maxTrackedIPs              = 16384
+	maxAuthFailedIPs           = 8192
+	authLockoutThreshold       = 10
+	authLockoutDuration        = 5 * time.Minute
+	signalGlobalAuthFailMax    = 600 // global failed upgrade attempts per minute across all IPs
 )
 
 // RateLimitKey normalizes an IP address for rate-limiting and brute-force lockouts:
@@ -49,36 +52,29 @@ type tokenBucket struct {
 	elem       *list.Element
 }
 
-type authFailureEntry struct {
-	key         string
-	failures    int
-	lockedUntil time.Time
-	lastSeen    time.Time
-	elem        *list.Element
-}
-
 // IPRateLimiter provides O(1) bounded-LRU per-IP (/32 IPv4, /64 IPv6) rate limiting
-// for connections, HTTP upgrades, signaling messages, and lockout-preserving auth tracking.
+// with strictly isolated Agent vs Client connection pools and an independent O(1)
+// AuthLockoutTable (separate mutex — zero contention with live message forwarding).
 type IPRateLimiter struct {
-	mu             sync.Mutex
-	maxIPConns     int
-	maxGlobalConns int
-	maxMsgsPer10s  float64
-	maxUpgrPer60s  float64
+	mu                   sync.Mutex
+	maxIPConns           int
+	maxGlobalClientConns int
+	maxGlobalAgentConns  int
+	maxMsgsPer10s        float64
+	maxUpgrPer60s        float64
 
-	globalConns int
-	conns       map[string]int
+	clientGlobalConns int
+	clientConns       map[string]int
+	agentGlobalConns  int
+	agentConns        map[string]int
 
 	msgBuckets  map[string]*tokenBucket
 	msgLRU      *list.List
 	upgrBuckets map[string]*tokenBucket
 	upgrLRU     *list.List
 
-	authEntries        map[string]*authFailureEntry
-	authLRU            *list.List
-	authSaturatedUntil time.Time
-
-	rejections atomic.Uint64
+	authLockout *AuthLockoutTable
+	rejections  atomic.Uint64
 }
 
 func NewIPRateLimiter(maxIPConns, maxMsgsPer10s int) *IPRateLimiter {
@@ -89,17 +85,25 @@ func NewIPRateLimiter(maxIPConns, maxMsgsPer10s int) *IPRateLimiter {
 		maxMsgsPer10s = DefaultMaxIPMessages
 	}
 	return &IPRateLimiter{
-		maxIPConns:     maxIPConns,
-		maxGlobalConns: DefaultMaxGlobalConn,
-		maxMsgsPer10s:  float64(maxMsgsPer10s),
-		maxUpgrPer60s:  float64(DefaultMaxIPUpgrades),
-		conns:          make(map[string]int),
-		msgBuckets:     make(map[string]*tokenBucket),
-		msgLRU:         list.New(),
-		upgrBuckets:    make(map[string]*tokenBucket),
-		upgrLRU:        list.New(),
-		authEntries:    make(map[string]*authFailureEntry),
-		authLRU:        list.New(),
+		maxIPConns:           maxIPConns,
+		maxGlobalClientConns: DefaultMaxGlobalClientConn,
+		maxGlobalAgentConns:  DefaultMaxGlobalAgentConn,
+		maxMsgsPer10s:        float64(maxMsgsPer10s),
+		maxUpgrPer60s:        float64(DefaultMaxIPUpgrades),
+		clientConns:          make(map[string]int),
+		agentConns:           make(map[string]int),
+		msgBuckets:           make(map[string]*tokenBucket),
+		msgLRU:               list.New(),
+		upgrBuckets:          make(map[string]*tokenBucket),
+		upgrLRU:              list.New(),
+		authLockout: NewAuthLockoutTable(AuthLockoutConfig{
+			MaxFailures:       authLockoutThreshold,
+			LockoutDuration:   authLockoutDuration,
+			MaxPendingKeys:    maxAuthFailedIPs,
+			MaxLockedKeys:     maxAuthFailedIPs,
+			GlobalMaxFailures: signalGlobalAuthFailMax,
+			GlobalWindow:      time.Minute,
+		}),
 	}
 }
 
@@ -157,141 +161,121 @@ func (l *IPRateLimiter) allowBucket(
 	return true
 }
 
+// AcquireConn reserves a visitor client WebSocket slot (isolated from Agent quota).
 func (l *IPRateLimiter) AcquireConn(ip string) bool {
 	key := RateLimitKey(ip)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.globalConns >= l.maxGlobalConns || l.conns[key] >= l.maxIPConns {
+	if l.clientGlobalConns >= l.maxGlobalClientConns || l.clientConns[key] >= l.maxIPConns {
 		l.rejections.Add(1)
 		return false
 	}
-	l.globalConns++
-	l.conns[key]++
+	l.clientGlobalConns++
+	l.clientConns[key]++
 	return true
 }
 
+// ReleaseConn releases a visitor client WebSocket slot.
 func (l *IPRateLimiter) ReleaseConn(ip string) {
 	key := RateLimitKey(ip)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.globalConns > 0 {
-		l.globalConns--
+	if l.clientGlobalConns > 0 {
+		l.clientGlobalConns--
 	}
-	if n := l.conns[key]; n <= 1 {
-		delete(l.conns, key)
+	if n := l.clientConns[key]; n <= 1 {
+		delete(l.clientConns, key)
 	} else {
-		l.conns[key] = n - 1
+		l.clientConns[key] = n - 1
 	}
 }
 
-func (l *IPRateLimiter) sweepUnlockedAuthLocked(now time.Time) (evicted bool, earliestLock time.Time) {
-	for elem := l.authLRU.Back(); elem != nil; {
-		prev := elem.Prev()
-		victim := elem.Value.(*authFailureEntry)
-		isLocked := !victim.lockedUntil.IsZero() && now.Before(victim.lockedUntil)
-		if !isLocked {
-			l.authLRU.Remove(elem)
-			delete(l.authEntries, victim.key)
-			evicted = true
-			if len(l.authEntries) < maxAuthFailedIPs {
-				break
-			}
-		} else if earliestLock.IsZero() || victim.lockedUntil.Before(earliestLock) {
-			earliestLock = victim.lockedUntil
-		}
-		elem = prev
+// AcquireAgentConn reserves an authenticated Agent WebSocket slot (unauthenticated client floods
+// can never starve authenticated Agents).
+func (l *IPRateLimiter) AcquireAgentConn(ip string) bool {
+	key := RateLimitKey(ip)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.agentGlobalConns >= l.maxGlobalAgentConns || l.agentConns[key] >= l.maxIPConns {
+		l.rejections.Add(1)
+		return false
 	}
-	return evicted, earliestLock
+	l.agentGlobalConns++
+	l.agentConns[key]++
+	return true
+}
+
+// ReleaseAgentConn releases an Agent WebSocket slot.
+func (l *IPRateLimiter) ReleaseAgentConn(ip string) {
+	key := RateLimitKey(ip)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.agentGlobalConns > 0 {
+		l.agentGlobalConns--
+	}
+	if n := l.agentConns[key]; n <= 1 {
+		delete(l.agentConns, key)
+	} else {
+		l.agentConns[key] = n - 1
+	}
 }
 
 func (l *IPRateLimiter) IsAuthLocked(ip string) bool {
-	key := RateLimitKey(ip)
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	e, ok := l.authEntries[key]
-	if !ok {
-		// Fail-Closed when table is saturated with active unexpired lockouts.
-		if len(l.authEntries) >= maxAuthFailedIPs {
-			if !l.authSaturatedUntil.IsZero() && now.Before(l.authSaturatedUntil) {
-				l.rejections.Add(1)
-				return true
-			}
-			evicted, earliest := l.sweepUnlockedAuthLocked(now)
-			if !evicted && len(l.authEntries) >= maxAuthFailedIPs {
-				if earliest.IsZero() {
-					earliest = now.Add(authLockoutDuration)
-				}
-				l.authSaturatedUntil = earliest
-				l.rejections.Add(1)
-				return true
-			}
-			l.authSaturatedUntil = time.Time{}
-		}
-		return false
-	}
-	if !e.lockedUntil.IsZero() && now.Before(e.lockedUntil) {
+	allowed, _ := l.authLockout.Allow(ip, time.Now())
+	if !allowed {
 		l.rejections.Add(1)
 		return true
 	}
-	if !e.lockedUntil.IsZero() && !now.Before(e.lockedUntil) {
-		l.authLRU.Remove(e.elem)
-		delete(l.authEntries, key)
-		l.authSaturatedUntil = time.Time{}
-	}
 	return false
 }
 
-// RecordFailedAuth increments failed auth count for key while NEVER evicting actively locked entries.
 func (l *IPRateLimiter) RecordFailedAuth(ip string) bool {
-	key := RateLimitKey(ip)
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	e, ok := l.authEntries[key]
-	if !ok {
-		if len(l.authEntries) >= maxAuthFailedIPs {
-			evicted, earliest := l.sweepUnlockedAuthLocked(now)
-			if !evicted && len(l.authEntries) >= maxAuthFailedIPs {
-				// All slots hold active lockouts: fail closed without evicting locked attackers.
-				if earliest.IsZero() {
-					earliest = now.Add(authLockoutDuration)
-				}
-				l.authSaturatedUntil = earliest
-				l.rejections.Add(1)
-				return true
-			}
-			l.authSaturatedUntil = time.Time{}
-		}
-		e = &authFailureEntry{key: key, lastSeen: now}
-		e.elem = l.authLRU.PushFront(e)
-		l.authEntries[key] = e
-	} else {
-		l.authLRU.MoveToFront(e.elem)
-		if now.Sub(e.lastSeen) > authLockoutDuration {
-			e.failures = 0
-			e.lockedUntil = time.Time{}
-		}
-		e.lastSeen = now
+	locked := l.authLockout.RecordFailure(ip, time.Now())
+	if locked {
+		l.rejections.Add(1)
 	}
-	e.failures++
-	if e.failures >= authLockoutThreshold {
-		e.lockedUntil = now.Add(authLockoutDuration)
-		return true
-	}
-	return false
+	return locked
 }
 
 func (l *IPRateLimiter) ResetFailedAuth(ip string) {
-	key := RateLimitKey(ip)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if e, ok := l.authEntries[key]; ok {
-		l.authLRU.Remove(e.elem)
-		delete(l.authEntries, key)
-		l.authSaturatedUntil = time.Time{}
+	l.authLockout.Reset(ip)
+}
+
+// SessionMessageLimiter is an independent per-session token bucket for authenticated Agents
+// so busy Agents serving up to 256 concurrent visitors are never throttled by per-IP visitor buckets.
+type SessionMessageLimiter struct {
+	tokens     float64
+	burst      float64
+	ratePerSec float64
+	lastRefill time.Time
+}
+
+func NewSessionMessageLimiter(msgsPer10s int) *SessionMessageLimiter {
+	if msgsPer10s <= 0 {
+		msgsPer10s = DefaultMaxAgentSessionMsgs
 	}
+	b := float64(msgsPer10s)
+	return &SessionMessageLimiter{
+		tokens:     b,
+		burst:      b,
+		ratePerSec: b / 10.0,
+		lastRefill: time.Now(),
+	}
+}
+
+func (s *SessionMessageLimiter) Allow(now time.Time) bool {
+	if elapsed := now.Sub(s.lastRefill).Seconds(); elapsed > 0 {
+		s.tokens += elapsed * s.ratePerSec
+		if s.tokens > s.burst {
+			s.tokens = s.burst
+		}
+		s.lastRefill = now
+	}
+	if s.tokens < 1.0 {
+		return false
+	}
+	s.tokens -= 1.0
+	return true
 }
 
 // ParseTrustedProxies parses a comma-separated list of IPs/CIDRs (unmapping IPv4-mapped IPv6).

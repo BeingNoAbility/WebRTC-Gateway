@@ -10,14 +10,14 @@ import (
 
 func testDistFS() fstest.MapFS {
 	return fstest.MapFS{
-		"dist/index.html":             &fstest.MapFile{Data: []byte("<!doctype html><html><head><title>Portal</title></head><body>ok</body></html>")},
-		"dist/favicon.svg":            &fstest.MapFile{Data: []byte("<svg/>")},
-		"dist/__p2p_gw__/portal.js":   &fstest.MapFile{Data: []byte("console.log('portal');")},
-		"dist/__p2p_gw__/portal.css":  &fstest.MapFile{Data: []byte("body{margin:0}")},
-		"dist/__p2p_gw__/sw.js":       &fstest.MapFile{Data: []byte("console.log('sw');")},
-		"dist/__p2p_gw__/bridge.html": &fstest.MapFile{Data: []byte("<!doctype html><html><head></head><body><script src=\"/__p2p_gw__/bridge.js\"></script></body></html>")},
-		"dist/__p2p_gw__/bridge.js":   &fstest.MapFile{Data: []byte("console.log('bridge');")},
-		"dist/__p2p_gw__/patch.js":    &fstest.MapFile{Data: []byte("console.log('patch');")},
+		"dist/index.html":                  &fstest.MapFile{Data: []byte("<!doctype html><html><head><title>Portal</title></head><body>ok</body></html>")},
+		"dist/favicon.svg":                 &fstest.MapFile{Data: []byte("<svg/>")},
+		"dist/__p2p_gw__/portal.js":        &fstest.MapFile{Data: []byte("console.log('portal');")},
+		"dist/__p2p_gw__/portal.css":       &fstest.MapFile{Data: []byte("body{margin:0}")},
+		"dist/__p2p_gw__/sw.js":            &fstest.MapFile{Data: []byte("console.log('sw');")},
+		"dist/__p2p_gw__/bridge.html":      &fstest.MapFile{Data: []byte("<!doctype html><html><head></head><body><script src=\"/__p2p_gw__/assets/bridge.js\"></script></body></html>")},
+		"dist/__p2p_gw__/assets/bridge.js": &fstest.MapFile{Data: []byte("console.log('bridge');")},
+		"dist/__p2p_gw__/assets/patch.js":  &fstest.MapFile{Data: []byte("console.log('patch');")},
 	}
 }
 
@@ -274,7 +274,7 @@ func TestIPv6OriginNoPanic(t *testing.T) {
 	wsReq := httptest.NewRequest("GET", "http://[::1]:8888/ws/client/nas", nil)
 	wsReq.Host = "[::1]:8888"
 	wsReq.Header.Set("Origin", "http://[::1]:8888")
-	if !srv.Policy.CheckWSOrigin(wsReq, true) {
+	if !srv.Policy.CheckWSOrigin(wsReq) {
 		t.Fatal("expected Origin http://[::1]:8888 to be allowed for WS")
 	}
 }
@@ -326,8 +326,9 @@ func TestHostPortCSPInjectionBlocked(t *testing.T) {
 		}
 	}
 
-	// Service-Worker: script header must be rejected (403) on bridge.js and patch.js.
-	for _, p := range []string{"/__p2p_gw__/bridge.js", "/__p2p_gw__/patch.js"} {
+	// Service-Worker: script and Sec-Fetch-Dest: serviceworker must be rejected (403) on bridge.js and patch.js,
+	// and responses MUST emit Vary: Service-Worker, Sec-Fetch-Dest so immutable caches cannot bypass the gate!
+	for _, p := range []string{"/__p2p_gw__/assets/bridge.js", "/__p2p_gw__/assets/patch.js"} {
 		req := httptest.NewRequest("GET", "https://sbx-1.sandbox.example.net"+p, nil)
 		req.Host = "sbx-1.sandbox.example.net"
 		req.Header.Set("Service-Worker", "script")
@@ -335,6 +336,26 @@ func TestHostPortCSPInjectionBlocked(t *testing.T) {
 		srv.Handler().ServeHTTP(rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("expected 403 for Service-Worker: script on %s, got %d", p, rec.Code)
+		}
+		if !strings.Contains(rec.Header().Get("Vary"), "Service-Worker") {
+			t.Fatalf("expected Vary: Service-Worker on %s, got %q", p, rec.Header().Get("Vary"))
+		}
+
+		req2 := httptest.NewRequest("GET", "https://sbx-1.sandbox.example.net"+p, nil)
+		req2.Host = "sbx-1.sandbox.example.net"
+		req2.Header.Set("Sec-Fetch-Dest", "serviceworker")
+		rec2 := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec2, req2)
+		if rec2.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for Sec-Fetch-Dest: serviceworker on %s, got %d", p, rec2.Code)
+		}
+
+		reqOK := httptest.NewRequest("GET", "https://sbx-1.sandbox.example.net"+p, nil)
+		reqOK.Host = "sbx-1.sandbox.example.net"
+		recOK := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(recOK, reqOK)
+		if recOK.Code != http.StatusOK || !strings.Contains(recOK.Header().Get("Vary"), "Service-Worker") {
+			t.Fatalf("expected 200 with Vary: Service-Worker on %s, got %d vary=%q", p, recOK.Code, recOK.Header().Get("Vary"))
 		}
 	}
 }

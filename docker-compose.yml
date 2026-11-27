@@ -39,7 +39,8 @@ services:
       retries: 3
       start_period: 5s
     ports:
-      - "8888:8888"
+      # Bind loopback only by default so plaintext HTTP is fronted by your host reverse proxy / TLS terminator.
+      - "127.0.0.1:8888:8888"
     environment:
       - ADDR=:8888
       - PORTAL_DOMAIN=${PORTAL_DOMAIN?Set PORTAL_DOMAIN in .env (e.g. portal.example.com)}
@@ -56,6 +57,8 @@ services:
       - TLS_KEY=${TLS_KEY:-}
       - MAX_IP_CONNS=${MAX_IP_CONNS:-64}
       - MAX_IP_MSGS=${MAX_IP_MSGS:-120}
+      # When fronted by a host reverse proxy over Docker bridge, add the Docker bridge subnet (e.g. 172.17.0.0/16)
+      # or proxy container IP so X-Forwarded-Proto and X-Forwarded-For are honored.
       - TRUSTED_PROXIES=${TRUSTED_PROXIES:-127.0.0.0/8,::1/128}
       - CLIENT_IP_HEADER=${CLIENT_IP_HEADER:-}
     volumes:
@@ -89,7 +92,7 @@ services:
     network_mode: "host"
     environment:
       - NODE_ID=${NODE_ID:-homeserver}
-      - SIGNAL_URL=${SIGNAL_URL:-ws://127.0.0.1:8888/ws}
+      - SIGNAL_URL=${SIGNAL_URL:-wss://${PORTAL_DOMAIN}/ws}
       - SIGNAL_SECRET=${SIGNAL_SECRET?Set SIGNAL_SECRET in .env}
       - ACCESS_SECRET=${ACCESS_SECRET?Set ACCESS_SECRET in .env (or set ACCESS_SECRET= with ALLOW_PUBLIC=true)}
       - ALLOW_PUBLIC=${ALLOW_PUBLIC:-false}

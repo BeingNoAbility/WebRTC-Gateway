@@ -49,6 +49,7 @@ if [ -n "$unformatted" ]; then
   exit 1
 fi
 go vet ./...
+go vet -tags embedweb ./...
 if command -v staticcheck >/dev/null 2>&1; then
   staticcheck ./...
 elif [ -x "$(go env GOPATH)/bin/staticcheck" ]; then
@@ -64,7 +65,7 @@ step "Go unit & integration tests (-race -short)"
 go test -race -short ./...
 
 step "Go fuzz smoke tests"
-for pkg in ./pkg/protocol ./pkg/proxy; do
+for pkg in ./pkg/protocol ./pkg/proxy ./pkg/signaling; do
   fuzz_tests=$(go test -list '^Fuzz' "$pkg" 2>/dev/null | grep '^Fuzz' || true)
   for ft in $fuzz_tests; do
     go test -run='^$' -fuzz="^${ft}\$" -fuzztime=2s "$pkg"

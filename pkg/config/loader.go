@@ -42,12 +42,11 @@ func LoadYAMLFile(path string, dst any) error {
 	return nil
 }
 
-// ResolveExplicitConfigPath resolves a config file ONLY from explicit CLI flags
-// (-config / --config) or the CONFIG_FILE environment variable.
-// It intentionally NEVER auto-loads from the current working directory (Fail-Closed).
-func ResolveExplicitConfigPath(args []string, valueFlags map[string]bool) string {
-	if v, ok := FindFlagValue(args, "config", valueFlags); ok && strings.TrimSpace(v) != "" {
-		return strings.TrimSpace(v)
+// ResolveExplicitConfigPath resolves a config file ONLY from an explicit parsed CLI flag
+// or the CONFIG_FILE environment variable. It NEVER auto-loads from CWD (Fail-Closed).
+func ResolveExplicitConfigPath(cliConfigVal string) string {
+	if v := strings.TrimSpace(cliConfigVal); v != "" {
+		return v
 	}
 	if envPath := strings.TrimSpace(os.Getenv("CONFIG_FILE")); envPath != "" {
 		return envPath
@@ -55,104 +54,78 @@ func ResolveExplicitConfigPath(args []string, valueFlags map[string]bool) string
 	return ""
 }
 
-func parseFlagPrefix(arg string) (string, bool) {
-	if strings.HasPrefix(arg, "---") {
-		return "", false
+// ResolveString merges configuration with strict priority: CLI flag > Env > YAML > defaultVal.
+func ResolveString(cliVal string, cliSet bool, envName, cfgVal, defaultVal string) string {
+	if cliSet {
+		return cliVal
 	}
-	if strings.HasPrefix(arg, "--") {
-		if len(arg) == 2 {
-			return "", false
+	if envName != "" {
+		if v, ok := os.LookupEnv(envName); ok && v != "" {
+			return v
 		}
-		return arg[2:], true
 	}
-	if strings.HasPrefix(arg, "-") && len(arg) > 1 {
-		return arg[1:], true
+	if cfgVal != "" {
+		return cfgVal
 	}
-	return "", false
+	return defaultVal
 }
 
-// FindFlagValue scans args for -name / --name (matching Go flag.FlagSet semantics: stops at
-// "--" or the first positional argument, rejects "---flag", and returns the last occurrence)
-// while skipping values belonging to other value-taking flags.
-func FindFlagValue(args []string, target string, valueFlags map[string]bool) (string, bool) {
-	var foundVal string
-	found := false
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			break
+// ResolveBool merges a boolean flag with strict priority: CLI flag > Env > YAML (*bool or bool) > defaultVal.
+// Returns (value, explicitlySet, err).
+func ResolveBool(cliVal, cliSet bool, envName string, cfgPtr *bool, cfgBool, defaultVal bool) (bool, bool, error) {
+	if cliSet {
+		return cliVal, true, nil
+	}
+	if envName != "" {
+		b, set, err := ParseEnvBool(envName)
+		if err != nil {
+			return false, true, err
 		}
-		if !strings.HasPrefix(arg, "-") || arg == "-" {
-			break // Go flag.FlagSet stops parsing at the first non-flag positional argument.
-		}
-		trimmed, ok := parseFlagPrefix(arg)
-		if !ok {
-			continue
-		}
-		name, val, hasEq := strings.Cut(trimmed, "=")
-		if name == target {
-			if hasEq {
-				foundVal = val
-				found = true
-				continue
-			}
-			if i+1 < len(args) {
-				foundVal = args[i+1]
-				found = true
-				i++
-				continue
-			}
-			foundVal = ""
-			found = true
-			continue
-		}
-		if !hasEq && valueFlags[name] && i+1 < len(args) {
-			i++ // skip the flag's value token
+		if set {
+			return b, true, nil
 		}
 	}
-	return foundVal, found
+	if cfgPtr != nil {
+		return *cfgPtr, true, nil
+	}
+	if cfgBool {
+		return true, true, nil
+	}
+	return defaultVal, false, nil
 }
 
-// HasBoolFlag returns true if any of the listed boolean flag names (e.g. "v", "version", "h", "help")
-// appears as an actual flag token evaluating to true in args, ignoring tokens that are values of
-// valueFlags, tokens after "--" or the first positional arg, or explicit false forms like `-version=false`.
-func HasBoolFlag(args []string, names []string, valueFlags map[string]bool) bool {
-	want := make(map[string]bool, len(names))
-	for _, n := range names {
-		want[n] = true
+// ResolveInt merges an integer flag with strict priority: CLI flag > Env > YAML > defaultVal,
+// validating minVal <= v <= maxVal (when maxVal > 0) whenever an explicit value is supplied.
+func ResolveInt(cliVal int, cliSet bool, envName string, cfgVal, defaultVal, minVal, maxVal int) (int, error) {
+	var val int
+	var set bool
+	switch {
+	case cliSet:
+		val = cliVal
+		set = true
+	case envName != "":
+		n, envSet, err := ParseEnvInt(envName, minVal, maxVal)
+		if err != nil {
+			return 0, err
+		}
+		if envSet {
+			return n, nil
+		}
+		if cfgVal != 0 {
+			val = cfgVal
+			set = true
+		}
+	case cfgVal != 0:
+		val = cfgVal
+		set = true
 	}
-	result := false
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			break
-		}
-		if !strings.HasPrefix(arg, "-") || arg == "-" {
-			break
-		}
-		trimmed, ok := parseFlagPrefix(arg)
-		if !ok {
-			continue
-		}
-		name, val, hasEq := strings.Cut(trimmed, "=")
-		if want[name] {
-			if !hasEq {
-				result = true
-				continue
-			}
-			switch strings.ToLower(strings.TrimSpace(val)) {
-			case "1", "true", "t", "yes", "on":
-				result = true
-			default:
-				result = false
-			}
-			continue
-		}
-		if !hasEq && valueFlags[name] && i+1 < len(args) {
-			i++
-		}
+	if !set {
+		return defaultVal, nil
 	}
-	return result
+	if val < minVal || (maxVal > 0 && val > maxVal) {
+		return 0, fmt.Errorf("value out of range (%d): must be >= %d (max %d)", val, minVal, maxVal)
+	}
+	return val, nil
 }
 
 // ResolveSecret resolves a secret value with priority:

@@ -168,6 +168,42 @@
       "hex": "00c8010001000c636f6e74656e742d747970650018746578742f68746d6c3b20636861727365743d7574662d38000201057468656d6500046461726b00012f000001a3185c500002057374616c65000000012f0000000000000000"
     }
   ],
+  "invalid_tlv_requests": [
+    {
+      "name": "reserved_fetch_ctx_bit",
+      "hex": "01800347455400012f00000000"
+    },
+    {
+      "name": "target_missing_leading_slash",
+      "hex": "0100034745540003666f6f00000000"
+    },
+    {
+      "name": "non_ascii_header_token",
+      "hex": "01000347455400012f0001000378e28400026f6b0000"
+    },
+    {
+      "name": "cookie_expires_ms_msb_set",
+      "hex": "01000347455400012f0000000101016100013100012f8000000000000001"
+    },
+    {
+      "name": "trailing_extra_byte",
+      "hex": "01000347455400012f00000000ff"
+    }
+  ],
+  "invalid_tlv_responses": [
+    {
+      "name": "reserved_resp_flags_bit",
+      "hex": "00c88000000000"
+    },
+    {
+      "name": "cookie_delta_expires_ms_msb_set",
+      "hex": "00c8000000000101016100013100012f8000000000000001"
+    },
+    {
+      "name": "trailing_extra_byte",
+      "hex": "00c80000000000ff"
+    }
+  ],
   "rfc9383_appendix_c": {
     "suite": "SPAKE2+-P256-SHA256-HKDF-SHA256-HMAC-SHA256",
     "context": "SPAKE2+-P256-SHA256-HKDF-SHA256-HMAC-SHA256 Test Vectors",

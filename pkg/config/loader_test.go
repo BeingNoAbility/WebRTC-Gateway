@@ -13,7 +13,6 @@ func TestLoadYAMLFile_BOMAndKnownFields(t *testing.T) {
 	}
 	dir := t.TempDir()
 
-	// UTF-8 BOM YAML must load cleanly.
 	bomPath := filepath.Join(dir, "bom.yaml")
 	if err := os.WriteFile(bomPath, append([]byte{0xEF, 0xBB, 0xBF}, []byte("host: example.com\nport: 8443\n")...), 0600); err != nil {
 		t.Fatal(err)
@@ -26,7 +25,6 @@ func TestLoadYAMLFile_BOMAndKnownFields(t *testing.T) {
 		t.Fatalf("unexpected decoded value: %+v", got)
 	}
 
-	// JSON is valid YAML 1.2 and must decode through the same strict path.
 	jsonPath := filepath.Join(dir, "cfg.json")
 	if err := os.WriteFile(jsonPath, []byte(`{"host":"127.0.0.1","port":8888}`), 0600); err != nil {
 		t.Fatal(err)
@@ -39,7 +37,6 @@ func TestLoadYAMLFile_BOMAndKnownFields(t *testing.T) {
 		t.Fatalf("unexpected JSON decode: %+v", got)
 	}
 
-	// Unknown field must fail closed.
 	badPath := filepath.Join(dir, "bad.yaml")
 	if err := os.WriteFile(badPath, []byte("host: ok\ntypo_field: true\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -48,46 +45,11 @@ func TestLoadYAMLFile_BOMAndKnownFields(t *testing.T) {
 		t.Fatal("expected unknown YAML field to fail, got nil")
 	}
 
-	// Multi-document YAML must fail closed.
 	multiPath := filepath.Join(dir, "multi.yaml")
-	if err := os.WriteFile(multiPath, []byte("host: one\n---\nhost: two\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := LoadYAMLFile(multiPath, &got); err == nil {
-		t.Fatal("expected multi-document YAML to fail, got nil")
-	}
-}
-
-func TestFlagScanning_IgnoresFlagValues(t *testing.T) {
-	valueFlags := map[string]bool{
-		"access-secret": true,
-		"signal-secret": true,
-		"config":        true,
-	}
-
-	// Negative test: `-access-secret -v` must not treat the value `-v` as a boolean flag.
-	if HasBoolFlag([]string{"-access-secret", "-v", "-signal-secret", "-h"}, []string{"v", "version", "h", "help"}, valueFlags) {
-		t.Fatal("flag values `-v` / `-h` were falsely treated as boolean flags")
-	}
-	if !HasBoolFlag([]string{"-access-secret", "secret", "-v"}, []string{"v", "version"}, valueFlags) {
-		t.Fatal("expected real `-v` flag to be detected")
-	}
-	if HasBoolFlag([]string{"-version=false"}, []string{"v", "version"}, valueFlags) {
-		t.Fatal("expected `-version=false` to evaluate to false")
-	}
-	if !HasBoolFlag([]string{"-version=true"}, []string{"v", "version"}, valueFlags) {
-		t.Fatal("expected `-version=true` to evaluate to true")
-	}
-	if HasBoolFlag([]string{"--", "-v"}, []string{"v"}, valueFlags) {
-		t.Fatal("expected `--` terminator to stop flag scanning")
-	}
-
-	// `-access-secret -config` must not treat `-config` as the config flag.
-	if _, ok := FindFlagValue([]string{"-access-secret", "-config"}, "config", valueFlags); ok {
-		t.Fatal("flag value `-config` was falsely matched as config flag")
-	}
-	if v, ok := FindFlagValue([]string{"-access-secret", "pw", "-config", "/etc/p2p/agent.yaml"}, "config", valueFlags); !ok || v != "/etc/p2p/agent.yaml" {
-		t.Fatalf("expected /etc/p2p/agent.yaml, got (%q, %v)", v, ok)
+	if err := os.WriteFile(multiPath, []byte("host: one\n---\nhost: two\n"), 0600); err == nil {
+		if err := LoadYAMLFile(multiPath, &got); err == nil {
+			t.Fatal("expected multi-document YAML to fail, got nil")
+		}
 	}
 }
 
@@ -103,12 +65,53 @@ func TestResolveExplicitConfigPath_NeverAutoloadsCWD(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
 
 	t.Setenv("CONFIG_FILE", "")
-	if p := ResolveExplicitConfigPath(nil, map[string]bool{"config": true}); p != "" {
+	if p := ResolveExplicitConfigPath(""); p != "" {
 		t.Fatalf("must not autoload CWD config file, got %q", p)
 	}
 	t.Setenv("CONFIG_FILE", "/etc/p2p/agent.yaml")
-	if p := ResolveExplicitConfigPath(nil, map[string]bool{"config": true}); p != "/etc/p2p/agent.yaml" {
+	if p := ResolveExplicitConfigPath(""); p != "/etc/p2p/agent.yaml" {
 		t.Fatalf("expected CONFIG_FILE path, got %q", p)
+	}
+	if p := ResolveExplicitConfigPath("/cli/override.yaml"); p != "/cli/override.yaml" {
+		t.Fatalf("expected CLI override path, got %q", p)
+	}
+}
+
+func TestResolveHelpers_Precedence(t *testing.T) {
+	t.Setenv("TEST_STR", "from-env")
+	if got := ResolveString("from-cli", true, "TEST_STR", "from-cfg", "default"); got != "from-cli" {
+		t.Fatalf("expected CLI to win, got %q", got)
+	}
+	if got := ResolveString("", false, "TEST_STR", "from-cfg", "default"); got != "from-env" {
+		t.Fatalf("expected Env to win, got %q", got)
+	}
+	t.Setenv("TEST_STR", "")
+	if got := ResolveString("", false, "TEST_STR", "from-cfg", "default"); got != "from-cfg" {
+		t.Fatalf("expected YAML to win, got %q", got)
+	}
+	if got := ResolveString("", false, "TEST_STR", "", "default"); got != "default" {
+		t.Fatalf("expected default, got %q", got)
+	}
+
+	falsePtr := false
+	t.Setenv("TEST_BOOL_P", "true")
+	if v, set, err := ResolveBool(false, true, "TEST_BOOL_P", &falsePtr, true, true); err != nil || !set || v {
+		t.Fatalf("expected CLI false override, got (%v, %v, %v)", v, set, err)
+	}
+	if v, set, err := ResolveBool(false, false, "TEST_BOOL_P", &falsePtr, false, false); err != nil || !set || !v {
+		t.Fatalf("expected Env true override, got (%v, %v, %v)", v, set, err)
+	}
+	t.Setenv("TEST_BOOL_P", "")
+	if v, set, err := ResolveBool(false, false, "TEST_BOOL_P", &falsePtr, false, true); err != nil || !set || v {
+		t.Fatalf("expected YAML *bool=false to win over default true, got (%v, %v, %v)", v, set, err)
+	}
+
+	t.Setenv("TEST_INT_P", "")
+	if _, err := ResolveInt(0, true, "TEST_INT_P", 10, 64, 1, 100); err == nil {
+		t.Fatal("expected out-of-range CLI int to fail")
+	}
+	if n, err := ResolveInt(0, false, "TEST_INT_P", 0, 64, 1, 100); err != nil || n != 64 {
+		t.Fatalf("expected default 64, got (%d, %v)", n, err)
 	}
 }
 
@@ -166,32 +169,5 @@ func TestParseEnvStrict(t *testing.T) {
 	got := SplitNonEmptyCSV(" stun:a:3478 , , stun:b:3478 ")
 	if len(got) != 2 || got[0] != "stun:a:3478" || got[1] != "stun:b:3478" {
 		t.Fatalf("unexpected CSV split: %#v", got)
-	}
-}
-
-func TestFlagScannerBoundaries(t *testing.T) {
-	vflags := map[string]bool{"config": true, "id": true}
-
-	// Must stop at "--" and not consume trailing arguments as flags.
-	if val, ok := FindFlagValue([]string{"-id", "nas", "--", "-config", "/etc/evil.yaml"}, "config", vflags); ok || val != "" {
-		t.Fatalf("FindFlagValue crossed -- terminator: got (%q, %v)", val, ok)
-	}
-	if HasBoolFlag([]string{"--", "-version"}, []string{"v", "version"}, vflags) {
-		t.Fatal("HasBoolFlag crossed -- terminator")
-	}
-
-	// Must stop at first positional argument (matching Go flag.FlagSet).
-	if val, ok := FindFlagValue([]string{"positional", "-config", "/tmp/a.yaml"}, "config", vflags); ok || val != "" {
-		t.Fatalf("FindFlagValue crossed positional arg: got (%q, %v)", val, ok)
-	}
-
-	// Must reject triple-dash ---config.
-	if val, ok := FindFlagValue([]string{"---config=/tmp/a.yaml"}, "config", vflags); ok || val != "" {
-		t.Fatalf("FindFlagValue accepted ---config: got (%q, %v)", val, ok)
-	}
-
-	// Must use the last occurrence of -config (matching Go flag.FlagSet).
-	if val, ok := FindFlagValue([]string{"-config", "/tmp/first.yaml", "-config=/tmp/second.yaml"}, "config", vflags); !ok || val != "/tmp/second.yaml" {
-		t.Fatalf("expected last -config to win, got (%q, %v)", val, ok)
 	}
 }

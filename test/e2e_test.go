@@ -79,7 +79,11 @@ func TestMain(m *testing.M) {
 func TestExampleConfigs_StrictKnownFields(t *testing.T) {
 	// 1. Validate agent.example.yaml via real compiled agent binary (`-config` parses with KnownFields(true);
 	//    it must NOT fail with "Failed to load config", and instead proceeds to Fail-Closed missing ACCESS_SECRET).
-	agCmd := exec.Command(builtAgentBin, "-config", filepath.Join("..", "configs", "agent.example.yaml"), "-ephemeral-identity")
+	agCmd := exec.Command(
+		builtAgentBin,
+		"-config", filepath.Join("..", "configs", "agent.example.yaml"),
+		"-identity-key", filepath.Join(t.TempDir(), "example.ed25519.key"),
+	)
 	agCmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir()}
 	agOut, _ := agCmd.CombinedOutput()
 	if strings.Contains(string(agOut), "Failed to load config") {
@@ -137,6 +141,17 @@ func TestCLI_Binaries_VersionMintAndFailClosed(t *testing.T) {
 	badDirHostAg.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir()}
 	if out, err := badDirHostAg.CombinedOutput(); err == nil || !strings.Contains(string(out), "-upstream-host is only valid with -target") {
 		t.Fatalf("expected -upstream-host with -dir to Fail-Closed, err=%v out=%s", err, string(out))
+	}
+
+	// Fail-Closed: Conflicting flags (-ephemeral-identity + -identity-key, -access-secret + -allow-public, -proxy + -dir).
+	if out, err := exec.Command(builtAgentBin, "-id", "clitest", "-target", "http://127.0.0.1:8080", "-allow-public", "-ephemeral-identity", "-identity-key", keyPath).CombinedOutput(); err == nil {
+		t.Fatalf("expected -ephemeral-identity + -identity-key to Fail-Closed, got: %s", string(out))
+	}
+	if out, err := exec.Command(builtAgentBin, "-id", "clitest", "-target", "http://127.0.0.1:8080", "-access-secret", "pw", "-allow-public", "-identity-key", keyPath).CombinedOutput(); err == nil {
+		t.Fatalf("expected -access-secret + -allow-public to Fail-Closed, got: %s", string(out))
+	}
+	if out, err := exec.Command(builtAgentBin, "-id", "clitest", "-dir", t.TempDir(), "-proxy", "http://127.0.0.1:3128", "-allow-public", "-identity-key", keyPath).CombinedOutput(); err == nil {
+		t.Fatalf("expected -proxy with -dir to Fail-Closed, got: %s", string(out))
 	}
 
 	// Offline -mint-link prints pinned + capability share link cleanly to stdout.

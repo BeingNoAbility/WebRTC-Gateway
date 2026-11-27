@@ -112,6 +112,15 @@ if (fs.existsSync(changelogPath)) {
   );
 }
 
+const composePath = path.join(rootDir, 'docker-compose.yml');
+if (fs.existsSync(composePath)) {
+  const compose = fs.readFileSync(composePath, 'utf8');
+  check(
+    compose.includes(`webrtc-p2p-server:${expectedTag}`) && compose.includes(`webrtc-p2p-agent:${expectedTag}`),
+    `docker-compose.yml image tags match ${expectedTag}`
+  );
+}
+
 // 4. Verify web/dist is NOT tracked in Git and no .env file is tracked/unignored
 if (!process.env.HYGIENE_ROOT_DIR) {
   try {

@@ -38,6 +38,8 @@ import {
 const MAX_CONCURRENT_REQ_PORTS = 256;
 const MAX_CONCURRENT_WS_STREAMS = 64;
 const MAX_REQ_BODY_CHUNK_BYTES = 256 * 1024;
+const MAX_PENDING_HTTP_WRITE_BYTES = 8 * 1024 * 1024;
+const MAX_PENDING_WS_WRITE_BYTES = MAX_WS_MESSAGE_BYTES; // 16 MiB strict per-WS outbound buffer cap
 const WS_CLOSE_ACK_TIMEOUT_MS = 2_000;
 
 const FORBIDDEN_SANDBOX_REQ_HEADERS = new Set([
@@ -73,6 +75,7 @@ export interface TunnelBridgeCallbacks {
   onRouteSync?: (path: string) => void;
   onTitleSync?: (title: string) => void;
   onCookieDeltas?: (deltas: CookieDelta[]) => void;
+  onSwEvicted?: () => void;
   onLog?: (line: string) => void;
 }
 
@@ -150,8 +153,12 @@ export class TunnelBridge {
   private appFrame: HTMLIFrameElement | null = null;
   private bridgePort: MessagePort | null = null;
   private activePorts = new Set<MessagePort>();
-  private activeWSStreams = new Map<string, () => void>();
+  private wsKeySeq = 0;
+  private activeWSStreams = new Map<number, () => void>();
+  private wsAliasToKey = new Map<string, number>();
   private enterNonceWaiters = new Map<string, { resolve: () => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private swPingSeq = 0;
+  private swPingWaiters = new Map<string, { resolve: (alive: boolean) => void; timer: ReturnType<typeof setTimeout> }>();
   private readonly boundWindowMsg: (ev: MessageEvent) => void;
 
   constructor(private readonly callbacks: TunnelBridgeCallbacks = {}) {
@@ -189,6 +196,29 @@ export class TunnelBridge {
 
   setAppFrame(appFrame: HTMLIFrameElement | null): void {
     this.appFrame = appFrame;
+  }
+
+  /**
+   * Probes whether the sandbox Service Worker still holds the live `bridgePort`
+   * (used on silent WebRTC reconnect and before acting on `P2P_SW_EVICTED`).
+   */
+  pingSw(timeoutMs = 1_500): Promise<boolean> {
+    if (!this.bridgePort) return Promise.resolve(false);
+    const pingId = `sp_${++this.swPingSeq}`;
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.swPingWaiters.delete(pingId);
+        resolve(false);
+      }, timeoutMs);
+      this.swPingWaiters.set(pingId, { resolve, timer });
+      try {
+        this.bridgePort!.postMessage({ type: 'PORTAL_PING', pingId });
+      } catch {
+        clearTimeout(timer);
+        this.swPingWaiters.delete(pingId);
+        resolve(false);
+      }
+    });
   }
 
   /**
@@ -244,6 +274,17 @@ export class TunnelBridge {
           }
           break;
 
+        case 'PORTAL_PONG':
+          if (typeof data.pingId === 'string') {
+            const w = this.swPingWaiters.get(data.pingId);
+            if (w) {
+              this.swPingWaiters.delete(data.pingId);
+              clearTimeout(w.timer);
+              w.resolve(true);
+            }
+          }
+          break;
+
         case 'BRIDGE_ENTER_NONCE_ACK':
           if (typeof data.nonce === 'string') {
             const w = this.enterNonceWaiters.get(data.nonce);
@@ -271,10 +312,15 @@ export class TunnelBridge {
 
         case 'TUNNEL_WS_ABORT': {
           const wsId = typeof data.wsId === 'string' ? data.wsId : '';
-          const abortFn = this.activeWSStreams.get(wsId);
-          if (abortFn) {
-            this.activeWSStreams.delete(wsId);
-            abortFn();
+          if (!wsId) break;
+          const key = this.wsAliasToKey.get(wsId);
+          if (key !== undefined) {
+            this.wsAliasToKey.delete(wsId);
+            const abortFn = this.activeWSStreams.get(key);
+            if (abortFn) {
+              this.activeWSStreams.delete(key);
+              abortFn();
+            }
           }
           break;
         }
@@ -284,9 +330,11 @@ export class TunnelBridge {
   }
 
   /**
-   * Handles top-level window postMessages ONLY for pure UX route/title sync.
+   * Handles top-level window postMessages ONLY for pure UX route/title sync
+   * and SW-eviction recovery hints (verified against live `pingSw()` in Portal).
    */
   handleWindowMessage(ev: MessageEvent): void {
+    if (ev.isTrusted === false) return;
     if (!this.sandboxOrigin || ev.origin !== this.sandboxOrigin) return;
     if (!this.appFrame || ev.source !== this.appFrame.contentWindow) return;
     const data = ev.data;
@@ -296,6 +344,8 @@ export class TunnelBridge {
       this.callbacks.onRouteSync?.(data.path);
     } else if (data.type === 'P2P_TITLE_SYNC' && typeof data.title === 'string') {
       this.callbacks.onTitleSync?.(data.title.slice(0, 200));
+    } else if (data.type === 'P2P_SW_EVICTED') {
+      this.callbacks.onSwEvicted?.();
     }
   }
 
@@ -347,6 +397,7 @@ export class TunnelBridge {
     let headersSentToSw = false;
     let activeStream: PoolStream | null = null;
     const queuedUpMsgs: RequestPortUpMsg[] = [];
+    let pendingHttpWriteBytes = 0;
     let writeChain: Promise<void> = Promise.resolve();
     const openAbort = new AbortController();
 
@@ -372,9 +423,15 @@ export class TunnelBridge {
           }
           const bytes = new Uint8Array(up.buffer, up.offset, up.length);
           const len = bytes.byteLength;
+          if (pendingHttpWriteBytes + len > MAX_PENDING_HTTP_WRITE_BYTES) {
+            this.failReqPort(reqPort, 429, 'Request body buffer limit exceeded');
+            closeBoth(ErrorCode.FLOW_CONTROL_ERROR);
+            return;
+          }
+          pendingHttpWriteBytes += len;
           writeChain = writeChain.then(async () => {
-            if (portClosed || stream.isClosed) return;
             try {
+              if (portClosed || stream.isClosed) return;
               await stream.sendData(bytes, false);
               if (!portClosed) {
                 reqPort.postMessage({ type: 'REQ_BODY_CREDIT', bytes: len });
@@ -384,6 +441,8 @@ export class TunnelBridge {
               stream.reset(ErrorCode.INTERNAL_ERROR);
               this.failReqPort(reqPort, 502, reason);
               closeBoth();
+            } finally {
+              pendingHttpWriteBytes = Math.max(0, pendingHttpWriteBytes - len);
             }
           });
           break;
@@ -416,6 +475,7 @@ export class TunnelBridge {
     };
 
     // Attach reqPort listener BEFORE awaiting pool slot so early RESP_CANCEL or chunks are captured!
+    let queuedUpBytes = 0;
     reqPort.onmessage = (ev: MessageEvent) => {
       if (portClosed) return;
       const up = ev.data as RequestPortUpMsg;
@@ -423,10 +483,18 @@ export class TunnelBridge {
       if (!activeStream) {
         if (up.type === 'RESP_CANCEL') {
           closeBoth(ErrorCode.CANCEL);
-        } else if (queuedUpMsgs.length < 128) {
-          queuedUpMsgs.push(up);
         } else {
-          closeBoth(ErrorCode.FLOW_CONTROL_ERROR);
+          const chunkLen =
+            up.type === 'REQ_BODY_CHUNK' && typeof up.length === 'number' && Number.isInteger(up.length) && up.length > 0
+              ? up.length
+              : 0;
+          if (queuedUpMsgs.length >= 128 || queuedUpBytes + chunkLen > MAX_PENDING_HTTP_WRITE_BYTES) {
+            this.failReqPort(reqPort, 429, 'Request pre-open buffer limit exceeded');
+            closeBoth(ErrorCode.FLOW_CONTROL_ERROR);
+            return;
+          }
+          queuedUpBytes += chunkLen;
+          queuedUpMsgs.push(up);
         }
         return;
       }
@@ -540,7 +608,10 @@ export class TunnelBridge {
       this.rejectWsPort(wsPort, 'P2P tunnel is not connected');
       return;
     }
-    if (this.activeWSStreams.size >= MAX_CONCURRENT_WS_STREAMS) {
+    if (
+      this.activeWSStreams.size >= MAX_CONCURRENT_WS_STREAMS ||
+      this.activePorts.size >= MAX_CONCURRENT_REQ_PORTS
+    ) {
       this.rejectWsPort(wsPort, 'Too many concurrent WebSocket connections');
       return;
     }
@@ -578,13 +649,16 @@ export class TunnelBridge {
     }
 
     this.activePorts.add(wsPort);
+    const internalKey = ++this.wsKeySeq;
     let closed = false;
     let opened = false;
     let wsStream: WSStream | null = null;
+    let pendingWsWriteBytes = 0;
+    let queuedWsBytes = 0;
     let writeChain: Promise<void> = Promise.resolve();
     let closeAckTimer: ReturnType<typeof setTimeout> | null = null;
     const queuedWsMsgs: WsPortToPortalMsg[] = [];
-    const wsId = typeof msg.wsId === 'string' ? msg.wsId : '';
+    const wsId = typeof msg.wsId === 'string' && msg.wsId.length > 0 ? msg.wsId : '';
 
     const finishWs = (code: number, reason: string, notifyPort: boolean, resetStream: boolean) => {
       if (closed) return;
@@ -593,7 +667,10 @@ export class TunnelBridge {
         clearTimeout(closeAckTimer);
         closeAckTimer = null;
       }
-      if (wsId) this.activeWSStreams.delete(wsId);
+      this.activeWSStreams.delete(internalKey);
+      if (wsId && this.wsAliasToKey.get(wsId) === internalKey) {
+        this.wsAliasToKey.delete(wsId);
+      }
       if (notifyPort) {
         try {
           wsPort.postMessage({ type: 'WS_CLOSE', code, reason });
@@ -605,6 +682,14 @@ export class TunnelBridge {
       if (resetStream && wsStream && !wsStream.isClosed) {
         wsStream.reset(ErrorCode.CANCEL);
       }
+    };
+
+    const estimateWsMsgBytes = (m: WsPortToPortalMsg): number => {
+      if (m.type !== 'WS_SEND') return 0;
+      if (m.opcode === 2) {
+        return m.data instanceof ArrayBuffer ? m.data.byteLength : 0;
+      }
+      return typeof m.data === 'string' ? m.data.length * 3 : 0;
     };
 
     const dispatchWsPortMsg = (m: WsPortToPortalMsg, activeWS: WSStream) => {
@@ -621,9 +706,14 @@ export class TunnelBridge {
             return;
           }
           const ackLen = payload.byteLength;
+          if (pendingWsWriteBytes + ackLen > MAX_PENDING_WS_WRITE_BYTES) {
+            finishWs(1008, 'Outbound WebSocket send queue limit exceeded', true, true);
+            return;
+          }
+          pendingWsWriteBytes += ackLen;
           writeChain = writeChain.then(async () => {
-            if (closed || activeWS.isClosed) return;
             try {
+              if (closed || activeWS.isClosed) return;
               await activeWS.sendWSMessage(isBinary, payload);
               if (!closed) {
                 wsPort.postMessage({ type: 'WS_ACK', bytes: ackLen });
@@ -631,6 +721,8 @@ export class TunnelBridge {
             } catch (err) {
               const reason = err instanceof Error ? err.message : 'WS write failed';
               finishWs(1006, reason, true, true);
+            } finally {
+              pendingWsWriteBytes = Math.max(0, pendingWsWriteBytes - ackLen);
             }
           });
           break;
@@ -665,7 +757,13 @@ export class TunnelBridge {
           const safeCode = sanitizeClientWSCloseCode(m.code);
           const safeReason = typeof m.reason === 'string' ? m.reason.slice(0, 256) : '';
           finishWs(safeCode, safeReason, false, false);
-        } else if (queuedWsMsgs.length < 64) {
+        } else {
+          const est = estimateWsMsgBytes(m);
+          if (queuedWsMsgs.length >= 64 || queuedWsBytes + est > MAX_PENDING_WS_WRITE_BYTES) {
+            finishWs(1008, 'WebSocket pre-open queue limit exceeded', true, false);
+            return;
+          }
+          queuedWsBytes += est;
           queuedWsMsgs.push(m);
         }
         return;
@@ -674,8 +772,10 @@ export class TunnelBridge {
     };
     wsPort.start?.();
 
+    // Always track by Portal-generated internalKey so empty/duplicate untrusted wsId cannot bypass cap!
+    this.activeWSStreams.set(internalKey, () => finishWs(1001, 'client navigated away', false, true));
     if (wsId) {
-      this.activeWSStreams.set(wsId, () => finishWs(1001, 'client navigated away', false, true));
+      this.wsAliasToKey.set(wsId, internalKey);
     }
 
     let wsDC: DataChannelLike;
@@ -775,12 +875,23 @@ export class TunnelBridge {
       w.reject(new Error('bridge destroyed'));
     }
     this.enterNonceWaiters.clear();
+    for (const w of this.swPingWaiters.values()) {
+      clearTimeout(w.timer);
+      w.resolve(false);
+    }
+    this.swPingWaiters.clear();
     for (const abortFn of Array.from(this.activeWSStreams.values())) {
       abortFn();
     }
     this.activeWSStreams.clear();
+    this.wsAliasToKey.clear();
     if (this.bridgePort) {
       this.bridgePort.onmessage = null;
+      try {
+        this.bridgePort.postMessage({ type: 'BRIDGE_TAB_CLOSE' });
+      } catch {
+        // ignore
+      }
       try {
         this.bridgePort.close();
       } catch {

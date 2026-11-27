@@ -46,7 +46,7 @@ const textEncoder = new TextEncoder();
 const SILENT_RECONNECT_INITIAL_MS = 500;
 const SILENT_RECONNECT_MAX_MS = 10_000;
 const DISCONNECT_GRACE_MS = 2_500;
-const LIVENESS_PROBE_TIMEOUT_MS = 1_500;
+const INITIAL_HANDSHAKE_TIMEOUT_MS = 15_000;
 const RECONNECT_HANDSHAKE_TIMEOUT_MS = 10_000;
 
 export interface PeerSessionCallbacks {
@@ -73,10 +73,6 @@ export class PeerSession {
   private silentReconnectBackoffMs = SILENT_RECONNECT_INITIAL_MS;
   private disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null;
   private handshakeWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
-  private livenessProbeInFlight = false;
-  private latestPeerOnline = false;
-  private latestAgentPk = '';
-  private latestRequireVisitorAuth = true;
 
   private joinedAgentPk = '';
   private currentAgentPkB64 = '';
@@ -113,6 +109,8 @@ export class PeerSession {
         onAuthRequired: callbacks.onAuthRequired,
         onAuthFailed: (code, msg, retryAfter) => {
           this.teardownPeerConnection('auth rejected');
+          this.signaling?.close();
+          this.signaling = null;
           callbacks.onAuthFailed(code, msg, retryAfter);
         },
         onFatalSecurityError: (reason) => {
@@ -129,6 +127,11 @@ export class PeerSession {
           if (this.handshakeWatchdogTimer) {
             clearTimeout(this.handshakeWatchdogTimer);
             this.handshakeWatchdogTimer = null;
+          }
+          // Strictly short-lived signaling: close WS immediately once DTLS tunnel is authenticated!
+          if (this.signaling) {
+            this.signaling.close();
+            this.signaling = null;
           }
           callbacks.onAuthenticated(info, mux);
         },
@@ -169,8 +172,6 @@ export class PeerSession {
     this.pcInFlight = false;
     this.waitingForPasswordBeforePC = false;
     this.joinedAgentPk = '';
-    this.latestPeerOnline = false;
-    this.latestAgentPk = '';
 
     if (!isSilentReconnect) {
       this.callbacks.onStatus('connecting', 'Connecting to signaling server...');
@@ -183,69 +184,57 @@ export class PeerSession {
         void this.handleSignalingJoined(gen, msg);
       },
       onPeerStatus: (msg) => {
-        if (this.generation !== gen || this.destroyed) return;
+        if (this.generation !== gen || this.destroyed || this.authClient.isAuthenticated()) return;
         this.callbacks.onLog(`[Signal] Agent status: ${msg.online ? 'ONLINE' : 'OFFLINE'}`);
-        this.latestPeerOnline = msg.online;
-        if (msg.agentPk) this.latestAgentPk = msg.agentPk;
-        this.latestRequireVisitorAuth = msg.requireVisitorAuth;
-
         if (msg.online) {
           if (!this.pc && !this.pcInFlight && !this.waitingForPasswordBeforePC) {
             this.cancelSilentReconnect();
             void this.handleAgentReady(gen, msg.agentPk, msg.requireVisitorAuth);
-          } else if (this.pc && this.authClient.isAuthenticated()) {
-            void this.probeLiveTunnelLiveness(gen, this.pc, 'Agent re-registered on signaling');
           }
         } else {
-          if (!this.authClient.isAuthenticated()) {
-            if (this.pc) {
-              this.teardownPeerConnection('Agent went offline during handshake');
-            }
-            if (this.everAuthenticated) {
-              this.callbacks.onDisconnected('Agent went offline', true);
-            } else {
-              this.callbacks.onStatus('waiting', 'Waiting for Agent to come online...');
-            }
-          } else if (this.pc) {
-            void this.probeLiveTunnelLiveness(gen, this.pc, 'Agent went offline on signaling');
+          if (this.pc) {
+            this.teardownPeerConnection('Agent went offline during handshake');
+          }
+          if (this.everAuthenticated) {
+            this.callbacks.onDisconnected('Agent went offline', true);
+          } else {
+            this.callbacks.onStatus('waiting', 'Waiting for Agent to come online...');
           }
         }
       },
       onAnswer: (msg) => {
-        if (this.generation !== gen || this.destroyed) return;
+        if (this.generation !== gen || this.destroyed || this.authClient.isAuthenticated()) return;
         void this.handleSignalingAnswer(gen, msg);
       },
       onCandidate: (msg) => {
-        if (this.generation !== gen || this.destroyed) return;
+        if (this.generation !== gen || this.destroyed || this.authClient.isAuthenticated()) return;
         void this.handleSignalingCandidate(gen, msg);
       },
       onError: (msg) => {
-        if (this.generation !== gen || this.destroyed) return;
+        if (this.generation !== gen || this.destroyed || this.authClient.isAuthenticated()) return;
         this.callbacks.onLog(`[Signal] Error [${msg.code}]: ${msg.error}`);
         if (msg.code === 'PEER_OFFLINE' || msg.code === 'AGENT_OFFLINE') {
-          this.latestPeerOnline = false;
-          if (!this.authClient.isAuthenticated()) {
-            this.teardownPeerConnection('Agent is offline');
-          }
+          this.teardownPeerConnection('Agent is offline');
           if (this.everAuthenticated) {
             this.callbacks.onDisconnected('Agent is currently offline', true);
           } else {
             this.callbacks.onStatus('waiting', 'Agent is currently offline...');
           }
-        } else if (this.everAuthenticated && !this.authClient.isAuthenticated()) {
+        } else if (this.everAuthenticated) {
           this.teardownPeerConnection(`Signaling error: ${msg.error}`);
           this.scheduleSilentReconnect(`Signaling error: ${msg.error}`);
         } else {
+          this.teardownPeerConnection(`Signaling error: ${msg.error}`);
           this.callbacks.onStatus('error', msg.error);
         }
       },
-      onDisconnected: (willReconnect) => {
-        if (this.generation !== gen || this.destroyed) return;
-        if (!this.authClient.isAuthenticated() && !this.everAuthenticated) {
-          this.callbacks.onStatus(
-            willReconnect ? 'connecting' : 'disconnected',
-            willReconnect ? 'Signaling disconnected, retrying...' : 'Signaling closed'
-          );
+      onDisconnected: () => {
+        if (this.generation !== gen || this.destroyed || this.authClient.isAuthenticated()) return;
+        if (this.everAuthenticated) {
+          this.teardownPeerConnection('Signaling closed before reconnect completed');
+          this.scheduleSilentReconnect('Signaling disconnected');
+        } else if (!this.waitingForPasswordBeforePC && !this.pc) {
+          this.callbacks.onStatus('disconnected', 'Signaling connection closed');
         }
       },
     });
@@ -266,9 +255,6 @@ export class PeerSession {
 
   private async handleSignalingJoined(gen: number, joined: SignalJoinedMsg): Promise<void> {
     if (this.generation !== gen || this.destroyed) return;
-    this.latestPeerOnline = joined.online;
-    if (joined.agentPk) this.latestAgentPk = joined.agentPk;
-    this.latestRequireVisitorAuth = joined.requireVisitorAuth;
     if (!joined.online) {
       if (!this.authClient.isAuthenticated() && !this.everAuthenticated) {
         this.callbacks.onStatus('waiting', 'Agent is offline — waiting for Agent...');
@@ -410,29 +396,6 @@ export class PeerSession {
     }, delay);
   }
 
-  private async probeLiveTunnelLiveness(gen: number, pc: RTCPeerConnection, reason: string): Promise<void> {
-    if (this.livenessProbeInFlight || this.generation !== gen || this.pc !== pc || this.destroyed) return;
-    const mux = this.mux;
-    if (!mux) return;
-    this.livenessProbeInFlight = true;
-    try {
-      const alive = await mux.ping(LIVENESS_PROBE_TIMEOUT_MS);
-      if (alive || this.generation !== gen || this.pc !== pc || this.destroyed) return;
-      this.callbacks.onLog(`[Tunnel] Liveness probe timed out (${reason}) — rebuilding tunnel silently`);
-      this.teardownPeerConnection(reason);
-      if (this.latestPeerOnline && this.signaling?.isOpen() && !this.pcInFlight && !this.waitingForPasswordBeforePC) {
-        this.cancelSilentReconnect();
-        void this.handleAgentReady(gen, this.latestAgentPk, this.latestRequireVisitorAuth);
-      } else {
-        this.scheduleSilentReconnect(reason);
-      }
-    } finally {
-      if (this.generation === gen && this.pc === pc) {
-        this.livenessProbeInFlight = false;
-      }
-    }
-  }
-
   private teardownPeerConnection(reason: string): void {
     if (this.disconnectGraceTimer) {
       clearTimeout(this.disconnectGraceTimer);
@@ -442,7 +405,6 @@ export class PeerSession {
       clearTimeout(this.handshakeWatchdogTimer);
       this.handshakeWatchdogTimer = null;
     }
-    this.livenessProbeInFlight = false;
     this.authClient.resetChannel(reason);
     if (this.mux) {
       this.mux.close();
@@ -482,17 +444,26 @@ export class PeerSession {
     const pc = new RTCPeerConnection(rtcConfig);
     this.pc = pc;
 
-    if (this.everAuthenticated) {
-      this.handshakeWatchdogTimer = setTimeout(() => {
-        this.handshakeWatchdogTimer = null;
-        if (this.generation !== gen || this.pc !== pc || this.destroyed) return;
-        if (!this.authClient.isAuthenticated()) {
+    const watchdogMs = this.everAuthenticated
+      ? RECONNECT_HANDSHAKE_TIMEOUT_MS
+      : INITIAL_HANDSHAKE_TIMEOUT_MS;
+    this.handshakeWatchdogTimer = setTimeout(() => {
+      this.handshakeWatchdogTimer = null;
+      if (this.generation !== gen || this.pc !== pc || this.destroyed) return;
+      if (!this.authClient.isAuthenticated()) {
+        if (this.everAuthenticated) {
           this.callbacks.onLog('[Tunnel] Reconnect handshake timed out — retrying silently');
           this.teardownPeerConnection('WebRTC reconnect handshake timed out');
           this.scheduleSilentReconnect('WebRTC reconnect handshake timed out');
+        } else {
+          this.callbacks.onLog('[Tunnel] Initial WebRTC handshake timed out');
+          this.teardownPeerConnection('WebRTC handshake timed out');
+          this.signaling?.close();
+          this.signaling = null;
+          this.callbacks.onStatus('error', 'WebRTC handshake timed out');
         }
-      }, RECONNECT_HANDSHAKE_TIMEOUT_MS);
-    }
+      }
+    }, watchdogMs);
 
     // Pre-negotiate 1 Control DC (id=0) + 32 Reusable HTTP Pool DCs (id=1..32).
     const ctrlDC = pc.createDataChannel(CONTROL_CHANNEL_LABEL, {
@@ -517,10 +488,19 @@ export class PeerSession {
     ctrlDC.onopen = () => {
       if (this.generation !== gen || this.pc !== pc || muxStarted) return;
       muxStarted = true;
-      // SYNCHRONOUSLY buffer early control frames before async DTLS cert verification!
+      // SYNCHRONOUSLY buffer early control frames before async DTLS cert verification,
+      // and serialize control frame handling strictly in wire order!
       const earlyControlFrames: Frame[] = [];
       let dtlsVerified = false;
       let authGen = -1;
+      let controlChain: Promise<void> = Promise.resolve();
+
+      const enqueueControlFrame = (frame: Frame) => {
+        controlChain = controlChain.then(async () => {
+          if (this.generation !== gen || this.pc !== pc) return;
+          await this.authClient.handleControlFrame(authGen, frame);
+        });
+      };
 
       const mux = new PoolMux(
         {
@@ -532,7 +512,7 @@ export class PeerSession {
               }
               return;
             }
-            void this.authClient.handleControlFrame(authGen, frame);
+            enqueueControlFrame(frame);
           },
           onGoAway: () => {
             if (this.generation !== gen || this.pc !== pc) return;
@@ -560,6 +540,8 @@ export class PeerSession {
           this.callbacks.onLog(`[Security] BLOCKED: ${reason}`);
           this.cancelSilentReconnect();
           this.teardownPeerConnection(reason);
+          this.signaling?.close();
+          this.signaling = null;
           this.callbacks.onStatus('error', reason);
           return;
         }
@@ -583,7 +565,6 @@ export class PeerSession {
           verifiedPkHash: this.verifiedPkHash,
           verifiedKeyStatus: this.verifiedKeyStatus,
         });
-        dtlsVerified = true;
 
         try {
           mux.sendControlFrame(
@@ -598,18 +579,28 @@ export class PeerSession {
           // ignore
         }
 
-        for (const early of earlyControlFrames.splice(0)) {
-          if (this.generation !== gen || this.pc !== pc) return;
-          await this.authClient.handleControlFrame(authGen, early);
+        // Drain early frames sequentially BEFORE flipping dtlsVerified=true so late frames cannot overtake them!
+        while (earlyControlFrames.length > 0) {
+          const batch = earlyControlFrames.splice(0);
+          for (const early of batch) {
+            if (this.generation !== gen || this.pc !== pc) return;
+            await this.authClient.handleControlFrame(authGen, early);
+          }
         }
+        if (this.generation !== gen || this.pc !== pc) return;
+        dtlsVerified = true;
       })();
     };
 
     ctrlDC.onclose = () => {
       if (this.generation !== gen || this.pc !== pc || this.destroyed) return;
-      if (this.authClient.isAuthenticated() || this.everAuthenticated) {
-        this.teardownPeerConnection('Control DataChannel closed');
+      this.teardownPeerConnection('Control DataChannel closed');
+      if (this.everAuthenticated) {
         this.scheduleSilentReconnect('Control DataChannel closed');
+      } else {
+        this.signaling?.close();
+        this.signaling = null;
+        this.callbacks.onDisconnected('Control DataChannel closed', false);
       }
     };
 

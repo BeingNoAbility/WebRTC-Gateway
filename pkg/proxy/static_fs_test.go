@@ -117,4 +117,17 @@ func TestStaticFSStepwiseRootAndWindowsSymlink(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("single-file unmatched path /other.txt must return 404, got %d", rec.Code)
 	}
+
+	// 6. P2-20: Directory symlink redirect uses virtual request path (never leaks resolved target),
+	//    and trailing slash on regular file returns 404 (not 200).
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/linkdir?q=1", nil))
+	if rec.Code != http.StatusMovedPermanently || rec.Header().Get("Location") != "/linkdir/?q=1" {
+		t.Fatalf("P2-20 regression: symlink dir redirect leaked target or wrong location: code=%d loc=%q", rec.Code, rec.Header().Get("Location"))
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/sub/nested/ok.txt/", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("P2-20 regression: trailing slash on regular file must return 404, got %d", rec.Code)
+	}
 }

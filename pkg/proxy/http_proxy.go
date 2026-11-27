@@ -144,7 +144,8 @@ func (p *HTTPProxy) HandleStream(
 		}
 	}
 
-	if jar != nil && len(reqHdr.CookieMutations) > 0 {
+	credentialsOmit := (reqHdr.FetchCtx & protocol.FetchCtxCredentialsOmit) != 0
+	if jar != nil && !credentialsOmit && len(reqHdr.CookieMutations) > 0 {
 		jar.ApplyClientMutations(p.policy.CookieURL(dest.URL), cookieEntriesToMutations(reqHdr.CookieMutations))
 	}
 	readonly := capScope != nil && capScope.Readonly
@@ -203,9 +204,12 @@ func (p *HTTPProxy) HandleStream(
 	}
 
 	// Save Set-Cookie in authoritative ProxyCookieJar; emit non-HttpOnly deltas for browser CookieMirror.
+	// Per Fetch standard, credentials: 'omit' must not store response cookies.
 	var cookieDeltas []CookieDelta
-	if setCookies := resp.Header.Values("Set-Cookie"); len(setCookies) > 0 && jar != nil {
-		cookieDeltas = jar.SaveResponseCookies(p.policy.CookieURL(dest.URL), setCookies)
+	if !credentialsOmit {
+		if setCookies := resp.Header.Values("Set-Cookie"); len(setCookies) > 0 && jar != nil {
+			cookieDeltas = jar.SaveResponseCookies(p.policy.CookieURL(dest.URL), setCookies)
+		}
 	}
 
 	ceTokens := parseContentEncodingTokens(resp.Header.Values("Content-Encoding"))

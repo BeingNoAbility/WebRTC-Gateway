@@ -17,7 +17,7 @@ import (
 )
 
 // Version is injected at build time via `-ldflags="-X main.Version=vX.Y.Z"`.
-var Version = "v5.0.0-alpha.3"
+var Version = "dev"
 
 type serverFileConfig struct {
 	Addr                 string `yaml:"addr"`
@@ -42,139 +42,91 @@ type serverFileConfig struct {
 	MetricsAddr          string `yaml:"metrics_addr"`
 }
 
-var valueFlags = map[string]bool{
-	"config": true, "addr": true, "static": true, "tls-cert": true, "tls-key": true,
-	"signal-secret": true, "node-secrets-file": true, "bound-keys-file": true,
-	"portal-domain": true, "sandbox-domain": true, "sandbox-host": true,
-	"max-ip-conns": true, "max-ip-msgs": true,
-	"trusted-proxies": true, "client-ip-header": true, "metrics-addr": true, "health-url": true,
-}
-
 func main() {
-	rawArgs := os.Args[1:]
-	if config.HasBoolFlag(rawArgs, []string{"v", "version"}, valueFlags) {
+	fs := flag.NewFlagSet("signal", flag.ExitOnError)
+	vShort := fs.Bool("v", false, "Print version and exit")
+	vLong := fs.Bool("version", false, "Print version and exit")
+	cfgFlag := fs.String("config", "", "Explicit YAML/JSON config file path (also CONFIG_FILE; never auto-loaded from CWD)")
+	addrFlag := fs.String("addr", "", "Listen address (default 127.0.0.1:8888; non-loopback requires domains)")
+	staticFlag := fs.String("static", "", "Optional external static directory (overrides embedded web assets)")
+	tlsAutoFlag := fs.Bool("tls-auto", false, "Generate self-signed loopback/domain TLS certificate")
+	tlsCertFlag := fs.String("tls-cert", "", "TLS certificate PEM path (hot-reloaded)")
+	tlsKeyFlag := fs.String("tls-key", "", "TLS private key PEM path (hot-reloaded)")
+	signalSecretFlag := fs.String("signal-secret", "", "Shared secret for Agent HTTP Upgrade Bearer auth (prefer SIGNAL_SECRET_FILE or SIGNAL_SECRET)")
+	nodeSecretsFlag := fs.String("node-secrets-file", "", "Optional YAML/JSON map of node_id -> per-node registration secret")
+	allowForceRekeyFlag := fs.Bool("allow-force-rekey", false, "Allow authenticated agents to rotate bound node keys via force_rekey (default false for shared secret)")
+	allowAnonFlag := fs.Bool("allow-anonymous-agents", false, "Explicitly permit anonymous Agent registration without SIGNAL_SECRET")
+	boundKeysFlag := fs.String("bound-keys-file", "", "Optional JSON file path to persist Ed25519 node bindings across restarts")
+	portalDomainFlag := fs.String("portal-domain", "", "Portal base domain (e.g. portal.example.com)")
+	sandboxDomainFlag := fs.String("sandbox-domain", "", "Wildcard sandbox domain for Tier 2/3 (e.g. sandbox.example.net)")
+	sandboxHostFlag := fs.String("sandbox-host", "", "Fixed cross-site sandbox host for Tier 1 without wildcard TLS (e.g. app.example.net)")
+	allowSameSiteFlag := fs.Bool("allow-same-site-sandbox", false, "Allow Tier 2 same-site wildcard sandbox with Origin-Agent-Cluster isolation")
+	allowAllOriginsFlag := fs.Bool("allow-all-origins", false, "Allow all WebSocket Origins (dev/testing only)")
+	maxIPConnsFlag := fs.Int("max-ip-conns", 0, "Max concurrent WebSocket connections per IP (default 64)")
+	maxIPMsgsFlag := fs.Int("max-ip-msgs", 0, "Max signaling messages per IP per 10s (default 120)")
+	trustedProxiesFlag := fs.String("trusted-proxies", "", "Comma-separated trusted proxy IPs/CIDRs (default loopback only)")
+	clientIPHeaderFlag := fs.String("client-ip-header", "", "Optional single-value client IP header from trusted proxies (e.g. CF-Connecting-IP, Fastly-Client-IP, CloudFront-Viewer-Address, X-Real-IP)")
+	metricsAddrFlag := fs.String("metrics-addr", "", "Optional Prometheus metrics listen address (prefer loopback)")
+	healthFlag := fs.Bool("health", false, "Run health probe against /healthz and exit")
+	healthURLFlag := fs.String("health-url", "", "Optional custom URL for -health")
+	_ = fs.Parse(os.Args[1:])
+
+	if fs.NArg() > 0 {
+		log.Fatalf("[Signal] Unexpected positional arguments: %v (did you forget a leading '-' on a flag?)", fs.Args())
+	}
+	if *vShort || *vLong {
 		fmt.Printf("webrtc-gateway-signal %s\n", Version)
 		os.Exit(0)
 	}
 
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+
 	var fileCfg serverFileConfig
-	if cfgPath := config.ResolveExplicitConfigPath(rawArgs, valueFlags); cfgPath != "" {
+	if cfgPath := config.ResolveExplicitConfigPath(*cfgFlag); cfgPath != "" {
 		if err := config.LoadYAMLFile(cfgPath, &fileCfg); err != nil {
 			log.Fatalf("[Signal] Failed to load config: %v", err)
 		}
 	}
 
-	defAllowForceRekey := false
-	allowForceRekeyExplicit := false
-	if fileCfg.AllowForceRekey != nil {
-		defAllowForceRekey = *fileCfg.AllowForceRekey
-		allowForceRekeyExplicit = true
-	}
-
-	fs := flag.NewFlagSet("signal", flag.ExitOnError)
-	cfgFlag := fs.String("config", "", "Explicit YAML/JSON config file path (also CONFIG_FILE; never auto-loaded from CWD)")
-	addr := fs.String("addr", fileCfg.Addr, "Listen address (default 127.0.0.1:8888; non-loopback requires domains)")
-	staticDir := fs.String("static", fileCfg.StaticDir, "Optional external static directory (overrides embedded web assets)")
-	tlsAuto := fs.Bool("tls-auto", fileCfg.TLSAuto, "Generate self-signed loopback/domain TLS certificate")
-	tlsCert := fs.String("tls-cert", fileCfg.TLSCert, "TLS certificate PEM path (hot-reloaded)")
-	tlsKey := fs.String("tls-key", fileCfg.TLSKey, "TLS private key PEM path (hot-reloaded)")
-	signalSecret := fs.String("signal-secret", "", "Shared secret for Agent HTTP Upgrade Bearer auth (prefer SIGNAL_SECRET_FILE or SIGNAL_SECRET)")
-	nodeSecretsFile := fs.String("node-secrets-file", fileCfg.NodeSecretsFile, "Optional YAML/JSON map of node_id -> per-node registration secret")
-	allowForceRekey := fs.Bool("allow-force-rekey", defAllowForceRekey, "Allow authenticated agents to rotate bound node keys via force_rekey (default false for shared secret)")
-	allowAnon := fs.Bool("allow-anonymous-agents", fileCfg.AllowAnonymousAgents, "Explicitly permit anonymous Agent registration without SIGNAL_SECRET")
-	boundKeysFile := fs.String("bound-keys-file", fileCfg.BoundKeysFile, "Optional JSON file path to persist Ed25519 node bindings across restarts")
-	portalDomain := fs.String("portal-domain", fileCfg.PortalDomain, "Portal base domain (e.g. portal.example.com)")
-	sandboxDomain := fs.String("sandbox-domain", fileCfg.SandboxDomain, "Wildcard sandbox domain for Tier 2/3 (e.g. sandbox.example.net)")
-	sandboxHost := fs.String("sandbox-host", fileCfg.SandboxHost, "Fixed cross-site sandbox host for Tier 1 without wildcard TLS (e.g. app.example.net)")
-	allowSameSite := fs.Bool("allow-same-site-sandbox", fileCfg.AllowSameSiteSandbox, "Allow Tier 2 same-site wildcard sandbox with Origin-Agent-Cluster isolation")
-	allowAllOrigins := fs.Bool("allow-all-origins", fileCfg.AllowAllOrigins, "Allow all WebSocket Origins (dev/testing only)")
-	maxIPConns := fs.Int("max-ip-conns", fileCfg.MaxIPConns, "Max concurrent WebSocket connections per IP (default 64)")
-	maxIPMsgs := fs.Int("max-ip-msgs", fileCfg.MaxIPMessages, "Max signaling messages per IP per 10s (default 120)")
-	trustedProxies := fs.String("trusted-proxies", fileCfg.TrustedProxies, "Comma-separated trusted proxy IPs/CIDRs (default loopback only)")
-	clientIPHeader := fs.String("client-ip-header", fileCfg.ClientIPHeader, "Optional single-value client IP header from trusted proxies (e.g. CF-Connecting-IP, Fastly-Client-IP, CloudFront-Viewer-Address, X-Real-IP)")
-	metricsAddr := fs.String("metrics-addr", fileCfg.MetricsAddr, "Optional Prometheus metrics listen address (prefer loopback)")
-	healthFlag := fs.Bool("health", false, "Run health probe against /healthz and exit")
-	healthURL := fs.String("health-url", "", "Optional custom URL for -health")
-	_ = cfgFlag
-	_ = fs.Parse(rawArgs)
-
-	explicitFlags := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
-	if explicitFlags["allow-force-rekey"] {
-		allowForceRekeyExplicit = true
-	}
-
-	applyEnvStr := func(flagName, envName string, dst *string) {
-		if !explicitFlags[flagName] {
-			if v, ok := os.LookupEnv(envName); ok && v != "" {
-				*dst = v
-			}
+	mustBool := func(val, cliSet bool, envName string, cfgPtr *bool, cfgBool, def bool) (bool, bool) {
+		b, set, err := config.ResolveBool(val, cliSet, envName, cfgPtr, cfgBool, def)
+		if err != nil {
+			log.Fatalf("[Signal] %v", err)
 		}
+		return b, set
 	}
-	applyEnvBool := func(flagName, envName string, dst *bool) bool {
-		if !explicitFlags[flagName] {
-			b, set, err := config.ParseEnvBool(envName)
-			if err != nil {
-				log.Fatalf("[Signal] %v", err)
-			}
-			if set {
-				*dst = b
-				return true
-			}
+	mustInt := func(val int, cliSet bool, envName string, cfgVal, def, minVal, maxVal int) int {
+		n, err := config.ResolveInt(val, cliSet, envName, cfgVal, def, minVal, maxVal)
+		if err != nil {
+			log.Fatalf("[Signal] %v", err)
 		}
-		return false
-	}
-	applyEnvInt := func(flagName, envName string, minVal, maxVal int, dst *int) {
-		if !explicitFlags[flagName] {
-			n, set, err := config.ParseEnvInt(envName, minVal, maxVal)
-			if err != nil {
-				log.Fatalf("[Signal] %v", err)
-			}
-			if set {
-				*dst = n
-			}
-		}
+		return n
 	}
 
-	applyEnvStr("addr", "ADDR", addr)
-	applyEnvStr("static", "STATIC_DIR", staticDir)
-	applyEnvBool("tls-auto", "TLS_AUTO", tlsAuto)
-	applyEnvStr("tls-cert", "TLS_CERT", tlsCert)
-	applyEnvStr("tls-key", "TLS_KEY", tlsKey)
-	applyEnvStr("node-secrets-file", "NODE_SECRETS_FILE", nodeSecretsFile)
-	if applyEnvBool("allow-force-rekey", "ALLOW_FORCE_REKEY", allowForceRekey) {
-		allowForceRekeyExplicit = true
-	}
-	applyEnvBool("allow-anonymous-agents", "ALLOW_ANONYMOUS_AGENTS", allowAnon)
-	applyEnvStr("bound-keys-file", "BOUND_KEYS_FILE", boundKeysFile)
-	applyEnvStr("portal-domain", "PORTAL_DOMAIN", portalDomain)
-	applyEnvStr("sandbox-domain", "SANDBOX_DOMAIN", sandboxDomain)
-	applyEnvStr("sandbox-host", "SANDBOX_HOST", sandboxHost)
-	applyEnvBool("allow-same-site-sandbox", "ALLOW_SAME_SITE_SANDBOX", allowSameSite)
-	applyEnvBool("allow-all-origins", "SIGNAL_ALLOW_ALL_ORIGINS", allowAllOrigins)
-	applyEnvInt("max-ip-conns", "MAX_IP_CONNS", 1, 10000, maxIPConns)
-	applyEnvInt("max-ip-msgs", "MAX_IP_MSGS", 1, 100000, maxIPMsgs)
-	applyEnvStr("trusted-proxies", "TRUSTED_PROXIES", trustedProxies)
-	applyEnvStr("client-ip-header", "CLIENT_IP_HEADER", clientIPHeader)
-	applyEnvStr("metrics-addr", "METRICS_ADDR", metricsAddr)
-
-	if *addr == "" {
-		*addr = "127.0.0.1:8888"
-	}
-	if *maxIPConns == 0 {
-		*maxIPConns = signaling.DefaultMaxIPConns
-	} else if *maxIPConns < 1 || *maxIPConns > 10000 {
-		log.Fatalf("[Signal] max-ip-conns out of range (%d): must be 1..10000", *maxIPConns)
-	}
-	if *maxIPMsgs == 0 {
-		*maxIPMsgs = signaling.DefaultMaxIPMessages
-	} else if *maxIPMsgs < 1 || *maxIPMsgs > 100000 {
-		log.Fatalf("[Signal] max-ip-msgs out of range (%d): must be 1..100000", *maxIPMsgs)
-	}
+	addr := config.ResolveString(*addrFlag, explicit["addr"], "ADDR", fileCfg.Addr, "127.0.0.1:8888")
+	staticDir := config.ResolveString(*staticFlag, explicit["static"], "STATIC_DIR", fileCfg.StaticDir, "")
+	tlsAuto, _ := mustBool(*tlsAutoFlag, explicit["tls-auto"], "TLS_AUTO", nil, fileCfg.TLSAuto, false)
+	tlsCert := config.ResolveString(*tlsCertFlag, explicit["tls-cert"], "TLS_CERT", fileCfg.TLSCert, "")
+	tlsKey := config.ResolveString(*tlsKeyFlag, explicit["tls-key"], "TLS_KEY", fileCfg.TLSKey, "")
+	nodeSecretsFile := config.ResolveString(*nodeSecretsFlag, explicit["node-secrets-file"], "NODE_SECRETS_FILE", fileCfg.NodeSecretsFile, "")
+	allowForceRekey, allowForceRekeySet := mustBool(*allowForceRekeyFlag, explicit["allow-force-rekey"], "ALLOW_FORCE_REKEY", fileCfg.AllowForceRekey, false, false)
+	allowAnon, _ := mustBool(*allowAnonFlag, explicit["allow-anonymous-agents"], "ALLOW_ANONYMOUS_AGENTS", nil, fileCfg.AllowAnonymousAgents, false)
+	boundKeysFile := config.ResolveString(*boundKeysFlag, explicit["bound-keys-file"], "BOUND_KEYS_FILE", fileCfg.BoundKeysFile, "")
+	portalDomain := config.ResolveString(*portalDomainFlag, explicit["portal-domain"], "PORTAL_DOMAIN", fileCfg.PortalDomain, "")
+	sandboxDomain := config.ResolveString(*sandboxDomainFlag, explicit["sandbox-domain"], "SANDBOX_DOMAIN", fileCfg.SandboxDomain, "")
+	sandboxHost := config.ResolveString(*sandboxHostFlag, explicit["sandbox-host"], "SANDBOX_HOST", fileCfg.SandboxHost, "")
+	allowSameSite, _ := mustBool(*allowSameSiteFlag, explicit["allow-same-site-sandbox"], "ALLOW_SAME_SITE_SANDBOX", nil, fileCfg.AllowSameSiteSandbox, false)
+	allowAllOrigins, _ := mustBool(*allowAllOriginsFlag, explicit["allow-all-origins"], "SIGNAL_ALLOW_ALL_ORIGINS", nil, fileCfg.AllowAllOrigins, false)
+	maxIPConns := mustInt(*maxIPConnsFlag, explicit["max-ip-conns"], "MAX_IP_CONNS", fileCfg.MaxIPConns, signaling.DefaultMaxIPConns, 1, 10000)
+	maxIPMsgs := mustInt(*maxIPMsgsFlag, explicit["max-ip-msgs"], "MAX_IP_MSGS", fileCfg.MaxIPMessages, signaling.DefaultMaxIPMessages, 1, 100000)
+	trustedProxies := config.ResolveString(*trustedProxiesFlag, explicit["trusted-proxies"], "TRUSTED_PROXIES", fileCfg.TrustedProxies, "")
+	clientIPHeader := config.ResolveString(*clientIPHeaderFlag, explicit["client-ip-header"], "CLIENT_IP_HEADER", fileCfg.ClientIPHeader, "")
+	metricsAddr := config.ResolveString(*metricsAddrFlag, explicit["metrics-addr"], "METRICS_ADDR", fileCfg.MetricsAddr, "")
 
 	if *healthFlag {
-		tlsOn := *tlsAuto || (*tlsCert != "" && *tlsKey != "")
-		if err := signaling.RunHealthCheck(*addr, tlsOn, *healthURL); err != nil {
+		tlsOn := tlsAuto || (tlsCert != "" && tlsKey != "")
+		if err := signaling.RunHealthCheck(addr, tlsOn, *healthURLFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "health check failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -182,7 +134,7 @@ func main() {
 	}
 
 	resolvedSecret, fromCLI, err := config.ResolveSecret(
-		*signalSecret, explicitFlags["signal-secret"],
+		*signalSecretFlag, explicit["signal-secret"],
 		"SIGNAL_SECRET", "SIGNAL_SECRET_FILE", fileCfg.SignalSecret,
 	)
 	if err != nil {
@@ -193,42 +145,42 @@ func main() {
 	}
 
 	var nodeSecrets map[string]string
-	if *nodeSecretsFile != "" {
-		if err := config.LoadYAMLFile(*nodeSecretsFile, &nodeSecrets); err != nil {
+	if nodeSecretsFile != "" {
+		if err := config.LoadYAMLFile(nodeSecretsFile, &nodeSecrets); err != nil {
 			log.Fatalf("[Signal] Failed to load node-secrets-file: %v", err)
 		}
 		if len(nodeSecrets) == 0 {
-			log.Fatalf("[Signal] node-secrets-file %q is empty (Fail-Closed)", *nodeSecretsFile)
+			log.Fatalf("[Signal] node-secrets-file %q is empty (Fail-Closed)", nodeSecretsFile)
 		}
 	}
 
 	var allowForceRekeyPtr *bool
-	if allowForceRekeyExplicit {
-		v := *allowForceRekey
+	if allowForceRekeySet {
+		v := allowForceRekey
 		allowForceRekeyPtr = &v
 	}
 
 	srv, err := signaling.NewSignalServer(signaling.ServerOptions{
-		Addr:                 *addr,
-		StaticDir:            *staticDir,
+		Addr:                 addr,
+		StaticDir:            staticDir,
 		StaticFS:             web.DistFS,
-		TLSAuto:              *tlsAuto,
-		TLSCert:              *tlsCert,
-		TLSKey:               *tlsKey,
+		TLSAuto:              tlsAuto,
+		TLSCert:              tlsCert,
+		TLSKey:               tlsKey,
 		SignalSecret:         resolvedSecret,
 		NodeSecrets:          nodeSecrets,
 		AllowForceRekey:      allowForceRekeyPtr,
-		AllowAnonymousAgents: *allowAnon,
-		BoundKeysFile:        *boundKeysFile,
-		PortalDomain:         *portalDomain,
-		SandboxDomain:        *sandboxDomain,
-		SandboxHost:          *sandboxHost,
-		AllowSameSiteSandbox: *allowSameSite,
-		AllowAllOrigins:      *allowAllOrigins,
-		MaxIPConns:           *maxIPConns,
-		MaxIPMessages:        *maxIPMsgs,
-		TrustedProxies:       *trustedProxies,
-		ClientIPHeader:       *clientIPHeader,
+		AllowAnonymousAgents: allowAnon,
+		BoundKeysFile:        boundKeysFile,
+		PortalDomain:         portalDomain,
+		SandboxDomain:        sandboxDomain,
+		SandboxHost:          sandboxHost,
+		AllowSameSiteSandbox: allowSameSite,
+		AllowAllOrigins:      allowAllOrigins,
+		MaxIPConns:           maxIPConns,
+		MaxIPMessages:        maxIPMsgs,
+		TrustedProxies:       trustedProxies,
+		ClientIPHeader:       clientIPHeader,
 		Version:              Version,
 	})
 	if err != nil {
@@ -241,9 +193,9 @@ func main() {
 	}
 
 	var metricsSrv *http.Server
-	if *metricsAddr != "" {
-		if !signaling.IsLoopbackBindAddr(*metricsAddr) {
-			log.Printf("[Signal] WARNING: metrics-addr %q binds non-loopback; restrict access via firewall", *metricsAddr)
+	if metricsAddr != "" {
+		if !signaling.IsLoopbackBindAddr(metricsAddr) {
+			log.Printf("[Signal] WARNING: metrics-addr %q binds non-loopback; restrict access via firewall", metricsAddr)
 		}
 		mux := http.NewServeMux()
 		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +210,7 @@ func main() {
 			}
 		})
 		metricsSrv = &http.Server{
-			Addr:              *metricsAddr,
+			Addr:              metricsAddr,
 			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
@@ -267,7 +219,7 @@ func main() {
 			MaxHeaderBytes:    64 * 1024,
 		}
 		go func() {
-			log.Printf("[Signal] Metrics listening on %s", *metricsAddr)
+			log.Printf("[Signal] Metrics listening on %s", metricsAddr)
 			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("[Signal] Metrics server error: %v", err)
 			}
@@ -290,17 +242,19 @@ func main() {
 
 	select {
 	case sig := <-sigCh:
-		log.Printf("[Signal] Received %v, draining WebSockets and shutting down...", sig)
+		log.Printf("[Signal] Received %v, draining listeners and WebSockets...", sig)
 	case serveErr := <-errCh:
 		if serveErr != nil && serveErr != http.ErrServerClosed {
 			log.Fatalf("[Signal] Server error: %v", serveErr)
 		}
 	}
 
-	srv.Shutdown()
+	// Stop accepting new HTTP/WS connections BEFORE draining active WebSockets so no new
+	// upgrades slip in during shutdown.
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutCancel()
 	_ = httpSrv.Shutdown(shutCtx)
+	srv.Shutdown()
 	if metricsSrv != nil {
 		_ = metricsSrv.Shutdown(shutCtx)
 	}

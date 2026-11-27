@@ -1,14 +1,9 @@
 /**
  * P2PMux V7 DC-Pool Multiplexer (TypeScript Browser Side)
- * Architecture:
+ * Unified `MuxStreamCore` eliminates PoolStream/WSStream duplication while preserving:
  *   - 1 Control DC (id=0, "p2pctrl"): SETTINGS / AUTH / CAP / PING / GOAWAY
- *   - 32 Pre-Negotiated Reusable HTTP Pool DCs (id=1..32, "p2p_01".."p2p_32"):
- *       Strict 5-state single-slot FSM (IDLE -> RECEIVING_HEADERS -> OPEN -> HALF_CLOSED -> CLOSED),
- *       overhead-aware memory budgets (+64B/chunk), 5s header assembly timeout,
- *       preserved unread short-response bodies until onData() drains, AbortSignal + 30s pool acquire.
- *   - Dynamic Dedicated WebSocket DCs ("p2pws", DCEP ordered, Gen === 1):
- *       Bounded concurrency (DEFAULT_MAX_WS_CONNS = 64), sessionInboundBytes accounting,
- *       downstream-consumption-driven CREDIT replenishment up to 16 MiB.
+ *   - 32 Pre-Negotiated Reusable HTTP Pool DCs (id=1..32, "p2p_01".."p2p_32")
+ *   - Dynamic Dedicated WebSocket DCs ("p2pws", DCEP ordered, Gen === 1)
  */
 
 import {
@@ -24,6 +19,7 @@ import {
   MAX_TOTAL_HEADERS_SIZE,
   MAX_WS_MESSAGE_BYTES,
   MIN_CHUNK_SIZE,
+  MIN_NEGOTIATED_MAX_MSG_SIZE,
   decodeCreditPayload,
   decodeFrame,
   decodeGoAwayPayload,
@@ -45,6 +41,7 @@ export const MAX_STREAM_INBOUND_BYTES = 4 * 1024 * 1024; // 4 MiB
 export const MAX_SESSION_INBOUND_BYTES = 32 * 1024 * 1024; // 32 MiB
 export const PER_CHUNK_MEM_OVERHEAD = 64;
 export const MAX_INBOUND_QUEUE_LEN = 4096;
+export const MAX_WS_INBOUND_CHUNKS = 16384; // Supports 16 MiB WS even at 1 KiB chunks / 4096B MMS
 export const HEADER_ASSEMBLY_TIMEOUT_MS = 5_000;
 export const POOL_ACQUIRE_TIMEOUT_MS = 30_000;
 export const SEND_WINDOW_TIMEOUT_MS = 30_000;
@@ -88,6 +85,7 @@ interface PoolSlot {
   localGen: number;
   active: PoolStream | null;
   closed: boolean;
+  detachListeners: (() => void) | null;
 }
 
 function toUint8Array(data: unknown): Uint8Array | null {
@@ -123,30 +121,225 @@ async function waitForDCBackpressure(dc: DataChannelLike, isCancelled: () => boo
 }
 
 /**
+ * Shared flow-control, header-assembly, and timeout core for both PoolStream and WSStream.
+ */
+abstract class MuxStreamCore {
+  protected readonly mux: PoolMux;
+  protected sendWindow = DEFAULT_STREAM_WINDOW_SIZE;
+  protected recvWindowRem = DEFAULT_STREAM_WINDOW_SIZE;
+  protected sendWaiters: Waiter[] = [];
+
+  protected rxState: RxState = 'IDLE';
+  protected headerTimer: ReturnType<typeof setTimeout> | null = null;
+  protected headerChunks: Uint8Array[] = [];
+  protected headerBytes = 0;
+  protected headerReservedBytes = 0;
+
+  protected headersHandler: ((raw: Uint8Array) => void) | null = null;
+  protected pendingHeaders: Uint8Array | null = null;
+  protected resetHandler: ((code: number) => void) | null = null;
+  protected pendingResetCode: number | null = null;
+
+  constructor(mux: PoolMux) {
+    this.mux = mux;
+  }
+
+  protected abstract isSendStopped(): boolean;
+  protected abstract isTerminated(): boolean;
+  protected abstract getDC(): DataChannelLike | null;
+  protected abstract sendWireFrame(type: number, flags: number, payload: Uint8Array): void;
+  protected abstract failInternal(code: number): void;
+
+  onHeaders(cb: (raw: Uint8Array) => void): void {
+    this.headersHandler = cb;
+    if (this.pendingHeaders) {
+      const h = this.pendingHeaders;
+      this.pendingHeaders = null;
+      cb(h);
+    }
+  }
+
+  onReset(cb: (code: number) => void): void {
+    if (this.pendingResetCode !== null) {
+      const code = this.pendingResetCode;
+      this.pendingResetCode = null;
+      cb(code);
+      return;
+    }
+    this.resetHandler = cb;
+  }
+
+  protected startHeaderTimer(): void {
+    this.clearHeaderTimer();
+    this.headerTimer = setTimeout(() => {
+      this.headerTimer = null;
+      if (!this.isTerminated() && this.rxState === 'RECEIVING_HEADERS') {
+        this.failInternal(ErrorCode.PROTOCOL_ERROR);
+      }
+    }, HEADER_ASSEMBLY_TIMEOUT_MS);
+  }
+
+  protected clearHeaderTimer(): void {
+    if (this.headerTimer) {
+      clearTimeout(this.headerTimer);
+      this.headerTimer = null;
+    }
+  }
+
+  protected releaseHeaderAssembly(): void {
+    this.clearHeaderTimer();
+    if (this.headerReservedBytes > 0) {
+      this.mux._releaseSessionBytes(this.headerReservedBytes);
+      this.headerReservedBytes = 0;
+    }
+    this.headerChunks = [];
+    this.headerBytes = 0;
+  }
+
+  protected appendHeaderBytes(chunk: Uint8Array, more: boolean): Uint8Array | null {
+    if (
+      this.headerBytes + chunk.byteLength > MAX_TOTAL_HEADERS_SIZE ||
+      this.headerChunks.length >= 1 + MAX_CONTINUATION_FRAMES
+    ) {
+      this.failInternal(ErrorCode.FRAME_SIZE_ERROR);
+      return null;
+    }
+    const cost = chunk.byteLength + PER_CHUNK_MEM_OVERHEAD;
+    if (!this.mux._tryReserveSessionBytes(cost)) {
+      this.failInternal(ErrorCode.REFUSED_STREAM);
+      return null;
+    }
+    const cp = new Uint8Array(chunk.byteLength);
+    cp.set(chunk);
+    this.headerChunks.push(cp);
+    this.headerBytes += cp.byteLength;
+    this.headerReservedBytes += cost;
+    if (more) return null;
+
+    const assembled = new Uint8Array(this.headerBytes);
+    let off = 0;
+    for (const c of this.headerChunks) {
+      assembled.set(c, off);
+      off += c.byteLength;
+    }
+    this.releaseHeaderAssembly();
+    return assembled;
+  }
+
+  protected async sendSegmentedHeaders(tlv: Uint8Array, fin: boolean): Promise<void> {
+    if (tlv.byteLength > MAX_TOTAL_HEADERS_SIZE) {
+      throw new RangeError('HEADERS exceeds 64 KiB');
+    }
+    if (this.isSendStopped()) {
+      throw new Error('stream write closed');
+    }
+    const dc = this.getDC();
+    if (!dc || dc.readyState !== 'open') {
+      throw new Error('DataChannel not open');
+    }
+    const chunkSize = this.mux.effectiveChunkSize();
+    const totalChunks = Math.max(1, Math.ceil(tlv.byteLength / chunkSize));
+    if (totalChunks - 1 > MAX_CONTINUATION_FRAMES) {
+      throw new RangeError('HEADERS exceeds max continuation frame count');
+    }
+    if (totalChunks === 1) {
+      await waitForDCBackpressure(dc, () => this.isSendStopped());
+      this.sendWireFrame(FrameType.HEADERS, fin ? FrameFlag.FIN : FrameFlag.NONE, tlv);
+      return;
+    }
+    let off = 0;
+    for (let i = 0; i < totalChunks; i++) {
+      await waitForDCBackpressure(dc, () => this.isSendStopped());
+      const end = Math.min(tlv.byteLength, off + chunkSize);
+      const isFirst = i === 0;
+      const isLast = i === totalChunks - 1;
+      let flags = FrameFlag.NONE;
+      if (isFirst && fin) flags |= FrameFlag.FIN;
+      if (!isLast) flags |= FrameFlag.MORE_HEADERS;
+      this.sendWireFrame(isFirst ? FrameType.HEADERS : FrameType.CONTINUATION, flags, tlv.subarray(off, end));
+      off = end;
+    }
+  }
+
+  protected handleCreditFrame(payload: Uint8Array): void {
+    const delta = decodeCreditPayload(payload);
+    if (this.sendWindow + delta > 0x7fffffff) {
+      this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
+      return;
+    }
+    this.sendWindow += delta;
+    this.wakeSendWaiters();
+  }
+
+  protected async consumeSendWindow(want: number, allowZeroPayload: boolean): Promise<number> {
+    const minNeeded = allowZeroPayload ? PER_CHUNK_MEM_OVERHEAD : PER_CHUNK_MEM_OVERHEAD + 1;
+    while (this.sendWindow < minNeeded) {
+      if (this.isSendStopped()) {
+        throw new Error('stream closed waiting for credit');
+      }
+      await new Promise<void>((resolve, reject) => {
+        const waiter: Waiter = {
+          resolve,
+          reject,
+          timer: setTimeout(() => {
+            const idx = this.sendWaiters.indexOf(waiter);
+            if (idx >= 0) this.sendWaiters.splice(idx, 1);
+            this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
+            reject(new Error('flow control send window timeout'));
+          }, SEND_WINDOW_TIMEOUT_MS),
+        };
+        this.sendWaiters.push(waiter);
+      });
+    }
+    const take = Math.min(want, this.sendWindow - PER_CHUNK_MEM_OVERHEAD);
+    this.sendWindow -= take + PER_CHUNK_MEM_OVERHEAD;
+    return take;
+  }
+
+  protected wakeSendWaiters(): void {
+    while (this.sendWindow >= PER_CHUNK_MEM_OVERHEAD && this.sendWaiters.length > 0) {
+      const w = this.sendWaiters.shift()!;
+      clearTimeout(w.timer);
+      w.resolve();
+    }
+  }
+
+  protected failSendWaiters(err: Error): void {
+    const list = this.sendWaiters.splice(0);
+    for (const w of list) {
+      clearTimeout(w.timer);
+      w.reject(err);
+    }
+  }
+
+  protected emitReset(code: number): void {
+    const rh = this.resetHandler;
+    this.resetHandler = null;
+    if (rh) {
+      rh(code);
+    } else {
+      this.pendingResetCode = code;
+    }
+  }
+}
+
+/**
  * Reusable-pool HTTP Stream bound to a single ordered DataChannel slot + monotonic generation.
  */
-export class PoolStream {
+export class PoolStream extends MuxStreamCore {
   readonly gen: number;
   readonly slotIdx: number;
-  private readonly mux: PoolMux;
   private readonly slot: PoolSlot;
   private readonly manualFlowControl: boolean;
 
-  private sendWindow = DEFAULT_STREAM_WINDOW_SIZE;
-  private recvWindowRem = DEFAULT_STREAM_WINDOW_SIZE;
-  private sendWaiters: Waiter[] = [];
-
-  private rxState: RxState = 'IDLE';
-  private headerTimer: ReturnType<typeof setTimeout> | null = null;
-  private headerChunks: Uint8Array[] = [];
-  private headerBytes = 0;
-  private headerReservedBytes = 0;
   private respHeadersHadFin = false;
-
   private inboundChunks: Uint8Array[] = [];
-  private inboundBytes = 0; // payload + PER_CHUNK_MEM_OVERHEAD per queued chunk
+  private inboundBytes = 0;
+
+  // O(1) amortized head-pointer queue for unacknowledged chunk lengths (prevents O(N^2) Array.shift()).
   private unackedDeliveredBytes = 0;
   private unackedChunkLens: number[] = [];
+  private unackedHead = 0;
   private consumedForCredit = 0;
 
   private localClosed = false;
@@ -154,16 +347,11 @@ export class PoolStream {
   private terminated = false;
   private detached = false;
 
-  private headersHandler: ((raw: Uint8Array) => void) | null = null;
   private dataHandler: ((chunk: Uint8Array) => void) | null = null;
   private endHandler: (() => void) | null = null;
-  private resetHandler: ((code: number) => void) | null = null;
-
-  private pendingHeaders: Uint8Array | null = null;
-  private pendingResetCode: number | null = null;
 
   constructor(mux: PoolMux, slot: PoolSlot, gen: number, manualFlowControl: boolean) {
-    this.mux = mux;
+    super(mux);
     this.slot = slot;
     this.slotIdx = slot.slotIdx;
     this.gen = gen;
@@ -178,13 +366,34 @@ export class PoolStream {
     return !this.respHeadersHadFin;
   }
 
-  onHeaders(cb: (raw: Uint8Array) => void): void {
-    this.headersHandler = cb;
-    if (this.pendingHeaders) {
-      const h = this.pendingHeaders;
-      this.pendingHeaders = null;
-      cb(h);
+  protected isSendStopped(): boolean {
+    return this.terminated || this.localClosed;
+  }
+
+  protected isTerminated(): boolean {
+    return this.terminated;
+  }
+
+  protected getDC(): DataChannelLike | null {
+    return this.slot.dc;
+  }
+
+  protected sendWireFrame(type: number, flags: number, payload: Uint8Array): void {
+    const dc = this.slot.dc;
+    if (!dc || dc.readyState !== 'open' || this.slot.active !== this) {
+      throw new Error('pool DataChannel not open or stream detached');
     }
+    dc.send(encodeFrame(this.gen, type, flags, payload));
+  }
+
+  protected failInternal(code: number): void {
+    if (this.terminated) return;
+    try {
+      this.sendWireFrame(FrameType.RESET, FrameFlag.NONE, encodeResetPayload(code));
+    } catch {
+      // ignore send failure during teardown
+    }
+    this.terminate(code, true);
   }
 
   onData(cb: (chunk: Uint8Array) => void): void {
@@ -197,21 +406,20 @@ export class PoolStream {
       this.mux._releaseSessionBytes(queuedBudget);
       let payloadSum = 0;
       for (const ch of queued) {
+        if (this.terminated) return;
         this.unackedDeliveredBytes += ch.byteLength;
         this.unackedChunkLens.push(ch.byteLength);
         payloadSum += ch.byteLength;
         cb(ch);
       }
+      if (this.terminated) return;
       if (!this.manualFlowControl) {
         this.ackConsumed(payloadSum);
       }
     }
-    if (this.remoteClosed && !this.terminated && this.pendingResetCode === null && this.endHandler) {
-      const eh = this.endHandler;
-      this.endHandler = null;
-      eh();
+    if (this.remoteClosed && !this.terminated && this.pendingResetCode === null) {
+      this.finishRemoteIfComplete();
     }
-    this.checkFullClose();
   }
 
   onEnd(cb: () => void): void {
@@ -222,32 +430,26 @@ export class PoolStream {
     this.endHandler = cb;
   }
 
-  onReset(cb: (code: number) => void): void {
-    if (this.pendingResetCode !== null) {
-      cb(this.pendingResetCode);
-      return;
-    }
-    this.resetHandler = cb;
-  }
-
-  /**
-   * Issues in-band CREDIT strictly clamped to bytes actually delivered and unacknowledged,
-   * including exact per-chunk overhead conservation (+64B/chunk).
-   */
   ackConsumed(bytes: number): void {
     if (this.terminated || this.remoteClosed || bytes <= 0 || !Number.isFinite(bytes)) return;
     let rem = Math.min(Math.floor(bytes), this.unackedDeliveredBytes);
     if (rem <= 0) return;
     this.unackedDeliveredBytes -= rem;
     let creditCost = rem;
-    while (rem > 0 && this.unackedChunkLens.length > 0) {
-      if (rem >= this.unackedChunkLens[0]) {
-        rem -= this.unackedChunkLens.shift()!;
+    while (rem > 0 && this.unackedHead < this.unackedChunkLens.length) {
+      const headLen = this.unackedChunkLens[this.unackedHead];
+      if (rem >= headLen) {
+        rem -= headLen;
+        this.unackedHead++;
         creditCost += PER_CHUNK_MEM_OVERHEAD;
       } else {
-        this.unackedChunkLens[0] -= rem;
+        this.unackedChunkLens[this.unackedHead] = headLen - rem;
         rem = 0;
       }
+    }
+    if (this.unackedHead >= 1024 && this.unackedHead * 2 >= this.unackedChunkLens.length) {
+      this.unackedChunkLens = this.unackedChunkLens.slice(this.unackedHead);
+      this.unackedHead = 0;
     }
     this.consumedForCredit += creditCost;
     if (this.consumedForCredit >= DEFAULT_STREAM_WINDOW_SIZE / 4) {
@@ -255,7 +457,7 @@ export class PoolStream {
       this.consumedForCredit = 0;
       this.recvWindowRem += delta;
       try {
-        this.sendSlotFrame(FrameType.CREDIT, FrameFlag.NONE, encodeCreditPayload(delta));
+        this.sendWireFrame(FrameType.CREDIT, FrameFlag.NONE, encodeCreditPayload(delta));
       } catch {
         this.terminate(ErrorCode.CANCEL, true);
       }
@@ -263,35 +465,7 @@ export class PoolStream {
   }
 
   async sendHeaders(tlv: Uint8Array, fin: boolean): Promise<void> {
-    if (tlv.byteLength > MAX_TOTAL_HEADERS_SIZE) {
-      throw new RangeError('HEADERS exceeds 64 KiB');
-    }
-    if (this.terminated || this.localClosed) {
-      throw new Error('stream write closed');
-    }
-    const chunkSize = this.mux.effectiveChunkSize();
-    const totalChunks = Math.max(1, Math.ceil(tlv.byteLength / chunkSize));
-    if (totalChunks - 1 > MAX_CONTINUATION_FRAMES) {
-      throw new RangeError('HEADERS exceeds max continuation frame count');
-    }
-
-    if (totalChunks === 1) {
-      const flags = fin ? FrameFlag.FIN : FrameFlag.NONE;
-      this.sendSlotFrame(FrameType.HEADERS, flags, tlv);
-    } else {
-      let off = 0;
-      for (let i = 0; i < totalChunks; i++) {
-        const end = Math.min(tlv.byteLength, off + chunkSize);
-        const isFirst = i === 0;
-        const isLast = i === totalChunks - 1;
-        const type = isFirst ? FrameType.HEADERS : FrameType.CONTINUATION;
-        let flags = FrameFlag.NONE;
-        if (isFirst && fin) flags |= FrameFlag.FIN;
-        if (!isLast) flags |= FrameFlag.MORE_HEADERS;
-        this.sendSlotFrame(type, flags, tlv.subarray(off, end));
-        off = end;
-      }
-    }
+    await this.sendSegmentedHeaders(tlv, fin);
     if (fin) {
       this.localClosed = true;
       this.checkFullClose();
@@ -299,7 +473,7 @@ export class PoolStream {
   }
 
   async sendData(payload: Uint8Array, fin = false): Promise<void> {
-    if (this.terminated || this.localClosed) {
+    if (this.isSendStopped()) {
       throw new Error('stream write closed');
     }
     const dc = this.slot.dc;
@@ -308,17 +482,17 @@ export class PoolStream {
     }
     let off = 0;
     while (off < payload.byteLength) {
-      await waitForDCBackpressure(dc, () => this.terminated || this.localClosed);
+      await waitForDCBackpressure(dc, () => this.isSendStopped());
       const chunkMax = this.mux.effectiveChunkSize();
       const want = Math.min(payload.byteLength - off, chunkMax);
-      const grant = await this.consumeSendWindow(want);
+      const grant = await this.consumeSendWindow(want, false);
       const end = off + grant;
       const isLastAndFin = fin && end === payload.byteLength;
-      this.sendSlotFrame(FrameType.DATA, isLastAndFin ? FrameFlag.FIN : FrameFlag.NONE, payload.subarray(off, end));
+      this.sendWireFrame(FrameType.DATA, isLastAndFin ? FrameFlag.FIN : FrameFlag.NONE, payload.subarray(off, end));
       off = end;
     }
     if (fin && payload.byteLength === 0) {
-      this.sendSlotFrame(FrameType.DATA, FrameFlag.FIN, new Uint8Array(0));
+      this.sendWireFrame(FrameType.DATA, FrameFlag.FIN, new Uint8Array(0));
     }
     if (fin) {
       this.localClosed = true;
@@ -327,14 +501,15 @@ export class PoolStream {
   }
 
   async finishWrite(): Promise<void> {
-    if (this.terminated || this.localClosed) return;
+    if (this.isSendStopped()) return;
     await this.sendData(new Uint8Array(0), true);
   }
 
+  // External caller-initiated reset (caller already owns teardown, so notifyReset = false).
   reset(code: number = ErrorCode.CANCEL): void {
     if (this.terminated) return;
     try {
-      this.sendSlotFrame(FrameType.RESET, FrameFlag.NONE, encodeResetPayload(code));
+      this.sendWireFrame(FrameType.RESET, FrameFlag.NONE, encodeResetPayload(code));
     } catch {
       // ignore send failure during teardown
     }
@@ -347,42 +522,35 @@ export class PoolStream {
     switch (f.type) {
       case FrameType.HEADERS:
         if (this.rxState !== 'IDLE') {
-          this.reset(ErrorCode.PROTOCOL_ERROR);
+          this.failInternal(ErrorCode.PROTOCOL_ERROR);
           return;
         }
         this.rxState = 'RECEIVING_HEADERS';
         this.respHeadersHadFin = (f.flags & FrameFlag.FIN) !== 0;
         this.startHeaderTimer();
-        this.appendHeaderChunk(f.payload, (f.flags & FrameFlag.MORE_HEADERS) !== 0);
+        this.handleHeaderChunk(f.payload, (f.flags & FrameFlag.MORE_HEADERS) !== 0);
         break;
       case FrameType.CONTINUATION:
         if (this.rxState !== 'RECEIVING_HEADERS') {
-          this.reset(ErrorCode.PROTOCOL_ERROR);
+          this.failInternal(ErrorCode.PROTOCOL_ERROR);
           return;
         }
         if (f.payload.byteLength === 0 && (f.flags & FrameFlag.MORE_HEADERS) !== 0) {
-          this.reset(ErrorCode.PROTOCOL_ERROR);
+          this.failInternal(ErrorCode.PROTOCOL_ERROR);
           return;
         }
-        this.appendHeaderChunk(f.payload, (f.flags & FrameFlag.MORE_HEADERS) !== 0);
+        this.handleHeaderChunk(f.payload, (f.flags & FrameFlag.MORE_HEADERS) !== 0);
         break;
       case FrameType.DATA:
         if (this.rxState !== 'OPEN') {
-          this.reset(ErrorCode.PROTOCOL_ERROR);
+          this.failInternal(ErrorCode.PROTOCOL_ERROR);
           return;
         }
         this.handleData(f.payload, (f.flags & FrameFlag.FIN) !== 0);
         break;
-      case FrameType.CREDIT: {
-        const delta = decodeCreditPayload(f.payload);
-        if (this.sendWindow + delta > 0x7fffffff) {
-          this.reset(ErrorCode.FLOW_CONTROL_ERROR);
-          return;
-        }
-        this.sendWindow += delta;
-        this.wakeSendWaiters();
+      case FrameType.CREDIT:
+        this.handleCreditFrame(f.payload);
         break;
-      }
       case FrameType.RESET: {
         const code = decodeResetPayload(f.payload);
         this.terminate(code, true);
@@ -392,61 +560,30 @@ export class PoolStream {
   }
 
   /** @internal */
+  _failProtocol(code: number): void {
+    this.failInternal(code);
+  }
+
+  /** @internal */
   _terminateFromMux(code: number): void {
     this.terminate(code, true);
   }
 
-  private startHeaderTimer(): void {
-    this.clearHeaderTimer();
-    this.headerTimer = setTimeout(() => {
-      this.headerTimer = null;
-      if (!this.terminated && this.rxState === 'RECEIVING_HEADERS') {
-        this.reset(ErrorCode.PROTOCOL_ERROR);
+  private handleHeaderChunk(chunk: Uint8Array, more: boolean): void {
+    const assembled = this.appendHeaderBytes(chunk, more);
+    if (!assembled) return;
+
+    // Transition FSM state BEFORE invoking user callbacks so reentrant closeBoth() observes
+    // isClosed === true on clean bidirectional FIN (zero spurious RESET(CANCEL) on wire!).
+    if (this.respHeadersHadFin) {
+      this.remoteClosed = true;
+      this.rxState = this.localClosed ? 'CLOSED' : 'HALF_CLOSED';
+      if (this.localClosed && this.inboundChunks.length === 0) {
+        this.terminated = true;
       }
-    }, HEADER_ASSEMBLY_TIMEOUT_MS);
-  }
-
-  private clearHeaderTimer(): void {
-    if (this.headerTimer) {
-      clearTimeout(this.headerTimer);
-      this.headerTimer = null;
+    } else {
+      this.rxState = 'OPEN';
     }
-  }
-
-  private appendHeaderChunk(chunk: Uint8Array, more: boolean): void {
-    if (
-      this.headerBytes + chunk.byteLength > MAX_TOTAL_HEADERS_SIZE ||
-      this.headerChunks.length >= 1 + MAX_CONTINUATION_FRAMES
-    ) {
-      this.reset(ErrorCode.FRAME_SIZE_ERROR);
-      return;
-    }
-    const cost = chunk.byteLength + PER_CHUNK_MEM_OVERHEAD;
-    if (!this.mux._tryReserveSessionBytes(cost)) {
-      this.reset(ErrorCode.REFUSED_STREAM);
-      return;
-    }
-    const cp = new Uint8Array(chunk.byteLength);
-    cp.set(chunk);
-    this.headerChunks.push(cp);
-    this.headerBytes += cp.byteLength;
-    this.headerReservedBytes += cost;
-    if (more) return;
-
-    this.clearHeaderTimer();
-    const assembled = new Uint8Array(this.headerBytes);
-    let off = 0;
-    for (const c of this.headerChunks) {
-      assembled.set(c, off);
-      off += c.byteLength;
-    }
-    this.headerChunks = [];
-    this.headerBytes = 0;
-    if (this.headerReservedBytes > 0) {
-      this.mux._releaseSessionBytes(this.headerReservedBytes);
-      this.headerReservedBytes = 0;
-    }
-    this.rxState = this.respHeadersHadFin ? 'HALF_CLOSED' : 'OPEN';
 
     if (this.headersHandler) {
       this.headersHandler(assembled);
@@ -455,30 +592,34 @@ export class PoolStream {
     }
 
     if (this.respHeadersHadFin) {
-      this.remoteClosed = true;
-      if (this.inboundChunks.length === 0 && this.endHandler) {
+      if (this.pendingResetCode === null && this.inboundChunks.length === 0 && this.endHandler) {
         const eh = this.endHandler;
         this.endHandler = null;
         eh();
       }
-      this.checkFullClose();
+      if (this.terminated) {
+        this.purgeInbound();
+        this.detach();
+      } else {
+        this.checkFullClose();
+      }
     }
   }
 
   private handleData(payload: Uint8Array, fin: boolean): void {
     if (this.remoteClosed) {
-      this.reset(ErrorCode.PROTOCOL_ERROR);
+      this.failInternal(ErrorCode.PROTOCOL_ERROR);
       return;
     }
     const len = payload.byteLength;
     if (len === 0 && !fin) {
-      this.reset(ErrorCode.PROTOCOL_ERROR);
+      this.failInternal(ErrorCode.PROTOCOL_ERROR);
       return;
     }
     if (len > 0) {
       const cost = len + PER_CHUNK_MEM_OVERHEAD;
       if (cost > this.recvWindowRem) {
-        this.reset(ErrorCode.FLOW_CONTROL_ERROR);
+        this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
         return;
       }
       this.recvWindowRem -= cost;
@@ -486,9 +627,14 @@ export class PoolStream {
       cp.set(payload);
 
       if (this.dataHandler) {
+        if (this.unackedChunkLens.length - this.unackedHead >= MAX_INBOUND_QUEUE_LEN * 2) {
+          this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
+          return;
+        }
         this.unackedDeliveredBytes += len;
         this.unackedChunkLens.push(len);
         this.dataHandler(cp);
+        if (this.terminated) return; // Guard against reentrant reset() inside dataHandler!
         if (!this.manualFlowControl) {
           this.ackConsumed(len);
         }
@@ -498,7 +644,7 @@ export class PoolStream {
           this.inboundBytes + cost > MAX_STREAM_INBOUND_BYTES ||
           !this.mux._tryReserveSessionBytes(cost)
         ) {
-          this.reset(ErrorCode.FLOW_CONTROL_ERROR);
+          this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
           return;
         }
         this.inboundChunks.push(cp);
@@ -506,18 +652,31 @@ export class PoolStream {
       }
     }
     if (fin) {
+      if (this.terminated) return;
       this.remoteClosed = true;
-      this.rxState = 'HALF_CLOSED';
-      if (this.inboundChunks.length === 0 && this.endHandler) {
-        const eh = this.endHandler;
-        this.endHandler = null;
-        eh();
-      }
+      this.finishRemoteIfComplete();
+    }
+  }
+
+  private finishRemoteIfComplete(): void {
+    const fullyDone = this.localClosed && this.inboundChunks.length === 0;
+    this.rxState = fullyDone ? 'CLOSED' : 'HALF_CLOSED';
+    if (fullyDone) {
+      this.terminated = true;
+    }
+    if (this.inboundChunks.length === 0 && this.endHandler) {
+      const eh = this.endHandler;
+      this.endHandler = null;
+      eh();
+    }
+    if (this.terminated) {
+      this.purgeInbound();
+      this.detach();
+    } else {
       this.checkFullClose();
     }
   }
 
-  // Never purge unread short-response inboundChunks before onData() drains them.
   private checkFullClose(): void {
     if (this.localClosed && this.remoteClosed && this.inboundChunks.length === 0) {
       this.terminated = true;
@@ -533,31 +692,21 @@ export class PoolStream {
     this.localClosed = true;
     this.remoteClosed = true;
     this.rxState = 'CLOSED';
-    this.clearHeaderTimer();
     this.purgeInbound();
     this.failSendWaiters(new Error(`stream reset (${code})`));
     this.detach();
     if (notifyReset) {
-      this.pendingResetCode = code;
-      if (this.resetHandler) {
-        const rh = this.resetHandler;
-        this.resetHandler = null;
-        rh(code);
-      }
+      this.emitReset(code);
     }
   }
 
   private purgeInbound(): void {
-    this.clearHeaderTimer();
-    const toRelease = this.inboundBytes + this.headerReservedBytes;
-    if (toRelease > 0) {
-      this.mux._releaseSessionBytes(toRelease);
+    this.releaseHeaderAssembly();
+    if (this.inboundBytes > 0) {
+      this.mux._releaseSessionBytes(this.inboundBytes);
       this.inboundBytes = 0;
-      this.headerReservedBytes = 0;
     }
     this.inboundChunks = [];
-    this.headerChunks = [];
-    this.headerBytes = 0;
   }
 
   private detach(): void {
@@ -565,77 +714,15 @@ export class PoolStream {
     this.detached = true;
     this.mux._releasePoolSlot(this.slot, this);
   }
-
-  private sendSlotFrame(type: number, flags: number, payload: Uint8Array): void {
-    const dc = this.slot.dc;
-    if (!dc || dc.readyState !== 'open' || this.slot.active !== this) {
-      throw new Error('pool DataChannel not open or stream detached');
-    }
-    dc.send(encodeFrame(this.gen, type, flags, payload));
-  }
-
-  private async consumeSendWindow(want: number): Promise<number> {
-    while (this.sendWindow <= PER_CHUNK_MEM_OVERHEAD) {
-      if (this.terminated || this.localClosed) {
-        throw new Error('stream closed waiting for credit');
-      }
-      await new Promise<void>((resolve, reject) => {
-        const waiter: Waiter = {
-          resolve,
-          reject,
-          timer: setTimeout(() => {
-            const idx = this.sendWaiters.indexOf(waiter);
-            if (idx >= 0) this.sendWaiters.splice(idx, 1);
-            this.reset(ErrorCode.FLOW_CONTROL_ERROR);
-            reject(new Error('flow control send window timeout'));
-          }, SEND_WINDOW_TIMEOUT_MS),
-        };
-        this.sendWaiters.push(waiter);
-      });
-    }
-    const take = Math.min(want, this.sendWindow - PER_CHUNK_MEM_OVERHEAD);
-    this.sendWindow -= take + PER_CHUNK_MEM_OVERHEAD;
-    return take;
-  }
-
-  private wakeSendWaiters(): void {
-    while (this.sendWindow > PER_CHUNK_MEM_OVERHEAD && this.sendWaiters.length > 0) {
-      const w = this.sendWaiters.shift()!;
-      clearTimeout(w.timer);
-      w.resolve();
-    }
-  }
-
-  private failSendWaiters(err: Error): void {
-    const list = this.sendWaiters.splice(0);
-    for (const w of list) {
-      clearTimeout(w.timer);
-      w.reject(err);
-    }
-  }
 }
 
 /**
  * Dedicated WebSocket Stream bound to its own dynamic DCEP DataChannel ("p2pws", Gen === 1).
- * Accounts all inbound chunks & header fragments to sessionInboundBytes and issues CREDIT
- * strictly under session memory budget & downstream message delivery.
  */
-export class WSStream {
+export class WSStream extends MuxStreamCore {
   readonly gen = 1;
-  private readonly mux: PoolMux;
   private readonly dc: DataChannelLike;
 
-  private sendWindow = DEFAULT_STREAM_WINDOW_SIZE;
-  private recvWindowRem = DEFAULT_STREAM_WINDOW_SIZE;
-  private sendWaiters: Waiter[] = [];
-
-  private rxState: RxState = 'IDLE';
-  private headerTimer: ReturnType<typeof setTimeout> | null = null;
-  private headerChunks: Uint8Array[] = [];
-  private headerBytes = 0;
-  private headerReservedBytes = 0;
-
-  // Streaming WS message reassembly accounted to mux.sessionInboundBytes.
   private wsChunks: Uint8Array[] = [];
   private wsBytes = 0;
   private wsReservedBytes = 0;
@@ -647,17 +734,13 @@ export class WSStream {
   private consumedForCredit = 0;
 
   private closed = false;
-  private headersHandler: ((raw: Uint8Array) => void) | null = null;
+  private localCloseSent = false;
   private msgHandler: ((isBinary: boolean, payload: Uint8Array) => void) | null = null;
   private closeHandler: ((code: number, reason: string) => void) | null = null;
-  private resetHandler: ((code: number) => void) | null = null;
-  private pendingHeaders: Uint8Array | null = null;
   private pendingClose: { code: number; reason: string } | null = null;
-  private pendingResetCode: number | null = null;
-  private localCloseSent = false;
 
   constructor(mux: PoolMux, dc: DataChannelLike) {
-    this.mux = mux;
+    super(mux);
     this.dc = dc;
     dc.binaryType = 'arraybuffer';
     dc.addEventListener('message', this.onDCMessage);
@@ -669,13 +752,33 @@ export class WSStream {
     return this.closed;
   }
 
-  onHeaders(cb: (raw: Uint8Array) => void): void {
-    this.headersHandler = cb;
-    if (this.pendingHeaders) {
-      const h = this.pendingHeaders;
-      this.pendingHeaders = null;
-      cb(h);
+  protected isSendStopped(): boolean {
+    return this.closed || this.localCloseSent;
+  }
+
+  protected isTerminated(): boolean {
+    return this.closed;
+  }
+
+  protected getDC(): DataChannelLike | null {
+    return this.dc;
+  }
+
+  protected sendWireFrame(type: number, flags: number, payload: Uint8Array): void {
+    if (this.dc.readyState !== 'open') {
+      throw new Error('WS DataChannel not open');
     }
+    this.dc.send(encodeFrame(this.gen, type, flags, payload));
+  }
+
+  protected failInternal(code: number): void {
+    if (this.closed) return;
+    try {
+      this.sendWireFrame(FrameType.RESET, FrameFlag.NONE, encodeResetPayload(code));
+    } catch {
+      // ignore send failure during teardown
+    }
+    this.cleanup(code);
   }
 
   onMessage(cb: (isBinary: boolean, payload: Uint8Array) => void): void {
@@ -689,13 +792,21 @@ export class WSStream {
       }
       for (const item of queued) {
         cb(item.isBinary, item.payload);
+        if (this.closed) break;
         this.creditConsumed(item.uncredited);
       }
+    }
+    if (this.pendingClose && this.closeHandler) {
+      const pc = this.pendingClose;
+      this.pendingClose = null;
+      const ch = this.closeHandler;
+      this.closeHandler = null;
+      ch(pc.code, pc.reason);
     }
   }
 
   onClose(cb: (code: number, reason: string) => void): void {
-    if (this.pendingClose) {
+    if (this.pendingClose && this.pendingMessages.length === 0) {
       const pc = this.pendingClose;
       this.pendingClose = null;
       cb(pc.code, pc.reason);
@@ -704,57 +815,36 @@ export class WSStream {
     this.closeHandler = cb;
   }
 
-  onReset(cb: (code: number) => void): void {
-    if (this.pendingResetCode !== null) {
-      const code = this.pendingResetCode;
-      this.pendingResetCode = null;
-      cb(code);
-      return;
-    }
-    this.resetHandler = cb;
-  }
-
   async sendHeaders(tlv: Uint8Array): Promise<void> {
-    if (this.closed) throw new Error('WS stream closed');
-    if (tlv.byteLength > MAX_TOTAL_HEADERS_SIZE) throw new RangeError('WS headers exceed 64 KiB');
-    const chunkSize = this.mux.effectiveChunkSize();
-    const totalChunks = Math.max(1, Math.ceil(tlv.byteLength / chunkSize));
-    if (totalChunks - 1 > MAX_CONTINUATION_FRAMES) throw new RangeError('WS headers exceed chunk limit');
-    let off = 0;
-    for (let i = 0; i < totalChunks; i++) {
-      const end = Math.min(tlv.byteLength, off + chunkSize);
-      const isFirst = i === 0;
-      const isLast = i === totalChunks - 1;
-      const type = isFirst ? FrameType.HEADERS : FrameType.CONTINUATION;
-      const flags = isLast ? FrameFlag.NONE : FrameFlag.MORE_HEADERS;
-      this.sendFrame(type, flags, tlv.subarray(off, end));
-      off = end;
-    }
+    await this.sendSegmentedHeaders(tlv, false);
   }
 
   async sendWSMessage(isBinary: boolean, payload: Uint8Array): Promise<void> {
-    if (this.closed || this.localCloseSent) throw new Error('WS stream closed');
+    if (this.isSendStopped()) throw new Error('WS stream closed');
     if (payload.byteLength > MAX_WS_MESSAGE_BYTES) {
       throw new RangeError('WS message exceeds 16 MiB limit');
     }
     const firstOp = isBinary ? FrameType.WS_BINARY : FrameType.WS_TEXT;
     if (payload.byteLength === 0) {
       await this.consumeSendWindow(0, true);
-      this.sendFrame(firstOp, FrameFlag.MSG_FIN, payload);
+      if (this.isSendStopped()) throw new Error('WS stream closed');
+      this.sendWireFrame(firstOp, FrameFlag.MSG_FIN, payload);
       return;
     }
     let off = 0;
     let first = true;
     while (off < payload.byteLength) {
-      await waitForDCBackpressure(this.dc, () => this.closed);
+      await waitForDCBackpressure(this.dc, () => this.isSendStopped());
+      if (this.isSendStopped()) throw new Error('WS stream closed');
       const chunkMax = this.mux.effectiveChunkSize();
       const want = Math.min(payload.byteLength - off, chunkMax);
       const grant = await this.consumeSendWindow(want, false);
+      if (this.isSendStopped()) throw new Error('WS stream closed');
       const end = off + grant;
       const op = first ? firstOp : FrameType.WS_CONT;
       first = false;
       const flags = end === payload.byteLength ? FrameFlag.MSG_FIN : FrameFlag.NONE;
-      this.sendFrame(op, flags, payload.subarray(off, end));
+      this.sendWireFrame(op, flags, payload.subarray(off, end));
       off = end;
     }
   }
@@ -763,7 +853,7 @@ export class WSStream {
     if (this.closed || this.localCloseSent) return;
     this.localCloseSent = true;
     try {
-      this.sendFrame(FrameType.WS_CLOSE, FrameFlag.NONE, encodeWSClosePayload(code, reason));
+      this.sendWireFrame(FrameType.WS_CLOSE, FrameFlag.NONE, encodeWSClosePayload(code, reason));
     } catch {
       this.cleanup(null);
       return;
@@ -776,7 +866,7 @@ export class WSStream {
   reset(code: number = ErrorCode.CANCEL): void {
     if (this.closed) return;
     try {
-      this.sendFrame(FrameType.RESET, FrameFlag.NONE, encodeResetPayload(code));
+      this.sendWireFrame(FrameType.RESET, FrameFlag.NONE, encodeResetPayload(code));
     } catch {
       // ignore send failure during reset
     }
@@ -788,23 +878,6 @@ export class WSStream {
     this.cleanup(code);
   }
 
-  private startHeaderTimer(): void {
-    this.clearHeaderTimer();
-    this.headerTimer = setTimeout(() => {
-      this.headerTimer = null;
-      if (!this.closed && this.rxState === 'RECEIVING_HEADERS') {
-        this.reset(ErrorCode.PROTOCOL_ERROR);
-      }
-    }, HEADER_ASSEMBLY_TIMEOUT_MS);
-  }
-
-  private clearHeaderTimer(): void {
-    if (this.headerTimer) {
-      clearTimeout(this.headerTimer);
-      this.headerTimer = null;
-    }
-  }
-
   private readonly onDCMessage = (ev: Event): void => {
     if (this.closed) return;
     const raw = toUint8Array((ev as MessageEvent).data);
@@ -813,45 +886,42 @@ export class WSStream {
     try {
       f = decodeFrame(raw);
     } catch {
-      this.reset(ErrorCode.PROTOCOL_ERROR);
+      this.failInternal(ErrorCode.PROTOCOL_ERROR);
       return;
     }
     if (f.gen !== this.gen || !isWSDataFrameType(f.type)) {
-      this.reset(ErrorCode.PROTOCOL_ERROR);
+      this.failInternal(ErrorCode.PROTOCOL_ERROR);
       return;
     }
 
     switch (f.type) {
-      case FrameType.HEADERS:
+      case FrameType.HEADERS: {
         if (this.rxState !== 'IDLE') {
-          this.reset(ErrorCode.PROTOCOL_ERROR);
+          this.failInternal(ErrorCode.PROTOCOL_ERROR);
           return;
         }
         this.rxState = 'RECEIVING_HEADERS';
         this.startHeaderTimer();
-        this.handleHeaderFrame(f);
+        const assembled = this.appendHeaderBytes(f.payload, (f.flags & FrameFlag.MORE_HEADERS) !== 0);
+        if (assembled) this.finishWSHeaders(assembled);
         break;
-      case FrameType.CONTINUATION:
+      }
+      case FrameType.CONTINUATION: {
         if (this.rxState !== 'RECEIVING_HEADERS') {
-          this.reset(ErrorCode.PROTOCOL_ERROR);
+          this.failInternal(ErrorCode.PROTOCOL_ERROR);
           return;
         }
         if (f.payload.byteLength === 0 && (f.flags & FrameFlag.MORE_HEADERS) !== 0) {
-          this.reset(ErrorCode.PROTOCOL_ERROR);
+          this.failInternal(ErrorCode.PROTOCOL_ERROR);
           return;
         }
-        this.handleHeaderFrame(f);
-        break;
-      case FrameType.CREDIT: {
-        const delta = decodeCreditPayload(f.payload);
-        if (this.sendWindow + delta > 0x7fffffff) {
-          this.reset(ErrorCode.FLOW_CONTROL_ERROR);
-          return;
-        }
-        this.sendWindow += delta;
-        this.wakeSendWaiters();
+        const assembled = this.appendHeaderBytes(f.payload, (f.flags & FrameFlag.MORE_HEADERS) !== 0);
+        if (assembled) this.finishWSHeaders(assembled);
         break;
       }
+      case FrameType.CREDIT:
+        this.handleCreditFrame(f.payload);
+        break;
       case FrameType.RESET: {
         const code = decodeResetPayload(f.payload);
         this.cleanup(code);
@@ -861,24 +931,35 @@ export class WSStream {
       case FrameType.WS_BINARY:
       case FrameType.WS_CONT:
         if (this.rxState !== 'OPEN') {
-          this.reset(ErrorCode.PROTOCOL_ERROR);
+          this.failInternal(ErrorCode.PROTOCOL_ERROR);
           return;
         }
         this.handleWSChunk(f);
         break;
       case FrameType.WS_CLOSE: {
         if (this.rxState !== 'OPEN') {
-          this.reset(ErrorCode.PROTOCOL_ERROR);
+          this.failInternal(ErrorCode.PROTOCOL_ERROR);
           return;
         }
-        const { code, reason } = decodeWSClosePayload(f.payload);
+        let closeInfo: { code: number; reason: string };
+        try {
+          closeInfo = decodeWSClosePayload(f.payload);
+        } catch {
+          this.failInternal(ErrorCode.PROTOCOL_ERROR);
+          return;
+        }
+        const preservedPending = this.pendingMessages.length > 0;
         const ch = this.closeHandler;
-        this.closeHandler = null;
-        this.cleanup(null);
-        if (ch) {
-          ch(code, reason);
+        if (!preservedPending) {
+          this.closeHandler = null;
+        }
+        this.cleanup(null, preservedPending);
+        if (preservedPending) {
+          this.pendingClose = closeInfo;
+        } else if (ch) {
+          ch(closeInfo.code, closeInfo.reason);
         } else {
-          this.pendingClose = { code, reason };
+          this.pendingClose = closeInfo;
         }
         break;
       }
@@ -891,39 +972,7 @@ export class WSStream {
     }
   };
 
-  private handleHeaderFrame(f: Frame): void {
-    if (
-      this.headerBytes + f.payload.byteLength > MAX_TOTAL_HEADERS_SIZE ||
-      this.headerChunks.length >= 1 + MAX_CONTINUATION_FRAMES
-    ) {
-      this.reset(ErrorCode.FRAME_SIZE_ERROR);
-      return;
-    }
-    const cost = f.payload.byteLength + PER_CHUNK_MEM_OVERHEAD;
-    if (!this.mux._tryReserveSessionBytes(cost)) {
-      this.reset(ErrorCode.REFUSED_STREAM);
-      return;
-    }
-    const cp = new Uint8Array(f.payload.byteLength);
-    cp.set(f.payload);
-    this.headerChunks.push(cp);
-    this.headerBytes += cp.byteLength;
-    this.headerReservedBytes += cost;
-    if ((f.flags & FrameFlag.MORE_HEADERS) !== 0) return;
-
-    this.clearHeaderTimer();
-    const assembled = new Uint8Array(this.headerBytes);
-    let off = 0;
-    for (const c of this.headerChunks) {
-      assembled.set(c, off);
-      off += c.byteLength;
-    }
-    this.headerChunks = [];
-    this.headerBytes = 0;
-    if (this.headerReservedBytes > 0) {
-      this.mux._releaseSessionBytes(this.headerReservedBytes);
-      this.headerReservedBytes = 0;
-    }
+  private finishWSHeaders(assembled: Uint8Array): void {
     this.rxState = 'OPEN';
     if (this.headersHandler) {
       this.headersHandler(assembled);
@@ -940,7 +989,7 @@ export class WSStream {
       this.consumedForCredit = 0;
       this.recvWindowRem += delta;
       try {
-        this.sendFrame(FrameType.CREDIT, FrameFlag.NONE, encodeCreditPayload(delta));
+        this.sendWireFrame(FrameType.CREDIT, FrameFlag.NONE, encodeCreditPayload(delta));
       } catch {
         this.cleanup(ErrorCode.CANCEL);
       }
@@ -951,14 +1000,14 @@ export class WSStream {
     const len = f.payload.byteLength;
     const cost = len + PER_CHUNK_MEM_OVERHEAD;
     if (cost > this.recvWindowRem) {
-      this.reset(ErrorCode.FLOW_CONTROL_ERROR);
+      this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
       return;
     }
     this.recvWindowRem -= cost;
 
     if (f.type === FrameType.WS_TEXT || f.type === FrameType.WS_BINARY) {
       if (this.wsInProgress) {
-        this.reset(ErrorCode.PROTOCOL_ERROR);
+        this.failInternal(ErrorCode.PROTOCOL_ERROR);
         return;
       }
       this.wsInProgress = true;
@@ -968,20 +1017,27 @@ export class WSStream {
       this.wsReservedBytes = 0;
       this.wsCreditedBytes = 0;
     } else if (!this.wsInProgress) {
-      this.reset(ErrorCode.PROTOCOL_ERROR);
+      this.failInternal(ErrorCode.PROTOCOL_ERROR);
       return;
     }
 
-    if (this.wsChunks.length >= MAX_INBOUND_QUEUE_LEN) {
-      this.reset(ErrorCode.FLOW_CONTROL_ERROR);
+    if (this.wsChunks.length >= MAX_WS_INBOUND_CHUNKS) {
+      this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
       return;
     }
     if (this.wsBytes + len > MAX_WS_MESSAGE_BYTES) {
+      const ch = this.closeHandler;
+      this.closeHandler = null;
       this.sendWSClose(1009, 'Message Too Big', true);
+      if (ch) {
+        ch(1009, 'Message Too Big');
+      } else {
+        this.pendingClose = { code: 1009, reason: 'Message Too Big' };
+      }
       return;
     }
     if (!this.mux._tryReserveSessionBytes(cost)) {
-      this.reset(ErrorCode.FLOW_CONTROL_ERROR);
+      this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
       return;
     }
     this.wsReservedBytes += cost;
@@ -994,8 +1050,6 @@ export class WSStream {
 
     const isFin = (f.flags & FrameFlag.MSG_FIN) !== 0;
     if (!isFin) {
-      // For multi-chunk messages exceeding the 2 MiB window (up to 16 MiB), replenish flow
-      // credit ONLY while sessionInboundBytes budget reservation succeeded AND downstream is attached.
       if (this.msgHandler) {
         this.wsCreditedBytes += cost;
         this.creditConsumed(cost);
@@ -1028,12 +1082,13 @@ export class WSStream {
     if (this.msgHandler) {
       this.mux._releaseSessionBytes(totalReserved);
       this.msgHandler(isBin, full);
-      this.creditConsumed(uncredited);
+      if (!this.closed) {
+        this.creditConsumed(uncredited);
+      }
     } else {
-      // Downstream hasn't attached yet: retain sessionInboundBytes & withhold CREDIT until onMessage drains.
       if (this.pendingMessages.length >= MAX_INBOUND_QUEUE_LEN) {
         this.mux._releaseSessionBytes(totalReserved);
-        this.reset(ErrorCode.FLOW_CONTROL_ERROR);
+        this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
         return;
       }
       this.pendingMessages.push({ isBinary: isBin, payload: full, reserved: totalReserved, uncredited });
@@ -1041,67 +1096,25 @@ export class WSStream {
     }
   }
 
-  private sendFrame(type: number, flags: number, payload: Uint8Array): void {
-    if (this.dc.readyState !== 'open') {
-      throw new Error('WS DataChannel not open');
-    }
-    this.dc.send(encodeFrame(this.gen, type, flags, payload));
-  }
-
-  private async consumeSendWindow(want: number, allowZeroPayload: boolean): Promise<number> {
-    const minNeeded = allowZeroPayload ? PER_CHUNK_MEM_OVERHEAD : PER_CHUNK_MEM_OVERHEAD + 1;
-    while (this.sendWindow < minNeeded) {
-      if (this.closed) throw new Error('WS stream closed');
-      await new Promise<void>((resolve, reject) => {
-        const w: Waiter = {
-          resolve,
-          reject,
-          timer: setTimeout(() => {
-            const idx = this.sendWaiters.indexOf(w);
-            if (idx >= 0) this.sendWaiters.splice(idx, 1);
-            this.reset(ErrorCode.FLOW_CONTROL_ERROR);
-            reject(new Error('WS flow control timeout'));
-          }, SEND_WINDOW_TIMEOUT_MS),
-        };
-        this.sendWaiters.push(w);
-      });
-    }
-    const take = Math.min(want, this.sendWindow - PER_CHUNK_MEM_OVERHEAD);
-    this.sendWindow -= take + PER_CHUNK_MEM_OVERHEAD;
-    return take;
-  }
-
-  private wakeSendWaiters(): void {
-    while (this.sendWindow >= PER_CHUNK_MEM_OVERHEAD && this.sendWaiters.length > 0) {
-      const w = this.sendWaiters.shift()!;
-      clearTimeout(w.timer);
-      w.resolve();
-    }
-  }
-
-  private cleanup(resetCode: number | null): void {
+  private cleanup(resetCode: number | null, preservePendingMessages = false): void {
     if (this.closed) return;
     this.closed = true;
     this.rxState = 'CLOSED';
-    this.clearHeaderTimer();
-    const toRelease = this.wsReservedBytes + this.headerReservedBytes + this.pendingMessagesReserved;
+    this.releaseHeaderAssembly();
+    let toRelease = this.wsReservedBytes;
+    this.wsReservedBytes = 0;
+    if (!preservePendingMessages) {
+      toRelease += this.pendingMessagesReserved;
+      this.pendingMessagesReserved = 0;
+      this.pendingMessages = [];
+    }
     if (toRelease > 0) {
       this.mux._releaseSessionBytes(toRelease);
-      this.wsReservedBytes = 0;
-      this.headerReservedBytes = 0;
-      this.pendingMessagesReserved = 0;
     }
     this.wsChunks = [];
     this.wsBytes = 0;
-    this.pendingMessages = [];
-    this.headerChunks = [];
-    this.headerBytes = 0;
 
-    const list = this.sendWaiters.splice(0);
-    for (const w of list) {
-      clearTimeout(w.timer);
-      w.reject(new Error('WS stream closed'));
-    }
+    this.failSendWaiters(new Error('WS stream closed'));
     this.dc.removeEventListener('message', this.onDCMessage);
     this.dc.removeEventListener('close', this.onDCClose);
     this.dc.removeEventListener('error', this.onDCClose);
@@ -1112,13 +1125,7 @@ export class WSStream {
     }
     this.mux._unregisterWSStream(this);
     if (resetCode !== null) {
-      const rh = this.resetHandler;
-      this.resetHandler = null;
-      if (rh) {
-        rh(resetCode);
-      } else {
-        this.pendingResetCode = resetCode;
-      }
+      this.emitReset(resetCode);
     }
   }
 }
@@ -1165,6 +1172,7 @@ export class PoolMux {
   private readonly poolSize: number;
   private readonly maxWSConns: number;
   private ctrlDC: DataChannelLike | null = null;
+  private ctrlDetach: (() => void) | null = null;
   private readonly poolSlots: PoolSlot[] = [];
   private readonly idleSlots: PoolSlot[] = [];
   private readonly slotWaiters: SlotWaiter[] = [];
@@ -1196,6 +1204,7 @@ export class PoolMux {
         localGen: 0,
         active: null,
         closed: false,
+        detachListeners: null,
       });
     }
   }
@@ -1217,10 +1226,10 @@ export class PoolMux {
   }
 
   /**
-   * Clamps frame payload size strictly DOWNWARD.
+   * Clamps frame payload size strictly DOWNWARD (ignores invalid values < MIN_NEGOTIATED_MAX_MSG_SIZE).
    */
   setMaxMessageSize(maxMsg: number): void {
-    if (!Number.isFinite(maxMsg) || maxMsg <= HEADER_SIZE) return;
+    if (!Number.isFinite(maxMsg) || maxMsg < MIN_NEGOTIATED_MAX_MSG_SIZE) return;
     const candidate = Math.max(MIN_CHUNK_SIZE, Math.min(DEFAULT_CHUNK_SIZE, Math.floor(maxMsg) - HEADER_SIZE));
     if (candidate < this.chunkSize) {
       this.chunkSize = candidate;
@@ -1228,28 +1237,39 @@ export class PoolMux {
   }
 
   attachControlDC(dc: DataChannelLike): void {
+    this.ctrlDetach?.();
     this.ctrlDC = dc;
     dc.binaryType = 'arraybuffer';
-    dc.addEventListener('message', (ev: Event) => {
+    const onMsg = (ev: Event) => {
       if (this.closed) return;
       const raw = toUint8Array((ev as MessageEvent).data);
       if (!raw) return;
       this.handleControlBytes(raw);
-    });
+    };
+    dc.addEventListener('message', onMsg);
+    this.ctrlDetach = () => dc.removeEventListener('message', onMsg);
   }
 
   attachPoolDC(slotIdx: number, dc: DataChannelLike): void {
     if (slotIdx < 0 || slotIdx >= this.poolSize) return;
     const slot = this.poolSlots[slotIdx];
+    slot.detachListeners?.();
     slot.dc = dc;
     dc.binaryType = 'arraybuffer';
-    dc.addEventListener('message', (ev: Event) => {
+
+    if (dc.readyState === 'closed' || dc.readyState === 'closing') {
+      slot.closed = true;
+      this.rejectWaitersIfAllSlotsDead();
+      return;
+    }
+
+    const onMsg = (ev: Event) => {
       if (this.closed || slot.closed) return;
       const raw = toUint8Array((ev as MessageEvent).data);
       if (!raw) return;
       this.handlePoolBytes(slot, raw);
-    });
-    dc.addEventListener('close', () => {
+    };
+    const onClose = () => {
       slot.closed = true;
       const idx = this.idleSlots.indexOf(slot);
       if (idx >= 0) this.idleSlots.splice(idx, 1);
@@ -1257,16 +1277,27 @@ export class PoolMux {
         slot.active._terminateFromMux(ErrorCode.CANCEL);
       }
       this.rejectWaitersIfAllSlotsDead();
-    });
+    };
+    const onOpen = () => {
+      if (!this.closed && !slot.closed && slot.dc === dc && slot.active === null) {
+        this.makeSlotAvailable(slot);
+      }
+    };
+
+    dc.addEventListener('message', onMsg);
+    dc.addEventListener('close', onClose);
+    dc.addEventListener('error', onClose);
     if (dc.readyState === 'open') {
       this.makeSlotAvailable(slot);
     } else {
-      dc.addEventListener('open', () => {
-        if (!this.closed && !slot.closed && slot.dc === dc && slot.active === null) {
-          this.makeSlotAvailable(slot);
-        }
-      });
+      dc.addEventListener('open', onOpen);
     }
+    slot.detachListeners = () => {
+      dc.removeEventListener('message', onMsg);
+      dc.removeEventListener('close', onClose);
+      dc.removeEventListener('error', onClose);
+      dc.removeEventListener('open', onOpen);
+    };
   }
 
   sendControlFrame(type: number, payload: Uint8Array = new Uint8Array(0)): void {
@@ -1293,15 +1324,11 @@ export class PoolMux {
     }
   }
 
-  /**
-   * Sends an in-band 8-byte PING frame on `p2pctrl` and resolves true if the peer echoes
-   * the matching PONG before `timeoutMs`, or false on timeout/close/error.
-   */
   ping(timeoutMs = 1_500): Promise<boolean> {
     if (this.closed || !this.ctrlDC || this.ctrlDC.readyState !== 'open') {
       return Promise.resolve(false);
     }
-    const seqHi = (Date.now() >>> 0);
+    const seqHi = Date.now() >>> 0;
     this.pingSeq = (this.pingSeq + 1) >>> 0;
     const seqLo = this.pingSeq;
     const key = `${seqHi}:${seqLo}`;
@@ -1342,8 +1369,9 @@ export class PoolMux {
     }
     slot.localGen = (slot.localGen + 1) >>> 0;
     if (slot.localGen === 0) slot.localGen = 1;
-    if (slot.localGen >= GOAWAY_GEN_THRESHOLD) {
+    if (slot.localGen >= GOAWAY_GEN_THRESHOLD && !this.goAwaySent) {
       this.sendGoAway(ErrorCode.GOING_AWAY);
+      this.callbacks.onGoAway?.(ErrorCode.GOING_AWAY);
     }
     const stream = new PoolStream(this, slot, slot.localGen, manualFlowControl);
     slot.active = stream;
@@ -1358,28 +1386,23 @@ export class PoolMux {
   }
 
   async openWSStream(wsDC: DataChannelLike, headersTlv: Uint8Array): Promise<WSStream> {
-    if (this.closed) {
+    const closeQuiet = () => {
       try {
         wsDC.close();
       } catch {
         // ignore
       }
+    };
+    if (this.closed) {
+      closeQuiet();
       throw new Error('mux closed');
     }
     if (headersTlv.byteLength > MAX_TOTAL_HEADERS_SIZE) {
-      try {
-        wsDC.close();
-      } catch {
-        // ignore
-      }
+      closeQuiet();
       throw new RangeError('WS HEADERS exceeds 64 KiB');
     }
     if (this.wsStreams.size >= this.maxWSConns) {
-      try {
-        wsDC.close();
-      } catch {
-        // ignore
-      }
+      closeQuiet();
       throw new Error('max concurrent WebSocket streams reached');
     }
     const stream = new WSStream(this, wsDC);
@@ -1400,6 +1423,8 @@ export class PoolMux {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.ctrlDetach?.();
+    this.ctrlDetach = null;
     const waiters = this.slotWaiters.splice(0);
     for (const w of waiters) {
       w.cleanup();
@@ -1413,6 +1438,8 @@ export class PoolMux {
     this.idleSlots.length = 0;
     for (const slot of this.poolSlots) {
       slot.closed = true;
+      slot.detachListeners?.();
+      slot.detachListeners = null;
       if (slot.active) {
         slot.active._terminateFromMux(ErrorCode.GOING_AWAY);
       }
@@ -1597,15 +1624,19 @@ export class PoolMux {
       f = decodeFrame(raw);
     } catch {
       if (slot.active) {
-        slot.active.reset(ErrorCode.PROTOCOL_ERROR);
+        slot.active._failProtocol(ErrorCode.PROTOCOL_ERROR);
       }
       return;
     }
-    if (!isPoolDataFrameType(f.type)) return;
-    const active = slot.active;
-    if (!active || active.gen !== f.gen) {
-      return; // Stale frame from prior generation: O(1) drop.
+    if (!isPoolDataFrameType(f.type)) {
+      if (slot.active) {
+        slot.active._failProtocol(ErrorCode.PROTOCOL_ERROR);
+      }
+      return;
     }
-    active._handleFrame(f);
+    if (!slot.active || slot.active.gen !== f.gen) {
+      return;
+    }
+    slot.active._handleFrame(f);
   }
 }

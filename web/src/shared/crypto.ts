@@ -14,7 +14,7 @@ export function base64UrlEncode(bytes: Uint8Array): string {
 }
 
 export function base64UrlDecode(str: string): Uint8Array {
-  if (!str || !/^[A-Za-z0-9_-]+$/.test(str)) {
+  if (!str || str.length % 4 === 1 || !/^[A-Za-z0-9_-]+$/.test(str)) {
     throw new Error('invalid base64url string');
   }
   const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
@@ -23,6 +23,10 @@ export function base64UrlDecode(str: string): Uint8Array {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) {
     out[i] = bin.charCodeAt(i);
+  }
+  // Enforce canonical zero trailing bits (matches Go base64.RawURLEncoding.Strict()).
+  if (base64UrlEncode(out) !== str) {
+    throw new Error('non-canonical base64url string');
   }
   return out;
 }

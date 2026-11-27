@@ -38,6 +38,10 @@ jobs:
           if [ "$REF_TYPE" = "tag" ]; then
             node scripts/verify-release-hygiene.mjs --check-tag "$REF_NAME"
           fi
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
           bash scripts/gate.sh --full
 
   build-and-push:

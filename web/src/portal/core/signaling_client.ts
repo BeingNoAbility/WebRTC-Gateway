@@ -1,8 +1,9 @@
 /**
- * Portal Signaling Client (Single Authoritative Embedded Go Signal)
- * - Connects strictly to same-origin `location.origin`.
+ * Portal Short-Lived Signaling Client (Single Authoritative Embedded Go Signal)
+ * - Connects strictly to same-origin `location.origin` ONLY during WebRTC negotiation.
+ * - Immediately closed by PeerSession as soon as in-DTLS authentication succeeds
+ *   (no long-lived signaling connection or competing reconnect loop).
  * - Exchanges structured `SessionDescriptor` Offer/Answer over WebSocket.
- * - Clean `close()` cancels all timers and detaches listeners.
  */
 
 import { isRecord } from '../../shared/ipc';
@@ -55,18 +56,13 @@ export interface SignalingClientCallbacks {
   onAnswer?: (msg: SignalAnswerMsg) => void;
   onCandidate?: (msg: SignalCandidateMsg) => void;
   onError?: (msg: SignalErrorMsg) => void;
-  onDisconnected?: (willReconnect: boolean) => void;
+  onDisconnected?: () => void;
 }
-
-const INITIAL_BACKOFF_MS = 1_000;
-const MAX_BACKOFF_MS = 15_000;
 
 export class SignalingClient {
   private ws: WebSocket | null = null;
   private connectPromise: Promise<SignalJoinedMsg> | null = null;
   private closedManually = false;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private backoffMs = INITIAL_BACKOFF_MS;
   private sessionId = '';
   private online = false;
   private requireVisitorAuth = true;
@@ -89,10 +85,6 @@ export class SignalingClient {
 
   connect(): Promise<SignalJoinedMsg> {
     this.closedManually = false;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
     if (this.ws && this.ws.readyState === WebSocket.OPEN && this.sessionId) {
       return Promise.resolve({
         nodeId: this.nodeId,
@@ -129,10 +121,6 @@ export class SignalingClient {
           failConnect(new Error('Signaling join timeout'));
         }
       }, 10_000);
-
-      ws.onopen = () => {
-        this.backoffMs = INITIAL_BACKOFF_MS;
-      };
 
       ws.onmessage = (ev: MessageEvent) => {
         if (this.ws !== ws || typeof ev.data !== 'string') return;
@@ -231,27 +219,13 @@ export class SignalingClient {
         this.sessionId = '';
         failConnect(new Error('Signaling WebSocket closed before join'));
 
-        const willReconnect = !this.closedManually;
-        this.callbacks.onDisconnected?.(willReconnect);
-        if (willReconnect) {
-          this.scheduleReconnect();
+        if (!this.closedManually) {
+          this.callbacks.onDisconnected?.();
         }
       };
     });
 
     return this.connectPromise;
-  }
-
-  private scheduleReconnect(): void {
-    if (this.closedManually || this.reconnectTimer) return;
-    const jitter = Math.floor(Math.random() * 400);
-    const delay = Math.min(this.backoffMs + jitter, MAX_BACKOFF_MS);
-    this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS);
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      if (this.closedManually) return;
-      this.connect().catch(() => {});
-    }, delay);
   }
 
   sendOffer(offer: OfferPayload): void {
@@ -283,10 +257,6 @@ export class SignalingClient {
 
   close(): void {
     this.closedManually = true;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
     this.connectPromise = null;
     if (this.ws) {
       const ws = this.ws;

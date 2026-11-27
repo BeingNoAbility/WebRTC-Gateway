@@ -21,12 +21,39 @@ export function isNonHttpScheme(rawUrl: string): boolean {
   return NON_HTTP_SCHEMES_RE.test(rawUrl);
 }
 
-function hasCrossOriginBaseHref(ctx: UrlRewriteContext): boolean {
-  if (!ctx.baseHref) return false;
+function parseCurrentOriginUrl(currentOrigin: string): URL | null {
+  if (!currentOrigin || currentOrigin === 'null') return null;
   try {
-    return new URL(ctx.baseHref, `${ctx.currentOrigin}/`).origin !== ctx.currentOrigin;
+    const u = new URL(currentOrigin);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+/**
+ * Resolves the effective document base URL safely:
+ * - Guards opaque `"null"` `currentOrigin` (e.g. `CSP: sandbox` static files).
+ * - Resolves relative `<base href="/app/">` against `currentOrigin` first so `new URL(raw, base)`
+ *   never throws `TypeError: Invalid URL` on relative `<base href>`.
+ */
+function resolveEffectiveBase(ctx: UrlRewriteContext): { curUrl: URL; baseHref: string; crossOriginBase: boolean } | null {
+  const curUrl = parseCurrentOriginUrl(ctx.currentOrigin);
+  if (!curUrl) return null;
+  const curBase = `${curUrl.origin}/`;
+  if (!ctx.baseHref) {
+    return { curUrl, baseHref: curBase, crossOriginBase: false };
+  }
+  try {
+    const resolvedBase = new URL(ctx.baseHref, curBase);
+    return {
+      curUrl,
+      baseHref: resolvedBase.href,
+      crossOriginBase: resolvedBase.origin !== curUrl.origin,
+    };
+  } catch {
+    return { curUrl, baseHref: curBase, crossOriginBase: false };
   }
 }
 
@@ -40,9 +67,12 @@ export function rewriteBackendUrl(rawUrl: string, ctx: UrlRewriteContext): strin
   const trimmed = rawUrl.trim();
   if (trimmed.startsWith('#')) return rawUrl;
 
+  const eff = resolveEffectiveBase(ctx);
+  if (!eff) return rawUrl;
+
   let parsed: URL;
   try {
-    parsed = new URL(trimmed, ctx.baseHref || `${ctx.currentOrigin}/`);
+    parsed = new URL(trimmed, eff.baseHref);
   } catch {
     return rawUrl;
   }
@@ -51,9 +81,9 @@ export function rewriteBackendUrl(rawUrl: string, ctx: UrlRewriteContext): strin
   }
 
   const rel = `${parsed.pathname}${parsed.search}${parsed.hash}`;
-  const prefix = hasCrossOriginBaseHref(ctx) ? ctx.currentOrigin : '';
+  const prefix = eff.crossOriginBase ? eff.curUrl.origin : '';
 
-  if (parsed.origin === ctx.currentOrigin) {
+  if (parsed.origin === eff.curUrl.origin) {
     return `${prefix}${rel}`;
   }
 
@@ -77,9 +107,12 @@ export function rewriteBackendUrl(rawUrl: string, ctx: UrlRewriteContext): strin
  */
 export function rewriteWebSocketTarget(rawUrl: string, ctx: UrlRewriteContext): string | null {
   if (!rawUrl || isNonHttpScheme(rawUrl)) return null;
+  const eff = resolveEffectiveBase(ctx);
+  if (!eff) return null;
+
   let parsed: URL;
   try {
-    parsed = new URL(rawUrl.trim(), ctx.baseHref || `${ctx.currentOrigin}/`);
+    parsed = new URL(rawUrl.trim(), eff.baseHref);
   } catch {
     return null;
   }
@@ -88,7 +121,7 @@ export function rewriteWebSocketTarget(rawUrl: string, ctx: UrlRewriteContext): 
     return null;
   }
   const httpScheme = proto === 'wss:' || proto === 'https:' ? 'https' : 'http';
-  const curHost = new URL(ctx.currentOrigin).host.toLowerCase();
+  const curHost = eff.curUrl.host.toLowerCase();
   const hostPort = parsed.host.toLowerCase();
 
   if (hostPort === curHost) {
@@ -115,9 +148,12 @@ export function rewriteWebSocketTarget(rawUrl: string, ctx: UrlRewriteContext): 
  */
 export function resolvePortalPopupUrl(rawUrl: string, ctx: UrlRewriteContext): string | null {
   if (!rawUrl || isNonHttpScheme(rawUrl)) return null;
+  const eff = resolveEffectiveBase(ctx);
+  if (!eff) return null;
+
   let resolved: URL;
   try {
-    resolved = new URL(rawUrl.trim(), ctx.baseHref || `${ctx.currentOrigin}/`);
+    resolved = new URL(rawUrl.trim(), eff.baseHref);
   } catch {
     return null;
   }
@@ -125,12 +161,12 @@ export function resolvePortalPopupUrl(rawUrl: string, ctx: UrlRewriteContext): s
     return null;
   }
   // Never wrap links that already target Portal itself!
-  if (ctx.portalOrigin && resolved.origin === ctx.portalOrigin && ctx.portalOrigin !== ctx.currentOrigin) {
+  if (ctx.portalOrigin && resolved.origin === ctx.portalOrigin && ctx.portalOrigin !== eff.curUrl.origin) {
     return null;
   }
 
   let subPath: string | null = null;
-  if (resolved.origin === ctx.currentOrigin) {
+  if (resolved.origin === eff.curUrl.origin) {
     subPath = `${resolved.pathname}${resolved.search}${resolved.hash}`;
   } else if (ctx.targetOrigin) {
     try {

@@ -19,7 +19,8 @@ signal_secret: ""
 node_secrets_file: ""
 # Allow authenticated agents to rotate bound Ed25519 node keys via -force-rekey.
 # Defaults to false under a shared SIGNAL_SECRET and true under isolated per-node node_secrets_file.
-allow_force_rekey: false
+# Uncomment to explicitly override the automatic default:
+# allow_force_rekey: false
 allow_anonymous_agents: false
 
 # Optional JSON file path to persist Ed25519 node-to-key bindings across server restarts.

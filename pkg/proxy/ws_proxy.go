@@ -90,7 +90,8 @@ func (wp *WSProxy) HandleStream(
 		return
 	}
 
-	if jar != nil && len(reqHdr.CookieMutations) > 0 {
+	credentialsOmit := (reqHdr.FetchCtx & protocol.FetchCtxCredentialsOmit) != 0
+	if jar != nil && !credentialsOmit && len(reqHdr.CookieMutations) > 0 {
 		jar.ApplyClientMutations(wp.policy.CookieURL(dest.URL), cookieEntriesToMutations(reqHdr.CookieMutations))
 	}
 	readonly := capScope != nil && capScope.Readonly
@@ -142,7 +143,7 @@ func (wp *WSProxy) HandleStream(
 
 	var respFields []protocol.HeaderField
 	var wsDeltas []CookieDelta
-	if resp != nil {
+	if resp != nil && !credentialsOmit {
 		if setCookies := resp.Header.Values("Set-Cookie"); len(setCookies) > 0 && jar != nil {
 			wsDeltas = jar.SaveResponseCookies(wp.policy.CookieURL(dest.URL), setCookies)
 		}
@@ -208,17 +209,22 @@ func (wp *WSProxy) HandleStream(
 		bufA := make([]byte, wsStreamChunkSize)
 		bufB := make([]byte, wsStreamChunkSize)
 
+		handleBackendReadErr := func(err error) {
+			if isWSMessageTooBigErr(err) {
+				closeBackend(websocket.StatusMessageTooBig, "frame exceeds 16 MiB")
+				sendWSClose(uint16(websocket.StatusMessageTooBig), "frame exceeds 16 MiB")
+				return
+			}
+			var closeErr websocket.CloseError
+			if errors.As(err, &closeErr) {
+				sendWSClose(validWSCloseCode(int(closeErr.Code)), closeErr.Reason)
+			}
+		}
+
 		for {
 			msgType, reader, rerr := conn.Reader(pumpCtx)
 			if rerr != nil {
-				if isWSMessageTooBigErr(rerr) {
-					sendWSClose(uint16(websocket.StatusMessageTooBig), "frame exceeds 16 MiB")
-					return
-				}
-				var closeErr websocket.CloseError
-				if errors.As(rerr, &closeErr) {
-					sendWSClose(validWSCloseCode(int(closeErr.Code)), closeErr.Reason)
-				}
+				handleBackendReadErr(rerr)
 				return
 			}
 
@@ -233,16 +239,13 @@ func (wp *WSProxy) HandleStream(
 
 			nCur, errCur := readChunkNonEmptyOrEOF(reader, curBuf)
 			if errCur != nil && errCur != io.EOF {
-				if isWSMessageTooBigErr(errCur) {
-					closeBackend(websocket.StatusMessageTooBig, "frame exceeds 16 MiB")
-					_ = stream.WriteWSClose(uint16(websocket.StatusMessageTooBig), "frame exceeds 16 MiB")
-				}
+				handleBackendReadErr(errCur)
 				return
 			}
 			totalBytes += nCur
 			if totalBytes > MaxWSFramePayloadBytes {
 				closeBackend(websocket.StatusMessageTooBig, "frame exceeds 16 MiB")
-				_ = stream.WriteWSClose(uint16(websocket.StatusMessageTooBig), "frame exceeds 16 MiB")
+				sendWSClose(uint16(websocket.StatusMessageTooBig), "frame exceeds 16 MiB")
 				return
 			}
 			// Empty 0-byte WS message (e.g. `ws.send("")`) -> single final frame.
@@ -263,10 +266,7 @@ func (wp *WSProxy) HandleStream(
 				// Peek next chunk to determine exact FlagMsgFin without ever emitting 0B non-final WS_CONT.
 				nNext, errNext := readChunkNonEmptyOrEOF(reader, nextBuf)
 				if errNext != nil && errNext != io.EOF {
-					if isWSMessageTooBigErr(errNext) {
-						closeBackend(websocket.StatusMessageTooBig, "frame exceeds 16 MiB")
-						_ = stream.WriteWSClose(uint16(websocket.StatusMessageTooBig), "frame exceeds 16 MiB")
-					}
+					handleBackendReadErr(errNext)
 					return
 				}
 				if nNext == 0 && errNext == io.EOF {
@@ -278,7 +278,7 @@ func (wp *WSProxy) HandleStream(
 				totalBytes += nNext
 				if totalBytes > MaxWSFramePayloadBytes {
 					closeBackend(websocket.StatusMessageTooBig, "frame exceeds 16 MiB")
-					_ = stream.WriteWSClose(uint16(websocket.StatusMessageTooBig), "frame exceeds 16 MiB")
+					sendWSClose(uint16(websocket.StatusMessageTooBig), "frame exceeds 16 MiB")
 					return
 				}
 				if werr := stream.WriteWSChunk(pumpCtx, curOp, false, curBuf[:nCur]); werr != nil {
@@ -292,6 +292,7 @@ func (wp *WSProxy) HandleStream(
 	}()
 
 	// Goroutine B: Dedicated "p2pws" DC -> Backend WS (commits writer.Close ONLY on FlagMsgFin!).
+	// Enforces per-chunk progress deadlines instead of one fixed timeout across an entire 16 MiB message.
 	go func() {
 		defer wg.Done()
 		defer pumpCancel()
@@ -303,18 +304,38 @@ func (wp *WSProxy) HandleStream(
 				curCancel()
 				curCancel = nil
 			}
-			curWriter = nil
+			if curWriter != nil {
+				_ = curWriter.Close()
+				curWriter = nil
+			}
 			curBytes = 0
 		}
 		defer abortWriter()
 
+		withWriteDeadline := func(cancel context.CancelFunc, fn func() error) error {
+			t := time.AfterFunc(wsBackendWriteTimeout, cancel)
+			err := fn()
+			t.Stop()
+			return err
+		}
+
 		for {
-			chunk, rerr := stream.ReadWSChunk(pumpCtx)
+			readCtx := pumpCtx
+			var readCancel context.CancelFunc
+			if curWriter != nil {
+				readCtx, readCancel = context.WithTimeout(pumpCtx, wsBackendWriteTimeout)
+			}
+			chunk, rerr := stream.ReadWSChunk(readCtx)
+			if readCancel != nil {
+				readCancel()
+			}
 			if rerr != nil {
 				return
 			}
 			if chunk.Op == protocol.TypeWSClose {
-				abortWriter()
+				if curWriter != nil {
+					abortWriter()
+				}
 				code, reason, derr := protocol.DecodeWSClosePayload(chunk.Payload)
 				if derr != nil {
 					code = uint16(websocket.StatusNormalClosure)
@@ -338,8 +359,13 @@ func (wp *WSProxy) HandleStream(
 				if chunk.Op == protocol.TypeWSText {
 					wsType = websocket.MessageText
 				}
-				wctx, wcancel := context.WithTimeout(pumpCtx, wsBackendWriteTimeout)
-				w, werr := conn.Writer(wctx, wsType)
+				wctx, wcancel := context.WithCancel(pumpCtx)
+				var w io.WriteCloser
+				werr := withWriteDeadline(wcancel, func() error {
+					var err error
+					w, err = conn.Writer(wctx, wsType)
+					return err
+				})
 				if werr != nil {
 					wcancel()
 					return
@@ -364,14 +390,20 @@ func (wp *WSProxy) HandleStream(
 				return
 			}
 			if len(chunk.Payload) > 0 {
-				if _, werr := curWriter.Write(chunk.Payload); werr != nil {
+				werr := withWriteDeadline(curCancel, func() error {
+					_, err := curWriter.Write(chunk.Payload)
+					return err
+				})
+				if werr != nil {
 					abortWriter()
 					return
 				}
 			}
 			// ONLY call writer.Close() when chunk.Fin (FlagMsgFin) is explicitly set!
 			if chunk.Fin {
-				clErr := curWriter.Close()
+				clErr := withWriteDeadline(curCancel, func() error {
+					return curWriter.Close()
+				})
 				curCancel()
 				curWriter = nil
 				curCancel = nil

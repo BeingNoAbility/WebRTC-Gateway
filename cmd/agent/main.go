@@ -26,7 +26,9 @@ import (
 )
 
 // Version is injected at build time via `-ldflags="-X main.Version=vX.Y.Z"`.
-var Version = "v5.0.0-alpha.3"
+var Version = "dev"
+
+const defaultSTUNServers = "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
 
 type agentFileConfig struct {
 	NodeID              string `yaml:"node_id"`
@@ -58,68 +60,38 @@ type agentFileConfig struct {
 	PortalURL           string `yaml:"portal_url"`
 }
 
-var valueFlags = map[string]bool{
-	"config": true, "id": true, "signal": true, "signal-secret": true,
-	"access-secret": true, "identity-key": true, "state-file": true, "target": true,
-	"dir": true, "file": true, "upstream-host": true,
-	"proxy": true, "sni": true, "stun-servers": true,
-	"turn-url": true, "turn-user": true, "turn-pass": true, "max-streams": true,
-	"metrics-addr": true, "portal-url": true, "mint-link": true,
-	"mint-path": true, "mint-max-conns": true, "health-url": true,
-}
-
 func main() {
-	rawArgs := os.Args[1:]
-	if config.HasBoolFlag(rawArgs, []string{"v", "version"}, valueFlags) {
-		fmt.Printf("webrtc-gateway-agent %s\n", Version)
-		os.Exit(0)
-	}
-
-	var fileCfg agentFileConfig
-	if cfgPath := config.ResolveExplicitConfigPath(rawArgs, valueFlags); cfgPath != "" {
-		if err := config.LoadYAMLFile(cfgPath, &fileCfg); err != nil {
-			log.Fatalf("[Agent] Failed to load config: %v", err)
-		}
-	}
-
-	defHideDot := true
-	if fileCfg.HideDotfiles != nil {
-		defHideDot = *fileCfg.HideDotfiles
-	}
-	defICEMDNS := true
-	if fileCfg.ICEMDNS != nil {
-		defICEMDNS = *fileCfg.ICEMDNS
-	}
-
 	fs := flag.NewFlagSet("agent", flag.ExitOnError)
+	showVerShort := fs.Bool("v", false, "Print version and exit")
+	showVerLong := fs.Bool("version", false, "Print version and exit")
 	cfgFlag := fs.String("config", "", "Explicit YAML/JSON config path (also CONFIG_FILE; never auto-loaded from CWD)")
-	nodeID := fs.String("id", fileCfg.NodeID, "Node ID (lowercase DNS-safe, default homeserver)")
-	signalURL := fs.String("signal", fileCfg.SignalURL, "Signaling server base URL (e.g. wss://portal.example.com/ws)")
+	nodeID := fs.String("id", "", "Node ID (lowercase DNS-safe, default homeserver)")
+	signalURL := fs.String("signal", "", "Signaling server base URL (e.g. wss://portal.example.com/ws)")
 	signalSecret := fs.String("signal-secret", "", "Shared signaling secret (prefer SIGNAL_SECRET_FILE or SIGNAL_SECRET)")
-	allowInsecureSignal := fs.Bool("allow-insecure-signal", fileCfg.AllowInsecureSignal, "Allow sending SIGNAL_SECRET over plaintext non-loopback ws:// (dev only)")
-	forceRekey := fs.Bool("force-rekey", fileCfg.ForceRekey, "Force update bound Ed25519 key on signaling server (requires SIGNAL_SECRET)")
+	allowInsecureSignal := fs.Bool("allow-insecure-signal", false, "Allow sending SIGNAL_SECRET over plaintext non-loopback ws:// (dev only)")
+	forceRekey := fs.Bool("force-rekey", false, "Force update bound Ed25519 key on signaling server (requires SIGNAL_SECRET)")
 	accessSecret := fs.String("access-secret", "", "Visitor access password (prefer ACCESS_SECRET_FILE or ACCESS_SECRET)")
-	allowPublic := fs.Bool("allow-public", fileCfg.AllowPublic, "Explicitly permit visitor connections without ACCESS_SECRET")
-	identityKey := fs.String("identity-key", fileCfg.IdentityKey, "Path to persistent Ed25519 private key PEM")
-	stateFile := fs.String("state-file", fileCfg.StateFile, "Optional path for persistent capability revocation state JSON")
-	ephemeralID := fs.Bool("ephemeral-identity", fileCfg.EphemeralIdentity, "Use ephemeral in-memory Ed25519 identity (breaks pinned links across restarts)")
-	targetURL := fs.String("target", fileCfg.TargetURL, "Backend HTTP/HTTPS target URL (e.g. http://127.0.0.1:8080)")
-	dirPath := fs.String("dir", fileCfg.DirPath, "Serve a local directory read-only via os.Root adapter")
-	filePath := fs.String("file", fileCfg.FilePath, "Serve a single local file read-only via os.Root adapter")
-	hideDotfiles := fs.Bool("hide-dotfiles", defHideDot, "Hide dotfiles and symlinks pointing to dotfiles in -dir/-file mode")
-	fileInlineActive := fs.Bool("file-inline-active", fileCfg.FileInlineActive, "Allow inline script execution on static files (disables CSP: sandbox)")
-	upstreamHost := fs.String("upstream-host", fileCfg.UpstreamHost, "Optional Host header override (RFC 9110 host[:port]) for virtual-host -target backends")
-	proxyURLRaw := fs.String("proxy", fileCfg.ProxyURL, "Optional outbound HTTP/SOCKS proxy URL for -target")
-	sni := fs.String("sni", fileCfg.SNI, "Optional TLS SNI override for HTTPS -target")
-	insecureTarget := fs.Bool("insecure-target", fileCfg.InsecureTarget, "Skip TLS verification for self-signed HTTPS -target ONLY")
-	iceMDNS := fs.Bool("ice-mdns", defICEMDNS, "Obfuscate local LAN/Docker/VPN host ICE candidates via mDNS (default true)")
-	stunServers := fs.String("stun-servers", fileCfg.STUNServers, "Comma-separated STUN server URLs")
-	turnURL := fs.String("turn-url", fileCfg.TURNURL, "Optional TURN server URL")
-	turnUser := fs.String("turn-user", fileCfg.TURNUser, "Optional TURN username")
+	allowPublic := fs.Bool("allow-public", false, "Explicitly permit visitor connections without ACCESS_SECRET")
+	identityKey := fs.String("identity-key", "", "Path to persistent Ed25519 private key PEM")
+	stateFile := fs.String("state-file", "", "Optional path for persistent capability revocation state JSON")
+	ephemeralID := fs.Bool("ephemeral-identity", false, "Use ephemeral in-memory Ed25519 identity (breaks pinned links across restarts)")
+	targetURL := fs.String("target", "", "Backend HTTP/HTTPS target URL (e.g. http://127.0.0.1:8080)")
+	dirPath := fs.String("dir", "", "Serve a local directory read-only via os.Root adapter")
+	filePath := fs.String("file", "", "Serve a single local file read-only via os.Root adapter")
+	hideDotfiles := fs.Bool("hide-dotfiles", true, "Hide dotfiles and symlinks pointing to dotfiles in -dir/-file mode")
+	fileInlineActive := fs.Bool("file-inline-active", false, "Allow inline script execution on static files (disables CSP: sandbox)")
+	upstreamHost := fs.String("upstream-host", "", "Optional Host header override (RFC 9110 host[:port]) for virtual-host -target backends")
+	proxyURLRaw := fs.String("proxy", "", "Optional outbound HTTP/SOCKS proxy URL for -target")
+	sni := fs.String("sni", "", "Optional TLS SNI override for HTTPS -target")
+	insecureTarget := fs.Bool("insecure-target", false, "Skip TLS verification for self-signed HTTPS -target ONLY")
+	iceMDNS := fs.Bool("ice-mdns", true, "Obfuscate local LAN/Docker/VPN host ICE candidates via mDNS (default true)")
+	stunServers := fs.String("stun-servers", "", "Comma-separated STUN server URLs (default built-in STUN; set 'none' to disable)")
+	turnURL := fs.String("turn-url", "", "Optional TURN server URL (turn: or turns:)")
+	turnUser := fs.String("turn-user", "", "Optional TURN username")
 	turnPass := fs.String("turn-pass", "", "Optional TURN password (prefer TURN_PASS_FILE or TURN_PASS)")
-	maxStreams := fs.Int("max-streams", fileCfg.MaxStreams, "Max concurrent global streams (default 512)")
-	metricsAddr := fs.String("metrics-addr", fileCfg.MetricsAddr, "Optional Prometheus /metrics + /healthz listen address (prefer loopback)")
-	portalURL := fs.String("portal-url", fileCfg.PortalURL, "Portal base URL for printing pinned/share links")
+	maxStreams := fs.Int("max-streams", 0, "Max concurrent global streams (default 512)")
+	metricsAddr := fs.String("metrics-addr", "", "Optional Prometheus /metrics + /healthz listen address (prefer loopback)")
+	portalURL := fs.String("portal-url", "", "Portal base URL for printing pinned/share links")
 
 	mintLink := fs.String("mint-link", "", "Mint a scoped Ed25519 capability share link with duration (e.g. 2h, 7d) and exit")
 	mintPath := fs.String("mint-path", "", "Optional path prefix scope for -mint-link (e.g. /public)")
@@ -128,66 +100,68 @@ func main() {
 
 	healthFlag := fs.Bool("health", false, "Probe local Agent /healthz endpoint and exit")
 	healthURL := fs.String("health-url", "", "Optional custom URL for -health")
-	_ = cfgFlag
-	_ = fs.Parse(rawArgs)
+	_ = fs.Parse(os.Args[1:])
+
+	if *showVerShort || *showVerLong {
+		fmt.Printf("webrtc-gateway-agent %s\n", Version)
+		os.Exit(0)
+	}
+	if fs.NArg() > 0 {
+		log.Fatalf("[Agent] Unexpected positional arguments: %v", fs.Args())
+	}
 
 	explicit := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 
-	applyEnvStr := func(flagName, envName string, dst *string) {
-		if !explicit[flagName] {
-			if v, ok := os.LookupEnv(envName); ok && v != "" {
-				*dst = v
-			}
-		}
-	}
-	applyEnvBool := func(flagName, envName string, dst *bool) {
-		if !explicit[flagName] {
-			b, set, err := config.ParseEnvBool(envName)
-			if err != nil {
-				log.Fatalf("[Agent] %v", err)
-			}
-			if set {
-				*dst = b
-			}
-		}
-	}
-	applyEnvInt := func(flagName, envName string, minVal, maxVal int, dst *int) {
-		if !explicit[flagName] {
-			n, set, err := config.ParseEnvInt(envName, minVal, maxVal)
-			if err != nil {
-				log.Fatalf("[Agent] %v", err)
-			}
-			if set {
-				*dst = n
-			}
+	var fileCfg agentFileConfig
+	if cfgPath := config.ResolveExplicitConfigPath(*cfgFlag); cfgPath != "" {
+		if err := config.LoadYAMLFile(cfgPath, &fileCfg); err != nil {
+			log.Fatalf("[Agent] Failed to load config: %v", err)
 		}
 	}
 
-	applyEnvStr("id", "NODE_ID", nodeID)
-	applyEnvStr("signal", "SIGNAL_URL", signalURL)
-	applyEnvBool("allow-insecure-signal", "ALLOW_INSECURE_SIGNAL", allowInsecureSignal)
-	applyEnvBool("force-rekey", "FORCE_REKEY", forceRekey)
-	applyEnvBool("allow-public", "ALLOW_PUBLIC", allowPublic)
-	applyEnvStr("identity-key", "IDENTITY_KEY", identityKey)
-	applyEnvStr("state-file", "STATE_FILE", stateFile)
-	applyEnvBool("ephemeral-identity", "EPHEMERAL_IDENTITY", ephemeralID)
-	applyEnvStr("target", "TARGET_URL", targetURL)
-	applyEnvStr("dir", "DIR_PATH", dirPath)
-	applyEnvStr("file", "FILE_PATH", filePath)
-	applyEnvBool("hide-dotfiles", "P2P_HIDE_DOTFILES", hideDotfiles)
-	applyEnvBool("file-inline-active", "FILE_INLINE_ACTIVE", fileInlineActive)
-	applyEnvStr("upstream-host", "UPSTREAM_HOST", upstreamHost)
-	applyEnvStr("proxy", "PROXY_URL", proxyURLRaw)
-	applyEnvStr("sni", "SNI", sni)
-	applyEnvBool("insecure-target", "INSECURE_TARGET", insecureTarget)
-	applyEnvBool("ice-mdns", "ICE_MDNS", iceMDNS)
-	applyEnvStr("stun-servers", "STUN_SERVERS", stunServers)
-	applyEnvStr("turn-url", "TURN_URL", turnURL)
-	applyEnvStr("turn-user", "TURN_USER", turnUser)
-	applyEnvInt("max-streams", "MAX_STREAMS", 1, 16384, maxStreams)
-	applyEnvStr("metrics-addr", "METRICS_ADDR", metricsAddr)
-	applyEnvStr("portal-url", "PORTAL_URL", portalURL)
+	resolveStr := func(flagName, envName, fileVal, defaultVal string, ptr *string) {
+		*ptr = config.ResolveString(*ptr, explicit[flagName], envName, fileVal, defaultVal)
+	}
+	resolveBool := func(flagName, envName string, cfgPtr *bool, cfgBool, defaultVal bool, ptr *bool) {
+		v, _, err := config.ResolveBool(*ptr, explicit[flagName], envName, cfgPtr, cfgBool, defaultVal)
+		if err != nil {
+			log.Fatalf("[Agent] %v", err)
+		}
+		*ptr = v
+	}
+	resolveInt := func(flagName, envName string, fileVal, defaultVal, minVal, maxVal int, ptr *int) {
+		v, err := config.ResolveInt(*ptr, explicit[flagName], envName, fileVal, defaultVal, minVal, maxVal)
+		if err != nil {
+			log.Fatalf("[Agent] %v", err)
+		}
+		*ptr = v
+	}
+
+	resolveStr("id", "NODE_ID", fileCfg.NodeID, "homeserver", nodeID)
+	resolveStr("signal", "SIGNAL_URL", fileCfg.SignalURL, "ws://127.0.0.1:8888/ws", signalURL)
+	resolveBool("allow-insecure-signal", "ALLOW_INSECURE_SIGNAL", nil, fileCfg.AllowInsecureSignal, false, allowInsecureSignal)
+	resolveBool("force-rekey", "FORCE_REKEY", nil, fileCfg.ForceRekey, false, forceRekey)
+	resolveBool("allow-public", "ALLOW_PUBLIC", nil, fileCfg.AllowPublic, false, allowPublic)
+	resolveStr("identity-key", "IDENTITY_KEY", fileCfg.IdentityKey, "", identityKey)
+	resolveStr("state-file", "STATE_FILE", fileCfg.StateFile, "", stateFile)
+	resolveBool("ephemeral-identity", "EPHEMERAL_IDENTITY", nil, fileCfg.EphemeralIdentity, false, ephemeralID)
+	resolveStr("target", "TARGET_URL", fileCfg.TargetURL, "", targetURL)
+	resolveStr("dir", "DIR_PATH", fileCfg.DirPath, "", dirPath)
+	resolveStr("file", "FILE_PATH", fileCfg.FilePath, "", filePath)
+	resolveBool("hide-dotfiles", "P2P_HIDE_DOTFILES", fileCfg.HideDotfiles, false, true, hideDotfiles)
+	resolveBool("file-inline-active", "FILE_INLINE_ACTIVE", nil, fileCfg.FileInlineActive, false, fileInlineActive)
+	resolveStr("upstream-host", "UPSTREAM_HOST", fileCfg.UpstreamHost, "", upstreamHost)
+	resolveStr("proxy", "PROXY_URL", fileCfg.ProxyURL, "", proxyURLRaw)
+	resolveStr("sni", "SNI", fileCfg.SNI, "", sni)
+	resolveBool("insecure-target", "INSECURE_TARGET", nil, fileCfg.InsecureTarget, false, insecureTarget)
+	resolveBool("ice-mdns", "ICE_MDNS", fileCfg.ICEMDNS, false, true, iceMDNS)
+	resolveStr("stun-servers", "STUN_SERVERS", fileCfg.STUNServers, defaultSTUNServers, stunServers)
+	resolveStr("turn-url", "TURN_URL", fileCfg.TURNURL, "", turnURL)
+	resolveStr("turn-user", "TURN_USER", fileCfg.TURNUser, "", turnUser)
+	resolveInt("max-streams", "MAX_STREAMS", fileCfg.MaxStreams, agent.DefaultMaxGlobalStreams, 1, 16384, maxStreams)
+	resolveStr("metrics-addr", "METRICS_ADDR", fileCfg.MetricsAddr, "", metricsAddr)
+	resolveStr("portal-url", "PORTAL_URL", fileCfg.PortalURL, "", portalURL)
 
 	if *healthFlag {
 		probeURL := strings.TrimSpace(*healthURL)
@@ -210,7 +184,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "agent health check requires -metrics-addr / METRICS_ADDR or -health-url")
 			os.Exit(1)
 		}
-		client := &http.Client{Timeout: 5 * time.Second}
+		client := &http.Client{
+			Timeout:   5 * time.Second,
+			Transport: &http.Transport{Proxy: nil},
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 		resp, err := client.Get(probeURL)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "agent health check failed: %v\n", err)
@@ -224,22 +204,20 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *nodeID == "" {
-		*nodeID = "homeserver"
-	}
 	normNodeID, ok := signaling.NormalizeAndValidateNodeID(*nodeID)
 	if !ok {
 		log.Fatalf("[Agent] Invalid node ID %q (must be lowercase alphanumeric/hyphen/dot, never sbx-*)", *nodeID)
 	}
 	*nodeID = normNodeID
 
-	if *signalURL == "" {
-		*signalURL = "ws://127.0.0.1:8888/ws"
+	if *ephemeralID && strings.TrimSpace(*identityKey) != "" {
+		log.Fatalf("[Agent] -ephemeral-identity and -identity-key are mutually exclusive (Fail-Closed)")
 	}
-	if *maxStreams == 0 {
-		*maxStreams = agent.DefaultMaxGlobalStreams
-	} else if *maxStreams < 1 || *maxStreams > 16384 {
-		log.Fatalf("[Agent] max-streams out of range (%d): must be 1..16384", *maxStreams)
+	if *ephemeralID && *mintLink != "" {
+		log.Fatalf("[Agent] -mint-link cannot be used with -ephemeral-identity (Fail-Closed)")
+	}
+	if *mintMaxConns < 0 {
+		log.Fatalf("[Agent] -mint-max-conns cannot be negative (%d)", *mintMaxConns)
 	}
 
 	var identity *agent.Identity
@@ -331,6 +309,18 @@ func main() {
 		log.Printf("[Agent] WARNING: secret passed via CLI flag (visible in process list); prefer *_FILE or environment variables")
 	}
 
+	parsedSTUN, err := parseSTUNServers(*stunServers)
+	if err != nil {
+		log.Fatalf("[Agent] Invalid -stun-servers: %v", err)
+	}
+	trimmedTurnURL := strings.TrimSpace(*turnURL)
+	if trimmedTurnURL != "" {
+		lt := strings.ToLower(trimmedTurnURL)
+		if !strings.HasPrefix(lt, "turn:") && !strings.HasPrefix(lt, "turns:") {
+			log.Fatalf("[Agent] Invalid -turn-url %q: must start with turn: or turns:", trimmedTurnURL)
+		}
+	}
+
 	var parsedProxyURL *url.URL
 	if strings.TrimSpace(*proxyURLRaw) != "" {
 		u, perr := url.Parse(strings.TrimSpace(*proxyURLRaw))
@@ -389,6 +379,9 @@ func main() {
 		if strings.TrimSpace(*upstreamHost) != "" {
 			log.Fatalf("[Agent] -upstream-host is only valid with -target")
 		}
+		if parsedProxyURL != nil || strings.TrimSpace(*sni) != "" || *insecureTarget {
+			log.Fatalf("[Agent] -proxy, -sni, and -insecure-target are only valid with -target")
+		}
 		isStaticMode = true
 		staticHandler, err = proxy.NewStaticFSHandler(proxy.StaticFSOptions{
 			RootDir:      *dirPath,
@@ -428,8 +421,8 @@ func main() {
 		WSProxy:             wsProxy,
 		IsStaticMode:        isStaticMode,
 		ICEMDNS:             *iceMDNS,
-		STUNServers:         config.SplitNonEmptyCSV(*stunServers),
-		TURNURL:             *turnURL,
+		STUNServers:         parsedSTUN,
+		TURNURL:             trimmedTurnURL,
 		TURNUser:            *turnUser,
 		TURNPass:            resolvedTurnPass,
 		MaxGlobalStream:     *maxStreams,
@@ -541,4 +534,19 @@ func parseFlexDuration(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("duration must be >0 and <=365d")
 	}
 	return d, nil
+}
+
+func parseSTUNServers(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.EqualFold(trimmed, "none") || strings.EqualFold(trimmed, "off") {
+		return nil, nil
+	}
+	parts := config.SplitNonEmptyCSV(trimmed)
+	for _, s := range parts {
+		ls := strings.ToLower(s)
+		if !strings.HasPrefix(ls, "stun:") && !strings.HasPrefix(ls, "stuns:") {
+			return nil, fmt.Errorf("entry %q must use stun: or stuns: scheme", s)
+		}
+	}
+	return parts, nil
 }

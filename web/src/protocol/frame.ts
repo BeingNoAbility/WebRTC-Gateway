@@ -12,8 +12,8 @@
 export const HEADER_SIZE = 8;
 export const MAX_PAYLOAD_SIZE = 65535;
 export const DEFAULT_CHUNK_SIZE = 32760;
-export const MIN_CHUNK_SIZE = 1024;
 export const MIN_NEGOTIATED_MAX_MSG_SIZE = 4096;
+export const MIN_CHUNK_SIZE = MIN_NEGOTIATED_MAX_MSG_SIZE - HEADER_SIZE;
 export const MAX_TOTAL_HEADERS_SIZE = 64 * 1024;
 export const MAX_CONTINUATION_FRAMES = 16;
 export const MAX_CONTROL_JSON_SIZE = 32 * 1024;
@@ -111,6 +111,9 @@ export function validateFrameMeta(gen: number, type: number, flags: number, payl
   if (!Number.isInteger(gen) || gen < 0 || gen > 0xffffffff) {
     throw new RangeError(`invalid stream generation: ${gen}`);
   }
+  if (!Number.isInteger(flags) || flags < 0 || flags > 0xff) {
+    throw new RangeError(`invalid frame flags: ${flags}`);
+  }
   if (!Number.isInteger(payloadLen) || payloadLen < 0 || payloadLen > MAX_PAYLOAD_SIZE) {
     throw new RangeError(`payload exceeds 65535 bytes: ${payloadLen}`);
   }
@@ -161,6 +164,9 @@ export function validateFrameMeta(gen: number, type: number, flags: number, payl
       if (gen === 0) throw new Error('DATA requires gen > 0');
       if ((flags & ~FrameFlag.FIN) !== 0) {
         throw new Error('invalid flags on DATA');
+      }
+      if (payloadLen === 0 && (flags & FrameFlag.FIN) === 0) {
+        throw new Error('non-final 0-byte DATA is forbidden');
       }
       break;
     case FrameType.WS_TEXT:
@@ -265,7 +271,7 @@ export function decodeGoAwayPayload(payload: Uint8Array): number {
 }
 
 const utf8Enc = new TextEncoder();
-const utf8Dec = new TextDecoder('utf-8', { fatal: false });
+const utf8Dec = new TextDecoder('utf-8', { fatal: true });
 
 export function encodeWSClosePayload(code: number, reason = ''): Uint8Array {
   let rb = utf8Enc.encode(reason);

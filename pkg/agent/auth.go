@@ -2,13 +2,15 @@ package agent
 
 import (
 	"bytes"
-	"container/list"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"hash/fnv"
 	"log"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,12 +19,18 @@ import (
 )
 
 const (
-	visitorAuthMaxFailures = 10
-	visitorAuthWindow      = 5 * time.Minute
-	visitorAuthMaxKeys     = 4096
+	visitorAuthMaxFailures       = 10
+	visitorAuthWindow            = 5 * time.Minute
+	visitorAuthMaxKeys           = 4096
+	visitorAuthGlobalMaxFailures = 60
+	visitorAuthGlobalWindow      = 1 * time.Minute
+	authKeyStripeCount           = 64
 
-	DefaultCapListLimit = 50
-	MaxCapListLimit     = 200
+	DefaultCapListLimit  = 50
+	MaxCapListLimit      = 200
+	maxCapabilityJTILen  = 128
+	maxCapabilityRecords = 4096
+	maxCapabilityRevoked = 8192
 )
 
 func randomBytes(n int) []byte {
@@ -37,149 +45,58 @@ func randomTokenB64(nBytes int) string {
 
 // ---- O(1) Leak-Free Lockout-Preserving VisitorAuthLimiter ----
 
-type authLimitEntry struct {
-	key         string
-	failures    int
-	lockedUntil time.Time
-	lastSeen    time.Time
-	elem        *list.Element
-}
-
-// VisitorAuthLimiter tracks failed authentication attempts per client IP (/32 IPv4, /64 IPv6)
-// and NEVER evicts actively locked-out entries during LRU pressure. Fails closed for unknown IPs
-// when every slot holds an active unexpired lockout.
+// VisitorAuthLimiter wraps the shared O(1) signaling.AuthLockoutTable (per-IP lockout-preserving
+// LRU/FIFO + global sliding-window failure cap) and provides per-IP attempt serialization to
+// prevent concurrent brute-force races across multiple handshaking sessions.
 type VisitorAuthLimiter struct {
-	mu             sync.Mutex
-	entries        map[string]*authLimitEntry
-	lru            *list.List
-	maxKeys        int
-	saturatedUntil time.Time
+	table   *signaling.AuthLockoutTable
+	stripes [authKeyStripeCount]sync.Mutex
 }
 
 func NewVisitorAuthLimiter() *VisitorAuthLimiter {
 	return &VisitorAuthLimiter{
-		entries: make(map[string]*authLimitEntry),
-		lru:     list.New(),
-		maxKeys: visitorAuthMaxKeys,
+		table: signaling.NewAuthLockoutTable(signaling.AuthLockoutConfig{
+			MaxFailures:       visitorAuthMaxFailures,
+			LockoutDuration:   visitorAuthWindow,
+			MaxPendingKeys:    visitorAuthMaxKeys,
+			MaxLockedKeys:     visitorAuthMaxKeys,
+			GlobalMaxFailures: visitorAuthGlobalMaxFailures,
+			GlobalWindow:      visitorAuthGlobalWindow,
+		}),
 	}
 }
 
-func (l *VisitorAuthLimiter) sweepUnlockedLocked(now time.Time) (evicted bool, earliestLock time.Time) {
-	for elem := l.lru.Back(); elem != nil; {
-		prev := elem.Prev()
-		v := elem.Value.(*authLimitEntry)
-		isLocked := !v.lockedUntil.IsZero() && now.Before(v.lockedUntil)
-		if !isLocked {
-			l.lru.Remove(elem)
-			delete(l.entries, v.key)
-			evicted = true
-			if len(l.entries) < l.maxKeys {
-				break
-			}
-		} else if earliestLock.IsZero() || v.lockedUntil.Before(earliestLock) {
-			earliestLock = v.lockedUntil
-		}
-		elem = prev
-	}
-	return evicted, earliestLock
+// LockKey serializes concurrent authentication attempts originating from the same IP bucket.
+func (l *VisitorAuthLimiter) LockKey(rawIP string) func() {
+	key := signaling.RateLimitKey(rawIP)
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	stripe := &l.stripes[h.Sum32()%authKeyStripeCount]
+	stripe.Lock()
+	return stripe.Unlock
 }
 
 func (l *VisitorAuthLimiter) Allow(rawIP string, now time.Time) (bool, time.Duration) {
-	key := signaling.RateLimitKey(rawIP)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	e, ok := l.entries[key]
-	if !ok {
-		if len(l.entries) >= l.maxKeys {
-			if !l.saturatedUntil.IsZero() && now.Before(l.saturatedUntil) {
-				return false, l.saturatedUntil.Sub(now)
-			}
-			evicted, earliest := l.sweepUnlockedLocked(now)
-			if !evicted && len(l.entries) >= l.maxKeys {
-				if earliest.IsZero() {
-					earliest = now.Add(visitorAuthWindow)
-				}
-				l.saturatedUntil = earliest
-				return false, earliest.Sub(now)
-			}
-			l.saturatedUntil = time.Time{}
-		}
-		return true, 0
-	}
-	if !e.lockedUntil.IsZero() && now.Before(e.lockedUntil) {
-		return false, e.lockedUntil.Sub(now)
-	}
-	if !e.lockedUntil.IsZero() && !now.Before(e.lockedUntil) {
-		l.lru.Remove(e.elem)
-		delete(l.entries, key)
-		l.saturatedUntil = time.Time{}
-	}
-	return true, 0
+	return l.table.Allow(rawIP, now)
 }
 
 func (l *VisitorAuthLimiter) RecordFailure(rawIP string, now time.Time) bool {
-	key := signaling.RateLimitKey(rawIP)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	e, ok := l.entries[key]
-	if !ok {
-		if len(l.entries) >= l.maxKeys {
-			evicted, earliest := l.sweepUnlockedLocked(now)
-			if !evicted && len(l.entries) >= l.maxKeys {
-				if earliest.IsZero() {
-					earliest = now.Add(visitorAuthWindow)
-				}
-				l.saturatedUntil = earliest
-				return true // Fail-Closed when all slots hold active lockouts.
-			}
-			l.saturatedUntil = time.Time{}
-		}
-		e = &authLimitEntry{key: key, lastSeen: now}
-		e.elem = l.lru.PushFront(e)
-		l.entries[key] = e
-	} else {
-		l.lru.MoveToFront(e.elem)
-		if now.Sub(e.lastSeen) > visitorAuthWindow {
-			e.failures = 0
-			e.lockedUntil = time.Time{}
-		}
-		e.lastSeen = now
-	}
-	e.failures++
-	if e.failures >= visitorAuthMaxFailures {
-		e.lockedUntil = now.Add(visitorAuthWindow)
-		return true
-	}
-	return false
+	return l.table.RecordFailure(rawIP, now)
 }
 
 func (l *VisitorAuthLimiter) Reset(rawIP string) {
-	key := signaling.RateLimitKey(rawIP)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if e, ok := l.entries[key]; ok {
-		l.lru.Remove(e.elem)
-		delete(l.entries, key)
-		l.saturatedUntil = time.Time{}
-	}
+	l.table.Reset(rawIP)
 }
 
 func (l *VisitorAuthLimiter) Len() int {
-	l.mu.Lock()
-	n := len(l.entries)
-	l.mu.Unlock()
-	return n
+	return l.table.Len()
 }
 
 func (l *VisitorAuthLimiter) ListLen() int {
-	l.mu.Lock()
-	n := l.lru.Len()
-	l.mu.Unlock()
-	return n
+	return l.table.ListLen()
 }
 
-// ---- Persistent Capability Registry & Revocation Store ----
+// ---- Persistent Cross-Process-Safe Capability Registry & Revocation Store ----
 
 type CapabilityRecord struct {
 	Payload CapabilityPayload `json:"payload"`
@@ -193,12 +110,14 @@ type persistedCapState struct {
 }
 
 type CapabilityStore struct {
-	mu      sync.Mutex
-	store   *state.AtomicFileStore
-	version uint64
-	records map[string]*CapabilityRecord
-	revoked map[string]int64 // jti -> exp unix (for automatic post-expiry GC)
-	active  map[string]int
+	mu          sync.Mutex
+	store       *state.AtomicFileStore
+	version     uint64
+	fileModTime time.Time
+	fileSize    int64
+	records     map[string]*CapabilityRecord
+	revoked     map[string]int64 // jti -> exp unix (monotonic union across processes)
+	active      map[string]int
 }
 
 func NewCapabilityStore() *CapabilityStore {
@@ -210,6 +129,9 @@ func NewCapabilityStoreWithFile(stateFile string) (*CapabilityStore, error) {
 	var store *state.AtomicFileStore
 	if stateFile != "" {
 		store = state.NewAtomicFileStore(stateFile)
+		if err := store.CheckWritable(); err != nil {
+			return nil, err
+		}
 	}
 	s := &CapabilityStore{
 		store:   store,
@@ -225,39 +147,105 @@ func NewCapabilityStoreWithFile(stateFile string) (*CapabilityStore, error) {
 	return s, nil
 }
 
-func (s *CapabilityStore) loadFromDisk() error {
-	if s.store == nil || s.store.Path() == "" {
-		return nil
+func (s *CapabilityStore) lockPath() string {
+	if s.store == nil {
+		return ""
 	}
-	raw, err := os.ReadFile(s.store.Path())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
+	return s.store.Path() + ".lock"
+}
+
+func parsePersistedCapState(raw []byte) (*persistedCapState, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return nil
+		return &persistedCapState{}, nil
 	}
 	var st persistedCapState
 	if err := json.Unmarshal(raw, &st); err != nil {
-		return err
+		return nil, err
 	}
-	nowUnix := time.Now().Unix()
+	return &st, nil
+}
+
+func (s *CapabilityStore) mergeStateLocked(st *persistedCapState, nowUnix int64) {
+	if st == nil {
+		return
+	}
 	for jti, exp := range st.Revoked {
+		if jti == "" || len(jti) > maxCapabilityJTILen {
+			continue
+		}
 		if exp > 0 && nowUnix >= exp {
 			continue
 		}
-		s.revoked[jti] = exp
+		if prevExp, exists := s.revoked[jti]; !exists || (prevExp > 0 && (exp == 0 || exp > prevExp)) {
+			s.revoked[jti] = exp
+		}
+		if r, ok := s.records[jti]; ok {
+			r.Revoked = true
+		}
 	}
 	for jti, p := range st.Records {
+		if jti == "" || len(jti) > maxCapabilityJTILen {
+			continue
+		}
 		_, isRev := s.revoked[jti]
 		if nowUnix >= p.Exp && !isRev {
 			continue
 		}
-		s.records[jti] = &CapabilityRecord{Payload: p, Revoked: isRev}
+		if existing, ok := s.records[jti]; ok {
+			existing.Payload = p
+			existing.Revoked = existing.Revoked || isRev
+		} else {
+			s.records[jti] = &CapabilityRecord{Payload: p, Revoked: isRev}
+		}
 	}
-	return nil
+	s.pruneExpiredLocked(nowUnix)
+}
+
+func (s *CapabilityStore) loadFromDisk() error {
+	if s.store == nil || s.store.Path() == "" {
+		return nil
+	}
+	return state.WithFileLock(s.lockPath(), func() error {
+		raw, err := os.ReadFile(s.store.Path())
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		st, err := parsePersistedCapState(raw)
+		if err != nil {
+			return err
+		}
+		fi, serr := os.Stat(s.store.Path())
+		s.mu.Lock()
+		s.mergeStateLocked(st, time.Now().Unix())
+		if serr == nil {
+			s.fileModTime = fi.ModTime()
+			s.fileSize = fi.Size()
+		}
+		s.mu.Unlock()
+		return nil
+	})
+}
+
+// maybeReload performs a fast stat check and merges disk changes (e.g. from CLI -mint-link)
+// using a monotonic union for revocations so concurrent processes never lose records or revocations.
+func (s *CapabilityStore) maybeReload() {
+	if s.store == nil || s.store.Path() == "" {
+		return
+	}
+	fi, err := os.Stat(s.store.Path())
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	unchanged := fi.ModTime().Equal(s.fileModTime) && fi.Size() == s.fileSize
+	s.mu.Unlock()
+	if unchanged {
+		return
+	}
+	_ = s.loadFromDisk()
 }
 
 func (s *CapabilityStore) pruneExpiredLocked(nowUnix int64) {
@@ -283,11 +271,7 @@ func (s *CapabilityStore) PruneExpired(now time.Time) {
 	s.mu.Unlock()
 }
 
-func (s *CapabilityStore) snapshotLocked() (uint64, *persistedCapState) {
-	if s.store == nil {
-		return 0, nil
-	}
-	nowUnix := time.Now().Unix()
+func (s *CapabilityStore) buildSnapshotLocked(nowUnix int64) (uint64, *persistedCapState) {
 	s.pruneExpiredLocked(nowUnix)
 	s.version++
 	ver := s.version
@@ -304,44 +288,93 @@ func (s *CapabilityStore) snapshotLocked() (uint64, *persistedCapState) {
 	return ver, out
 }
 
-func (s *CapabilityStore) persist(ver uint64, snap *persistedCapState) error {
-	if s.store == nil || snap == nil {
+func (s *CapabilityStore) applyAndPersist(mutate func(nowUnix int64) error) error {
+	if s.store == nil {
+		s.mu.Lock()
+		err := mutate(time.Now().Unix())
+		s.mu.Unlock()
+		return err
+	}
+	return state.WithFileLock(s.lockPath(), func() error {
+		var diskState *persistedCapState
+		if raw, err := os.ReadFile(s.store.Path()); err == nil {
+			if st, perr := parsePersistedCapState(raw); perr == nil {
+				diskState = st
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+
+		nowUnix := time.Now().Unix()
+		s.mu.Lock()
+		if diskState != nil {
+			s.mergeStateLocked(diskState, nowUnix)
+		}
+		if err := mutate(nowUnix); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		ver, snap := s.buildSnapshotLocked(nowUnix)
+		s.mu.Unlock()
+
+		raw, err := json.Marshal(snap)
+		if err != nil {
+			log.Printf("[Agent] Marshal capability state failed: %v", err)
+			return err
+		}
+		if err := s.store.Save(ver, raw); err != nil {
+			log.Printf("[Agent] Persist capability state failed: %v", err)
+			return err
+		}
+		if fi, serr := os.Stat(s.store.Path()); serr == nil {
+			s.mu.Lock()
+			s.fileModTime = fi.ModTime()
+			s.fileSize = fi.Size()
+			s.mu.Unlock()
+		}
 		return nil
-	}
-	raw, err := json.MarshalIndent(snap, "", "  ")
-	if err != nil {
-		log.Printf("[Agent] Marshal capability state failed: %v", err)
-		return err
-	}
-	if err := s.store.Save(ver, raw); err != nil {
-		log.Printf("[Agent] Persist capability state failed: %v", err)
-		return err
-	}
-	return nil
+	})
 }
 
 func (s *CapabilityStore) Track(p CapabilityPayload) error {
-	s.mu.Lock()
-	s.records[p.JTI] = &CapabilityRecord{Payload: p}
-	ver, snap := s.snapshotLocked()
-	s.mu.Unlock()
-	return s.persist(ver, snap)
+	jti := strings.TrimSpace(p.JTI)
+	if jti == "" || len(jti) > maxCapabilityJTILen {
+		return errors.New("agent: invalid capability jti")
+	}
+	p.JTI = jti
+	return s.applyAndPersist(func(nowUnix int64) error {
+		s.pruneExpiredLocked(nowUnix)
+		if _, exists := s.records[p.JTI]; !exists && len(s.records) >= maxCapabilityRecords {
+			return errors.New("agent: capability record limit reached")
+		}
+		_, isRev := s.revoked[p.JTI]
+		s.records[p.JTI] = &CapabilityRecord{Payload: p, Revoked: isRev}
+		return nil
+	})
 }
 
 func (s *CapabilityStore) Revoke(jti string) error {
-	s.mu.Lock()
-	var exp int64
-	if r, ok := s.records[jti]; ok {
-		r.Revoked = true
-		exp = r.Payload.Exp
+	jti = strings.TrimSpace(jti)
+	if jti == "" || len(jti) > maxCapabilityJTILen {
+		return errors.New("agent: invalid capability jti")
 	}
-	s.revoked[jti] = exp
-	ver, snap := s.snapshotLocked()
-	s.mu.Unlock()
-	return s.persist(ver, snap)
+	return s.applyAndPersist(func(nowUnix int64) error {
+		s.pruneExpiredLocked(nowUnix)
+		if _, exists := s.revoked[jti]; !exists && len(s.revoked) >= maxCapabilityRevoked {
+			return errors.New("agent: capability revocation table limit reached")
+		}
+		var exp int64
+		if r, ok := s.records[jti]; ok {
+			r.Revoked = true
+			exp = r.Payload.Exp
+		}
+		s.revoked[jti] = exp
+		return nil
+	})
 }
 
 func (s *CapabilityStore) IsRevoked(jti string) bool {
+	s.maybeReload()
 	s.mu.Lock()
 	_, ok := s.revoked[jti]
 	s.mu.Unlock()
@@ -349,6 +382,7 @@ func (s *CapabilityStore) IsRevoked(jti string) bool {
 }
 
 func (s *CapabilityStore) AcquireConn(p *CapabilityPayload) bool {
+	s.maybeReload()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, rev := s.revoked[p.JTI]; rev {
@@ -372,15 +406,20 @@ func (s *CapabilityStore) ReleaseConn(jti string) {
 	if s.active[jti] > 0 {
 		s.active[jti]--
 	}
+	cur := s.active[jti]
+	if cur == 0 {
+		delete(s.active, jti)
+	}
 	if r, ok := s.records[jti]; ok {
-		r.Active = s.active[jti]
+		r.Active = cur
 	}
 	s.mu.Unlock()
 }
 
 // ListPage returns a deterministically sorted, bounded page of capability records so CAP_RESP
-// never overflows the 32 KiB control JSON frame limit.
+// never overflows the control JSON frame limit.
 func (s *CapabilityStore) ListPage(now time.Time, offset, limit int) (items []CapabilityRecord, total int, hasMore bool) {
+	s.maybeReload()
 	if offset < 0 {
 		offset = 0
 	}

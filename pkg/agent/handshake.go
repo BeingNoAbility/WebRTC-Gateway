@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"log"
 	"math"
+	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -14,41 +16,119 @@ import (
 	"webrtc-gateway/pkg/signaling"
 )
 
+func normalizeClientIP(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return ""
+	}
+	return addr.Unmap().String()
+}
+
+// sanitizeOutboundICECandidate enforces Fail-Closed mDNS privacy on outbound ICE candidates
+// when mdnsEnabled == true:
+//   - Drops ALL non-`.local` `typ host` candidates (even if Pion fell back to disabled mDNS on
+//     IPv4-only / Docker hosts).
+//   - Scrubs `raddr <ip> rport <port>` on `srflx`/`prflx`/`relay` candidates to `0.0.0.0`/`::` and `0`
+//     per RFC 8828 §5.2 so TURN/STUN candidates never leak real internal LAN/Docker/VPN IPs.
+func sanitizeOutboundICECandidate(cand string, mdnsEnabled bool) (string, bool) {
+	if !mdnsEnabled || cand == "" {
+		return cand, true
+	}
+	fields := strings.Fields(cand)
+	if len(fields) < 8 || fields[6] != "typ" {
+		return "", false
+	}
+	candType := strings.ToLower(fields[7])
+	if candType == "host" {
+		if !strings.HasSuffix(strings.ToLower(fields[4]), ".local") {
+			return "", false
+		}
+		return cand, true
+	}
+	modified := false
+	for i := 8; i+1 < len(fields); i += 2 {
+		switch fields[i] {
+		case "raddr":
+			if strings.Contains(fields[i+1], ":") {
+				fields[i+1] = "::"
+			} else {
+				fields[i+1] = "0.0.0.0"
+			}
+			modified = true
+		case "rport":
+			fields[i+1] = "0"
+			modified = true
+		}
+	}
+	if !modified {
+		return cand, true
+	}
+	return strings.Join(fields, " "), true
+}
+
 // HandleOffer handles a visitor WebRTC Offer. Raw SDP NEVER crosses signaling;
 // SDP is deterministically synthesized from msg.Desc.
 func (a *Agent) HandleOffer(msg signaling.OfferRelayDTO) {
-	if a.rootCtx.Err() != nil {
+	offerSDP, sess, ok := a.prepareOffer(msg)
+	if !ok {
 		return
+	}
+	a.completeOffer(msg, offerSDP, sess)
+}
+
+// prepareOffer validates an incoming Offer, acquires an offer concurrency slot, and registers
+// the handshaking session with offerInFlight=true so concurrent ICE candidates are staged.
+func (a *Agent) prepareOffer(msg signaling.OfferRelayDTO) (string, *VisitorSession, bool) {
+	if a.rootCtx.Err() != nil {
+		return "", nil, false
 	}
 	// Bounded Offer concurrency protects against CPU exhaustion bursts.
 	select {
 	case a.offerSem <- struct{}{}:
-		defer func() { <-a.offerSem }()
 	default:
 		a.sendSignalError(msg.SessionID, "AGENT_BUSY", "too many concurrent offers")
-		return
+		return "", nil, false
 	}
+
+	releaseSem := true
+	defer func() {
+		if releaseSem {
+			<-a.offerSem
+		}
+	}()
 
 	if msg.SessionID == "" || msg.Desc == nil || msg.Desc.Validate(true) != nil || len(msg.Nonce) < 16 || len(msg.Nonce) > 128 {
 		a.sendSignalError(msg.SessionID, "INVALID_OFFER", "invalid offer descriptor or nonce")
-		return
+		return "", nil, false
 	}
-	if allowed, _ := a.authLimiter.Allow(msg.ClientIP, time.Now()); !allowed {
+	clientIP := normalizeClientIP(msg.ClientIP)
+	if allowed, _ := a.authLimiter.Allow(clientIP, time.Now()); !allowed {
 		a.sendSignalError(msg.SessionID, "RATE_LIMITED", "too many failed authentication attempts")
-		return
+		return "", nil, false
 	}
 
 	offerSDP, err := SynthesizeSDP(msg.Desc, true)
 	if err != nil {
 		a.sendSignalError(msg.SessionID, "INVALID_OFFER", err.Error())
-		return
+		return "", nil, false
 	}
 
-	sess, err := a.createHandshakingSession(msg.SessionID, msg.ClientIP, msg.Desc.FP, msg.Nonce)
+	sess, err := a.createHandshakingSession(msg.SessionID, clientIP, msg.Desc.FP, msg.Nonce)
 	if err != nil {
 		a.sendSignalError(msg.SessionID, "AGENT_BUSY", err.Error())
-		return
+		return "", nil, false
 	}
+
+	releaseSem = false
+	return offerSDP, sess, true
+}
+
+func (a *Agent) completeOffer(msg signaling.OfferRelayDTO, offerSDP string, sess *VisitorSession) {
+	defer func() { <-a.offerSem }()
 
 	pc, err := a.webrtcAPI.NewPeerConnection(a.webrtcConfig)
 	if err != nil {
@@ -112,11 +192,21 @@ func (a *Agent) HandleOffer(msg signaling.OfferRelayDTO) {
 			}
 			m.HandlePoolMessage(slotIdx, dm.Data)
 		})
+		dc.OnClose(func() {
+			m.HandlePoolClose(slotIdx)
+		})
 	}
 
-	// Accept dynamic DCEP "p2pws" WebSocket DataChannels ONLY for authenticated sessions!
+	// Accept dynamic DCEP "p2pws" WebSocket DataChannels ONLY for authenticated sessions with
+	// strict ordered, fully reliable delivery!
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		if dc.Label() != protocol.WSChannelLabel || !sess.authDone.Load() {
+		if !sess.authDone.Load() {
+			_ = dc.Close()
+			go a.closeSession(sess)
+			return
+		}
+		if dc.Label() != protocol.WSChannelLabel || !dc.Ordered() ||
+			dc.MaxPacketLifeTime() != nil || dc.MaxRetransmits() != nil {
 			_ = dc.Close()
 			return
 		}
@@ -146,7 +236,6 @@ func (a *Agent) HandleOffer(msg signaling.OfferRelayDTO) {
 	}
 	sess.pc = pc
 	sess.mux = m
-	sess.offerInFlight = true
 	sess.mu.Unlock()
 
 	ctrlDC.OnMessage(func(dm webrtc.DataChannelMessage) {
@@ -161,6 +250,10 @@ func (a *Agent) HandleOffer(msg signaling.OfferRelayDTO) {
 			return
 		}
 		init := c.ToJSON()
+		scrubbedCand, allow := sanitizeOutboundICECandidate(init.Candidate, a.cfg.ICEMDNS)
+		if !allow {
+			return
+		}
 		var idxPtr *int
 		if init.SDPMLineIndex != nil {
 			v := int(*init.SDPMLineIndex)
@@ -181,7 +274,7 @@ func (a *Agent) HandleOffer(msg signaling.OfferRelayDTO) {
 			Type:          signaling.TypeCandidate,
 			NodeID:        a.cfg.NodeID,
 			SessionID:     sigID,
-			Candidate:     init.Candidate,
+			Candidate:     scrubbedCand,
 			SDPMid:        mid,
 			SDPMLineIndex: idxPtr,
 		})
@@ -313,12 +406,13 @@ func (a *Agent) onControlChannelOpen(sess *VisitorSession, pc *webrtc.PeerConnec
 	}
 
 	sess.mu.Lock()
-	if sess.state == StateClosed {
+	if sess.state != StateHandshaking {
 		sess.mu.Unlock()
 		return
 	}
 	sess.agentNonce = agentNonce
 	sess.spakeSess = spakeSess
+	sess.challengeReady = true
 	sess.mu.Unlock()
 
 	authMethods := []string{"cap"}
@@ -369,7 +463,7 @@ func (a *Agent) HandleCandidate(msg signaling.CandidateRelayDTO) {
 	}
 
 	sess.mu.Lock()
-	if sess.state == StateClosed || sess.pc == nil {
+	if sess.state == StateClosed {
 		sess.mu.Unlock()
 		return
 	}
@@ -384,6 +478,10 @@ func (a *Agent) HandleCandidate(msg signaling.CandidateRelayDTO) {
 				a.stagedGlobal.Add(-candSize)
 			}
 		}
+		sess.mu.Unlock()
+		return
+	}
+	if sess.pc == nil {
 		sess.mu.Unlock()
 		return
 	}
@@ -453,21 +551,33 @@ func (a *Agent) completeOfferAndDrainCandidates(sess *VisitorSession) {
 
 func (a *Agent) createHandshakingSession(signalSessionID, clientIP, visitorFP, visitorNonce string) (*VisitorSession, error) {
 	var displaced *VisitorSession
+	ipKey := signaling.RateLimitKey(clientIP)
 
 	a.sessMu.Lock()
+	if a.rootCtx.Err() != nil {
+		a.sessMu.Unlock()
+		return nil, errAgentClosed
+	}
 	if len(a.sessions) >= MaxConcurrentSessions {
 		a.sessMu.Unlock()
 		return nil, errTooManySessions
 	}
 	handshaking := 0
+	perIPHandshaking := 0
 	for _, s := range a.sessions {
+		if s.signalSessionID == signalSessionID {
+			continue
+		}
 		s.mu.Lock()
 		if s.state == StateHandshaking {
 			handshaking++
+			if signaling.RateLimitKey(s.clientIP) == ipKey {
+				perIPHandshaking++
+			}
 		}
 		s.mu.Unlock()
 	}
-	if handshaking >= MaxHandshakingSessions {
+	if handshaking >= MaxHandshakingSessions || perIPHandshaking >= MaxHandshakingPerIP {
 		a.sessMu.Unlock()
 		return nil, errTooManyHandshakes
 	}
@@ -481,14 +591,17 @@ func (a *Agent) createHandshakingSession(signalSessionID, clientIP, visitorFP, v
 		state:           StateHandshaking,
 		visitorFP:       visitorFP,
 		visitorNonce:    visitorNonce,
+		offerInFlight:   true,
 		candCh:          make(chan webrtc.ICECandidateInit, MaxStagedCandCountSession),
 		candStop:        make(chan struct{}),
 	}
 	sess.unauthTimer = time.AfterFunc(UnauthSessionTimeout, func() {
 		sess.mu.Lock()
 		stillUnauth := sess.state == StateHandshaking
+		ip := sess.clientIP
 		sess.mu.Unlock()
 		if stillUnauth {
+			a.authLimiter.RecordFailure(ip, time.Now())
 			a.closeSession(sess)
 		}
 	})
@@ -502,6 +615,7 @@ func (a *Agent) createHandshakingSession(signalSessionID, clientIP, visitorFP, v
 }
 
 var (
+	errAgentClosed       = errorString("agent is shutting down")
 	errTooManySessions   = errorString("too many concurrent visitor sessions")
 	errTooManyHandshakes = errorString("too many unauthenticated handshaking sessions")
 )

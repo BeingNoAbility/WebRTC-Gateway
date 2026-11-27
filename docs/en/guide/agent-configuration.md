@@ -19,11 +19,11 @@ See complete templates in [`configs/agent.example.yaml`](https://github.com/Bein
 | `-signal-secret` | `SIGNAL_SECRET` / `SIGNAL_SECRET_FILE` | `signal_secret` | empty | Cluster or per-node admission secret (HTTP Upgrade Bearer) |
 | `-allow-insecure-signal` | `ALLOW_INSECURE_SIGNAL` | `allow_insecure_signal` | `false` | Explicitly allow sending `SIGNAL_SECRET` over non-loopback `ws://` (dev only) |
 | `-force-rekey` | `FORCE_REKEY` | `force_rekey` | `false` | Force-rotate bound Ed25519 key on signaling server (requires valid secret and server policy) |
-| `-access-secret` | `ACCESS_SECRET` / `ACCESS_SECRET_FILE` | `access_secret` | empty | Visitor in-DTLS RFC 9383 SPAKE2+ password (required unless `-allow-public`) |
-| `-allow-public` | `ALLOW_PUBLIC` | `allow_public` | `false` | Explicitly allow passwordless visitors (Ed25519 and DTLS cert verification still mandatory) |
-| `-identity-key` | `IDENTITY_KEY` | `identity_key` | user config dir | Persistent Ed25519 private key PEM path (auto-created with `0600`) |
-| `-state-file` | `STATE_FILE` | `state_file` | `<identity-key>.state.json` (empty if ephemeral) | Persistent capability and revocation state JSON path (`0600` atomic write across restarts) |
-| `-ephemeral-identity` | `EPHEMERAL_IDENTITY` | `ephemeral_identity` | `false` | In-memory ephemeral identity key (breaks pinned links across restarts) |
+| `-access-secret` | `ACCESS_SECRET` / `ACCESS_SECRET_FILE` | `access_secret` | empty | Visitor in-DTLS RFC 9383 SPAKE2+ password (required unless `-allow-public`; mutually exclusive with `-allow-public`) |
+| `-allow-public` | `ALLOW_PUBLIC` | `allow_public` | `false` | Explicitly allow passwordless visitors (Ed25519 and DTLS cert verification still mandatory; cannot combine with `-access-secret`) |
+| `-identity-key` | `IDENTITY_KEY` | `identity_key` | user config dir | Persistent Ed25519 private key PEM path (atomically created with `0600`) |
+| `-state-file` | `STATE_FILE` | `state_file` | `<identity-key>.state.json` (empty if ephemeral) | Persistent capability and revocation state JSON path (cross-process locked + `0600` atomic union merge across restarts) |
+| `-ephemeral-identity` | `EPHEMERAL_IDENTITY` | `ephemeral_identity` | `false` | In-memory ephemeral identity key (breaks pinned links across restarts; cannot combine with `-identity-key` or `-mint-link`) |
 | `-target` | `TARGET_URL` | `target_url` | empty | Local HTTP/HTTPS target URL (mutually exclusive with `-dir`/`-file`) |
 | `-dir` | `DIR_PATH` | `dir_path` | empty | Read-only static directory (`os.Root` adapter) |
 | `-file` | `FILE_PATH` | `file_path` | empty | Read-only single file (`os.Root` adapter) |
@@ -33,8 +33,8 @@ See complete templates in [`configs/agent.example.yaml`](https://github.com/Bein
 | `-proxy` | `PROXY_URL` | `proxy_url` | empty | Outbound HTTP/HTTPS/SOCKS5 proxy (fails closed on invalid URL) |
 | `-sni` | `SNI` | `sni` | empty | TLS SNI override for HTTPS target |
 | `-insecure-target` | `INSECURE_TARGET` | `insecure_target` | `false` | Skip TLS verification for self-signed local HTTPS target |
-| `-ice-mdns` | `ICE_MDNS` | `ice_mdns` | `true` | Obfuscate LAN/Docker/VPN host ICE candidates via mDNS |
-| `-stun-servers` | `STUN_SERVERS` | `stun_servers` | minimal defaults | Custom comma-separated STUN URIs |
+| `-ice-mdns` | `ICE_MDNS` | `ice_mdns` | `true` | Obfuscate LAN/Docker/VPN host ICE candidates via mDNS and Fail-Closed outbound scrubbing |
+| `-stun-servers` | `STUN_SERVERS` | `stun_servers` | `stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302` | Custom comma-separated `stun:`/`stuns:` URIs (set `none`/`off` to disable) |
 | `-turn-url` / `-turn-user` / `-turn-pass` | `TURN_URL` / `TURN_USER` / `TURN_PASS(_FILE)` | `turn_*` | empty | User-run TURN relay configuration |
 | `-max-streams` | `MAX_STREAMS` | `max_streams` | `512` | Global concurrent P2PMux V7 stream ceiling |
 | `-metrics-addr` | `METRICS_ADDR` | `metrics_addr` | empty | Prometheus `/metrics` and `/healthz` listen address |
@@ -62,7 +62,7 @@ See complete templates in [`configs/agent.example.yaml`](https://github.com/Bein
 | `-bound-keys-file` | `BOUND_KEYS_FILE` | `bound_keys_file` | empty | JSON file persisting per-node Ed25519 public key bindings via `AtomicFileStore` across restarts |
 | `-allow-all-origins` | `SIGNAL_ALLOW_ALL_ORIGINS` | `allow_all_origins` | `false` | Permit all WebSocket Origins (dev/testing only) |
 | `-tls-cert` / `-tls-key` | `TLS_CERT` / `TLS_KEY` | `tls_cert` / `tls_key` | empty | TLS cert/key PEM paths (hot-reloaded on update) |
-| `-tls-auto` | `TLS_AUTO` | `tls_auto` | `false` | Self-signed cert limited to loopback and configured domains (no LAN IP leak) |
+| `-tls-auto` | `TLS_AUTO` | `tls_auto` | `false` | Self-signed cert limited to loopback and configured domains (no LAN IP leak; mutually exclusive with `-tls-cert`/`-tls-key`) |
 | `-trusted-proxies` | `TRUSTED_PROXIES` | `trusted_proxies` | `127.0.0.0/8,::1/128` | Trusted reverse proxy CIDRs for right-to-left XFF peeling (zero implicit `X-Real-IP`) |
 | `-client-ip-header` | `CLIENT_IP_HEADER` | `client_ip_header` | empty | Optional single-value client IP header (accepts `IP` or `IP:port`, e.g. `CF-Connecting-IP`, `Fastly-Client-IP`, `CloudFront-Viewer-Address`, `X-Real-IP`) |
 | `-max-ip-conns` / `-max-ip-msgs` | `MAX_IP_CONNS` / `MAX_IP_MSGS` | `max_ip_conns` / `max_ip_msgs` | `64` / `120` | Per-IP (IPv6 aggregated by `/64`) concurrent WS limit and 10 s message budget |

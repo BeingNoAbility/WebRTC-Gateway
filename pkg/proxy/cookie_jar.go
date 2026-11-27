@@ -72,6 +72,7 @@ type storedCookie struct {
 	secure       bool
 	httpOnly     bool
 	sameSite     http.SameSite
+	fromServer   bool
 	expires      time.Time
 	hasExpiry    bool
 	createdAt    time.Time
@@ -82,73 +83,107 @@ func (c *storedCookie) byteSize() int {
 	return len(c.name) + len(c.value) + len(c.domain) + len(c.path) + 32
 }
 
+func (c *storedCookie) isProtected() bool {
+	return c.fromServer && (c.httpOnly || c.secure)
+}
+
 type cookieKey struct {
 	domain string
 	path   string
 	name   string
 }
 
-type cookiePool struct {
-	cookies    map[cookieKey]*storedCookie
-	totalBytes int
-	maxJar     int
-	maxDomain  int
-	maxBytes   int
+// ProxyCookieJar is the sole authoritative RFC 6265bis cookie store on the Go Agent.
+// Uses a unified single-table store with independent privilege accounting:
+//   - Server-authored entries (64/domain, 256/jar, 64 KiB)
+//   - Browser JS document.cookie entries (32/domain, 128/jar, 16 KiB)
+//
+// JS writes can NEVER evict server cookies and can NEVER overwrite, shadow, or delete
+// protected (`HttpOnly` or `Secure`) server cookies on any path.
+type ProxyCookieJar struct {
+	mu          sync.RWMutex
+	cookies     map[cookieKey]*storedCookie
+	serverCount int
+	serverBytes int
+	clientCount int
+	clientBytes int
 }
 
-func newCookiePool(maxJar, maxDomain, maxBytes int) *cookiePool {
-	return &cookiePool{
-		cookies:   make(map[cookieKey]*storedCookie),
-		maxJar:    maxJar,
-		maxDomain: maxDomain,
-		maxBytes:  maxBytes,
+func NewProxyCookieJar() *ProxyCookieJar {
+	return &ProxyCookieJar{
+		cookies: make(map[cookieKey]*storedCookie),
 	}
 }
 
-func (p *cookiePool) deleteKey(k cookieKey) {
-	if existing, ok := p.cookies[k]; ok {
-		p.totalBytes -= existing.byteSize()
-		delete(p.cookies, k)
+func (j *ProxyCookieJar) bucketLimits(fromServer bool) (maxJar, maxDomain, maxBytes int) {
+	if fromServer {
+		return MaxServerCookiesPerJar, MaxServerCookiesPerDomain, MaxServerCookieBytes
+	}
+	return MaxClientCookiesPerJar, MaxClientCookiesPerDomain, MaxClientCookieBytes
+}
+
+func (j *ProxyCookieJar) bucketStats(fromServer bool) (count, totalBytes int) {
+	if fromServer {
+		return j.serverCount, j.serverBytes
+	}
+	return j.clientCount, j.clientBytes
+}
+
+func (j *ProxyCookieJar) adjustBucket(fromServer bool, deltaCount, deltaBytes int) {
+	if fromServer {
+		j.serverCount += deltaCount
+		j.serverBytes += deltaBytes
+	} else {
+		j.clientCount += deltaCount
+		j.clientBytes += deltaBytes
 	}
 }
 
-func (p *cookiePool) pruneExpired(now time.Time) {
-	for k, c := range p.cookies {
+func (j *ProxyCookieJar) deleteKeyLocked(k cookieKey) {
+	if existing, ok := j.cookies[k]; ok {
+		j.adjustBucket(existing.fromServer, -1, -existing.byteSize())
+		delete(j.cookies, k)
+	}
+}
+
+func (j *ProxyCookieJar) pruneExpiredLocked(now time.Time) {
+	for k, c := range j.cookies {
 		if c.hasExpiry && !c.expires.After(now) {
-			p.totalBytes -= c.byteSize()
-			delete(p.cookies, k)
+			j.adjustBucket(c.fromServer, -1, -c.byteSize())
+			delete(j.cookies, k)
 		}
 	}
 }
 
-func (p *cookiePool) enforceDomainCap(dom string) {
+func (j *ProxyCookieJar) enforceDomainCapLocked(fromServer bool, dom string, maxDomain int) {
 	var domainKeys []cookieKey
-	for k, c := range p.cookies {
-		if c.domain == dom {
+	for k, c := range j.cookies {
+		if c.fromServer == fromServer && c.domain == dom {
 			domainKeys = append(domainKeys, k)
 		}
 	}
-	if len(domainKeys) < p.maxDomain {
+	if len(domainKeys) < maxDomain {
 		return
 	}
 	sort.Slice(domainKeys, func(a, b int) bool {
-		return p.cookies[domainKeys[a]].lastAccessed.Before(p.cookies[domainKeys[b]].lastAccessed)
+		return j.cookies[domainKeys[a]].lastAccessed.Before(j.cookies[domainKeys[b]].lastAccessed)
 	})
-	for len(domainKeys) >= p.maxDomain {
+	for len(domainKeys) >= maxDomain {
 		victim := domainKeys[0]
 		domainKeys = domainKeys[1:]
-		p.deleteKey(victim)
+		j.deleteKeyLocked(victim)
 	}
 }
 
-func (p *cookiePool) evictForSpace(needBytes int, protect cookieKey) {
+func (j *ProxyCookieJar) evictClassForSpaceLocked(fromServer bool, needCount, needBytes int, protect cookieKey) {
+	maxJar, _, maxBytes := j.bucketLimits(fromServer)
 	type cand struct {
 		key cookieKey
 		ts  time.Time
 	}
 	var cands []cand
-	for k, c := range p.cookies {
-		if k == protect {
+	for k, c := range j.cookies {
+		if c.fromServer != fromServer || k == protect {
 			continue
 		}
 		cands = append(cands, cand{key: k, ts: c.lastAccessed})
@@ -157,57 +192,79 @@ func (p *cookiePool) evictForSpace(needBytes int, protect cookieKey) {
 		return cands[a].ts.Before(cands[b].ts)
 	})
 	for _, c := range cands {
-		if len(p.cookies) < p.maxJar && p.totalBytes+needBytes <= p.maxBytes {
+		cnt, bytes := j.bucketStats(fromServer)
+		if cnt+needCount <= maxJar && bytes+needBytes <= maxBytes {
 			return
 		}
-		p.deleteKey(c.key)
+		j.deleteKeyLocked(c.key)
 	}
 }
 
-// upsert inserts or updates entry inside this pool, returning true only if actually stored.
-func (p *cookiePool) upsert(key cookieKey, entry *storedCookie) bool {
-	if existing, exists := p.cookies[key]; exists {
+// upsertLocked inserts or updates entry inside its privilege bucket, returning true only if stored.
+func (j *ProxyCookieJar) upsertLocked(key cookieKey, entry *storedCookie) bool {
+	maxJar, maxDomain, maxBytes := j.bucketLimits(entry.fromServer)
+	if existing, exists := j.cookies[key]; exists && existing.fromServer == entry.fromServer {
 		deltaBytes := entry.byteSize() - existing.byteSize()
-		if p.totalBytes+deltaBytes > p.maxBytes {
-			p.evictForSpace(deltaBytes, key)
+		_, bytes := j.bucketStats(entry.fromServer)
+		if bytes+deltaBytes > maxBytes {
+			j.evictClassForSpaceLocked(entry.fromServer, 0, deltaBytes, key)
 		}
-		if p.totalBytes+deltaBytes <= p.maxBytes {
+		_, bytes = j.bucketStats(entry.fromServer)
+		if bytes+deltaBytes <= maxBytes {
 			entry.createdAt = existing.createdAt
-			p.totalBytes += deltaBytes
-			p.cookies[key] = entry
+			j.adjustBucket(entry.fromServer, 0, deltaBytes)
+			j.cookies[key] = entry
 			return true
 		}
 		return false
 	}
-	p.enforceDomainCap(entry.domain)
-	if len(p.cookies) >= p.maxJar || p.totalBytes+entry.byteSize() > p.maxBytes {
-		p.evictForSpace(entry.byteSize(), cookieKey{})
+
+	j.enforceDomainCapLocked(entry.fromServer, entry.domain, maxDomain)
+	cnt, bytes := j.bucketStats(entry.fromServer)
+	if cnt+1 > maxJar || bytes+entry.byteSize() > maxBytes {
+		j.evictClassForSpaceLocked(entry.fromServer, 1, entry.byteSize(), key)
 	}
-	if len(p.cookies) < p.maxJar && p.totalBytes+entry.byteSize() <= p.maxBytes {
-		p.cookies[key] = entry
-		p.totalBytes += entry.byteSize()
+	cnt, bytes = j.bucketStats(entry.fromServer)
+	if cnt+1 <= maxJar && bytes+entry.byteSize() <= maxBytes {
+		if existing, exists := j.cookies[key]; exists {
+			j.adjustBucket(existing.fromServer, -1, -existing.byteSize())
+		}
+		j.cookies[key] = entry
+		j.adjustBucket(entry.fromServer, 1, entry.byteSize())
 		return true
 	}
 	return false
 }
 
-// ProxyCookieJar is the sole authoritative RFC 6265bis cookie store on the Go Agent.
-// V7 splits storage into two physically isolated pools:
-//   - serverCookies (64/domain, 256/jar, 64 KiB): written exclusively by upstream Set-Cookie.
-//   - clientCookies (32/domain, 128/jar, 16 KiB): written exclusively by JS document.cookie.
-//
-// JS writes can NEVER evict, shadow, inject into, or downgrade server-authored cookies.
-type ProxyCookieJar struct {
-	mu            sync.RWMutex
-	serverCookies *cookiePool
-	clientCookies *cookiePool
+// isLoopbackHost returns true for W3C Secure Contexts potentially trustworthy loopback hosts
+// (localhost, *.localhost, 127.0.0.0/8, ::1).
+func isLoopbackHost(host string) bool {
+	h := strings.ToLower(strings.Trim(host, "[]"))
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	if ip, err := netip.ParseAddr(h); err == nil && ip.IsLoopback() {
+		return true
+	}
+	return false
 }
 
-func NewProxyCookieJar() *ProxyCookieJar {
-	return &ProxyCookieJar{
-		serverCookies: newCookiePool(MaxServerCookiesPerJar, MaxServerCookiesPerDomain, MaxServerCookieBytes),
-		clientCookies: newCookiePool(MaxClientCookiesPerJar, MaxClientCookiesPerDomain, MaxClientCookieBytes),
+// isSecureCookieOrigin implements RFC 6265bis / W3C Secure Contexts trustworthy origin matching.
+// Over WebRTC Gateway's DTLS tunnel, loopback HTTP targets (e.g. Mode 4.1 local reverse proxies
+// setting X-Forwarded-Proto: https) are treated as potentially trustworthy so Secure cookies work.
+func isSecureCookieOrigin(u *url.URL) bool {
+	if u == nil {
+		return false
 	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme == "https" || scheme == "wss" {
+		return true
+	}
+	return isLoopbackHost(u.Hostname())
+}
+
+func cookieDomainsOverlap(domA string, hostOnlyA bool, domB string, hostOnlyB bool) bool {
+	return cookieDomainMatches(domA, domB, hostOnlyB) || cookieDomainMatches(domB, domA, hostOnlyA)
 }
 
 // isRFC9110Token checks strict RFC 9110 §5.6.2 tchar for cookie names.
@@ -268,15 +325,16 @@ func isValidClientCookiePath(p string) bool {
 	return true
 }
 
-// SaveResponseCookies validates and stores Set-Cookie headers from reqURL into serverCookies
-// and returns validated non-HttpOnly CookieDeltas for the browser's in-memory mirror.
+// SaveResponseCookies validates and stores Set-Cookie headers from reqURL as server-authored
+// cookies and returns validated non-HttpOnly CookieDeltas for the browser's in-memory mirror.
+// When an HttpOnly or Secure cookie is set/deleted, any pre-existing lower-privilege JS cookies
+// with the same name on overlapping domains (any path) are swept to eliminate path-shadowing.
 func (j *ProxyCookieJar) SaveResponseCookies(reqURL *url.URL, rawSetCookies []string) []CookieDelta {
 	if reqURL == nil || len(rawSetCookies) == 0 {
 		return nil
 	}
 	reqHost := strings.ToLower(reqURL.Hostname())
-	reqScheme := strings.ToLower(reqURL.Scheme)
-	isSecureOrigin := reqScheme == "https" || reqScheme == "wss"
+	isSecureOrigin := isSecureCookieOrigin(reqURL)
 	now := time.Now()
 
 	dummyResp := &http.Response{Header: http.Header{"Set-Cookie": rawSetCookies}}
@@ -289,8 +347,19 @@ func (j *ProxyCookieJar) SaveResponseCookies(reqURL *url.URL, rawSetCookies []st
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
-	j.serverCookies.pruneExpired(now)
-	j.clientCookies.pruneExpired(now)
+	j.pruneExpiredLocked(now)
+
+	sweepShadowingClientCookies := func(skipKey cookieKey, name, dom string, hostOnly bool) {
+		for k, existing := range j.cookies {
+			if k == skipKey || existing.fromServer {
+				continue
+			}
+			if existing.name == name && cookieDomainsOverlap(existing.domain, existing.hostOnly, dom, hostOnly) {
+				j.deleteKeyLocked(k)
+				deltas = append(deltas, CookieDelta{Op: "del", Name: existing.name, Path: existing.path})
+			}
+		}
+	}
 
 	for _, c := range parsed {
 		if !isValidCookieName(c.Name) {
@@ -313,7 +382,7 @@ func (j *ProxyCookieJar) SaveResponseCookies(reqURL *url.URL, rawSetCookies []st
 			continue
 		}
 		if strings.HasPrefix(lowerName, "__host-") {
-			// Must have Secure, https origin, NO Domain attribute (`c.Domain == ""`), AND explicit Path=/.
+			// Must have Secure, trustworthy origin, NO Domain attribute (`c.Domain == ""`), AND explicit Path=/.
 			if !c.Secure || !isSecureOrigin || rawDomainAttr != "" || !hostOnly || explicitPath != "/" {
 				continue
 			}
@@ -347,10 +416,10 @@ func (j *ProxyCookieJar) SaveResponseCookies(reqURL *url.URL, rawSetCookies []st
 
 		key := cookieKey{domain: dom, path: cPath, name: c.Name}
 
-		// RFC 6265bis §5.7 "Leave Secure Cookies Alone": non-HTTPS origin MUST NOT overwrite or delete
-		// an existing Secure cookie.
+		// RFC 6265bis §5.7 "Leave Secure Cookies Alone": non-trustworthy origin MUST NOT overwrite
+		// or delete an existing Secure cookie, nor mint a Secure cookie.
 		if !isSecureOrigin {
-			if existing, exists := j.serverCookies.cookies[key]; exists && existing.secure {
+			if existing, exists := j.cookies[key]; exists && existing.secure {
 				continue
 			}
 			if c.Secure {
@@ -358,17 +427,17 @@ func (j *ProxyCookieJar) SaveResponseCookies(reqURL *url.URL, rawSetCookies []st
 			}
 		}
 
-		prevSrv := j.serverCookies.cookies[key]
-		prevCli := j.clientCookies.cookies[key]
-		wasVisibleToJS := (prevSrv != nil && !prevSrv.httpOnly) || prevCli != nil
+		prev := j.cookies[key]
+		wasVisibleToJS := prev != nil && !prev.httpOnly
 
 		isDelete := hasExpiry && !expires.After(now)
 		if isDelete {
-			j.serverCookies.deleteKey(key)
-			j.clientCookies.deleteKey(key)
-			// Emit "del" if not HttpOnly OR if a formerly JS-visible cookie was just expired/deleted.
+			j.deleteKeyLocked(key)
 			if !c.HttpOnly || wasVisibleToJS {
 				deltas = append(deltas, CookieDelta{Op: "del", Name: c.Name, Path: cPath})
+			}
+			if c.HttpOnly || c.Secure {
+				sweepShadowingClientCookies(key, c.Name, dom, hostOnly)
 			}
 			continue
 		}
@@ -382,6 +451,7 @@ func (j *ProxyCookieJar) SaveResponseCookies(reqURL *url.URL, rawSetCookies []st
 			secure:       c.Secure,
 			httpOnly:     c.HttpOnly,
 			sameSite:     c.SameSite,
+			fromServer:   true,
 			expires:      expires,
 			hasExpiry:    hasExpiry,
 			createdAt:    now,
@@ -391,13 +461,14 @@ func (j *ProxyCookieJar) SaveResponseCookies(reqURL *url.URL, rawSetCookies []st
 			continue
 		}
 
-		written := j.serverCookies.upsert(key, entry)
-		if !written {
+		if !j.upsertLocked(key, entry) {
 			// NEVER emit a "set" delta if writing to the jar failed!
 			continue
 		}
-		// Server cookie takes precedence over any same-key client cookie.
-		j.clientCookies.deleteKey(key)
+
+		if c.HttpOnly || c.Secure {
+			sweepShadowingClientCookies(key, c.Name, dom, hostOnly)
+		}
 
 		if !c.HttpOnly {
 			var expMs int64
@@ -425,13 +496,12 @@ func (j *ProxyCookieJar) SaveResponseCookies(reqURL *url.URL, rawSetCookies []st
 }
 
 // ApplyClientMutations applies explicit browser JS `document.cookie` writes and deletions
-// into the isolated `clientCookies` pool. Enforces:
+// billed to the isolated client quota. Enforces:
 //   - <= 32 mutations per call
 //   - Strict RFC 9110 tchar cookie name & RFC 6265 §4.1.1 cookie-octet value & safe path
 //   - Forbids `__Host-` / `__Secure-` prefixes
-//   - Forbids colliding with any matching entry in `serverCookies` (`HttpOnly` or `Secure` are strictly
-//     immutable; non-HttpOnly non-Secure server cookies cannot be shadowed/injected via `set`,
-//     and `del` only removes exact-path non-HttpOnly non-Secure cookies).
+//   - Strictly protects server-authored `HttpOnly` or `Secure` cookies across all paths on the domain,
+//     while allowing JS updates/deletions of ordinary non-HttpOnly non-Secure cookies (zero split-brain).
 func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientCookieMutation) {
 	if targetURL == nil || len(muts) == 0 {
 		return
@@ -440,14 +510,12 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 		muts = muts[:MaxClientMutationsPerCall]
 	}
 	reqHost := strings.ToLower(targetURL.Hostname())
-	reqScheme := strings.ToLower(targetURL.Scheme)
-	isSecureOrigin := reqScheme == "https" || reqScheme == "wss"
+	isSecureOrigin := isSecureCookieOrigin(targetURL)
 	now := time.Now()
 
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	j.serverCookies.pruneExpired(now)
-	j.clientCookies.pruneExpired(now)
+	j.pruneExpiredLocked(now)
 
 	for _, m := range muts {
 		name := strings.TrimSpace(m.Name)
@@ -466,39 +534,25 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 			continue
 		}
 
-		// Inspect serverCookies for matching name on reqHost.
+		// Block JS mutation/shadowing on ANY path if a protected (HttpOnly or Secure) server cookie owns this name.
 		hasProtectedServerCookie := false
-		hasAnyServerCookie := false
-		for _, existing := range j.serverCookies.cookies {
-			if existing.name == name && cookieDomainMatches(reqHost, existing.domain, existing.hostOnly) {
-				hasAnyServerCookie = true
-				if existing.httpOnly || existing.secure {
-					hasProtectedServerCookie = true
-					break
-				}
+		for _, existing := range j.cookies {
+			if existing.isProtected() && existing.name == name && cookieDomainMatches(reqHost, existing.domain, existing.hostOnly) {
+				hasProtectedServerCookie = true
+				break
 			}
+		}
+		if hasProtectedServerCookie {
+			continue
 		}
 
 		if m.Op == "del" {
-			if hasProtectedServerCookie {
-				continue
-			}
-			// Delete matching entries from clientCookies.
-			for k, existing := range j.clientCookies.cookies {
+			for k, existing := range j.cookies {
 				if existing.name == name && existing.path == cPath && cookieDomainMatches(reqHost, existing.domain, existing.hostOnly) {
-					if existing.secure && !isSecureOrigin {
+					if existing.isProtected() || (existing.secure && !isSecureOrigin) {
 						continue
 					}
-					j.clientCookies.deleteKey(k)
-				}
-			}
-			// Also remove matching non-HttpOnly non-Secure server cookie at exact path so JS deletion works (no zombie).
-			for k, existing := range j.serverCookies.cookies {
-				if existing.name == name && existing.path == cPath && cookieDomainMatches(reqHost, existing.domain, existing.hostOnly) {
-					if existing.httpOnly || existing.secure {
-						continue
-					}
-					j.serverCookies.deleteKey(k)
+					j.deleteKeyLocked(k)
 				}
 			}
 			continue
@@ -507,10 +561,6 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 		if m.Op == "set" {
 			// Strict RFC 6265 §4.1.1 cookie-octet check on Value (prevents ';' delimiter injection).
 			if !isValidClientCookieValue(m.Value) {
-				continue
-			}
-			// Never allow JS to overwrite, shadow, or cookie-toss any name already owned by serverCookies!
-			if hasAnyServerCookie {
 				continue
 			}
 
@@ -525,7 +575,7 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 				}
 				hasExpiry = true
 				if !expires.After(now) {
-					j.clientCookies.deleteKey(key)
+					j.deleteKeyLocked(key)
 					continue
 				}
 			}
@@ -539,6 +589,7 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 				secure:       false,
 				httpOnly:     false,
 				sameSite:     http.SameSiteLaxMode,
+				fromServer:   false,
 				expires:      expires,
 				hasExpiry:    hasExpiry,
 				createdAt:    now,
@@ -547,7 +598,7 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 			if entry.byteSize() > 4096 {
 				continue
 			}
-			j.clientCookies.upsert(key, entry)
+			j.upsertLocked(key, entry)
 		}
 	}
 }
@@ -558,47 +609,43 @@ func (j *ProxyCookieJar) ExportNonHttpOnlySnapshot(targetURL *url.URL) []CookieD
 		return nil
 	}
 	reqHost := strings.ToLower(targetURL.Hostname())
-	isSecure := targetURL.Scheme == "https" || targetURL.Scheme == "wss"
+	isSecure := isSecureCookieOrigin(targetURL)
 	now := time.Now()
 
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	var out []CookieDelta
-	collect := func(pool *cookiePool) {
-		for _, c := range pool.cookies {
-			if c.httpOnly {
-				continue
-			}
-			if c.hasExpiry && !c.expires.After(now) {
-				continue
-			}
-			if c.secure && !isSecure {
-				continue
-			}
-			if !cookieDomainMatches(reqHost, c.domain, c.hostOnly) {
-				continue
-			}
-			var expMs int64
-			if c.hasExpiry {
-				expMs = c.expires.UnixMilli()
-			}
-			out = append(out, CookieDelta{
-				Op:      "set",
-				Name:    c.name,
-				Value:   c.value,
-				Path:    c.path,
-				Expires: expMs,
-			})
+	for _, c := range j.cookies {
+		if c.httpOnly {
+			continue
 		}
+		if c.hasExpiry && !c.expires.After(now) {
+			continue
+		}
+		if c.secure && !isSecure {
+			continue
+		}
+		if !cookieDomainMatches(reqHost, c.domain, c.hostOnly) {
+			continue
+		}
+		var expMs int64
+		if c.hasExpiry {
+			expMs = c.expires.UnixMilli()
+		}
+		out = append(out, CookieDelta{
+			Op:      "set",
+			Name:    c.name,
+			Value:   c.value,
+			Path:    c.path,
+			Expires: expMs,
+		})
 	}
-	collect(j.serverCookies)
-	collect(j.clientCookies)
 	return out
 }
 
 // BuildCookieHeaderWithContext builds the upstream Cookie header for reqURL, enforcing
 // RFC 6265bis SameSite (Strict/Lax/None), Secure, Domain, and Path rules.
-// Server cookies are always prioritized ahead of client cookies of identical path length.
+// Protected server cookies are prioritized ahead of client cookies on equal path lengths.
 func (j *ProxyCookieJar) BuildCookieHeaderWithContext(reqURL *url.URL, ctx CookieRequestContext) string {
 	if reqURL == nil {
 		return ""
@@ -608,75 +655,69 @@ func (j *ProxyCookieJar) BuildCookieHeaderWithContext(reqURL *url.URL, ctx Cooki
 	if reqPath == "" {
 		reqPath = "/"
 	}
-	isSecure := reqURL.Scheme == "https" || reqURL.Scheme == "wss"
+	isSecure := isSecureCookieOrigin(reqURL)
 	isCrossSite := !ctx.SameOriginClient
 	isSafeMethod := isSafeHTTPMethod(ctx.Method)
 	now := time.Now()
 
-	type matchedEntry struct {
-		c        *storedCookie
-		isServer bool
-	}
-
 	j.mu.Lock()
-	var matched []matchedEntry
-	collect := func(pool *cookiePool, isServer bool) {
-		for _, c := range pool.cookies {
-			if c.hasExpiry && !c.expires.After(now) {
+	var matched []*storedCookie
+	for _, c := range j.cookies {
+		if c.hasExpiry && !c.expires.After(now) {
+			continue
+		}
+		if c.secure && !isSecure {
+			continue
+		}
+		if !cookieDomainMatches(reqHost, c.domain, c.hostOnly) {
+			continue
+		}
+		if !cookiePathMatches(reqPath, c.path) {
+			continue
+		}
+		if isCrossSite {
+			switch c.sameSite {
+			case http.SameSiteStrictMode:
 				continue
-			}
-			if c.secure && !isSecure {
-				continue
-			}
-			if !cookieDomainMatches(reqHost, c.domain, c.hostOnly) {
-				continue
-			}
-			if !cookiePathMatches(reqPath, c.path) {
-				continue
-			}
-			if isCrossSite {
-				switch c.sameSite {
-				case http.SameSiteStrictMode:
+			case http.SameSiteLaxMode, http.SameSiteDefaultMode:
+				if !(ctx.IsTopLevelNav && isSafeMethod) {
 					continue
-				case http.SameSiteLaxMode, http.SameSiteDefaultMode:
-					if !(ctx.IsTopLevelNav && isSafeMethod) {
-						continue
-					}
-				case http.SameSiteNoneMode:
-					if !c.secure || !isSecure {
-						continue
-					}
+				}
+			case http.SameSiteNoneMode:
+				if !c.secure || !isSecure {
+					continue
 				}
 			}
-			c.lastAccessed = now
-			matched = append(matched, matchedEntry{c: c, isServer: isServer})
 		}
+		c.lastAccessed = now
+		matched = append(matched, c)
 	}
-	collect(j.serverCookies, true)
-	collect(j.clientCookies, false)
 	j.mu.Unlock()
 
 	sort.Slice(matched, func(i, k int) bool {
-		if len(matched[i].c.path) != len(matched[k].c.path) {
-			return len(matched[i].c.path) > len(matched[k].c.path)
+		if len(matched[i].path) != len(matched[k].path) {
+			return len(matched[i].path) > len(matched[k].path)
 		}
-		if matched[i].isServer != matched[k].isServer {
-			return matched[i].isServer
+		if matched[i].isProtected() != matched[k].isProtected() {
+			return matched[i].isProtected()
 		}
-		return matched[i].c.createdAt.Before(matched[k].c.createdAt)
+		if matched[i].fromServer != matched[k].fromServer {
+			return matched[i].fromServer
+		}
+		return matched[i].createdAt.Before(matched[k].createdAt)
 	})
 
 	if len(matched) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	for i, item := range matched {
+	for i, c := range matched {
 		if i > 0 {
 			b.WriteString("; ")
 		}
-		b.WriteString(item.c.name)
+		b.WriteString(c.name)
 		b.WriteByte('=')
-		b.WriteString(item.c.value)
+		b.WriteString(c.value)
 	}
 	return b.String()
 }
@@ -875,6 +916,7 @@ func (m *SessionCookieManager) Release(key string) {
 			e.refCount--
 		}
 		e.lastActive = time.Now()
+		sp.lru.MoveToFront(e.elem)
 	}
 }
 

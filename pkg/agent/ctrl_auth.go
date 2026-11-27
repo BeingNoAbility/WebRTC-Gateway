@@ -68,8 +68,15 @@ func (a *Agent) handleDTLSAuthResponse(sess *VisitorSession, raw []byte) {
 	sess.mu.Lock()
 	// Single auth attempt per connection MUST be latched BEFORE json.Unmarshal so malformed JSON
 	// cannot be replayed during the 150ms rejection window!
+	// Also Fail-Closed if AUTH_RESPONSE raced ahead of DTLS cert FP verification (`!challengeReady`).
 	if sess.state != StateHandshaking || sess.authAttempt || sess.mux == nil {
 		sess.mu.Unlock()
+		return
+	}
+	if !sess.challengeReady {
+		sess.authAttempt = true
+		sess.mu.Unlock()
+		go a.closeSession(sess)
 		return
 	}
 	sess.authAttempt = true
@@ -88,99 +95,120 @@ func (a *Agent) handleDTLSAuthResponse(sess *VisitorSession, raw []byte) {
 		return
 	}
 
-	if allowed, retryAfter := a.authLimiter.Allow(clientIP, now); !allowed {
-		a.metrics.AuthFailureTotal.Add(1)
-		a.rejectDTLSAuth(sess, "RATE_LIMITED", "too many failed authentication attempts", int(retryAfter.Seconds())+1)
+	type authOutcome struct {
+		role         string
+		capScope     *proxy.CapabilityScope
+		capJTI       string
+		capExp       int64
+		confirmVB64  string
+		cookiePrefix string
+		rejectCode   string
+		rejectMsg    string
+		retryAfter   int
+	}
+
+	// Serialize auth attempts per IP bucket to eliminate concurrent multi-session brute-force windows.
+	outcome := func() authOutcome {
+		unlockIP := a.authLimiter.LockKey(clientIP)
+		defer unlockIP()
+
+		if allowed, retryAfter := a.authLimiter.Allow(clientIP, now); !allowed {
+			a.metrics.AuthFailureTotal.Add(1)
+			return authOutcome{
+				rejectCode: "RATE_LIMITED",
+				rejectMsg:  "too many failed authentication attempts",
+				retryAfter: int(retryAfter.Seconds()) + 1,
+			}
+		}
+
+		var out authOutcome
+		resetOwnerLimiter := false
+
+		switch req.Method {
+		case "public":
+			if !a.cfg.AllowPublic || a.spakeVerifier != nil {
+				a.authLimiter.RecordFailure(clientIP, now)
+				a.metrics.AuthFailureTotal.Add(1)
+				return authOutcome{rejectCode: "AUTH_REQUIRED", rejectMsg: "public access is disabled on this node"}
+			}
+			out.role = "public"
+			out.cookiePrefix = "public"
+
+		case "spake2p":
+			if a.spakeVerifier == nil || spakeSess == nil {
+				a.authLimiter.RecordFailure(clientIP, now)
+				a.metrics.AuthFailureTotal.Add(1)
+				return authOutcome{rejectCode: "AUTH_UNAVAILABLE", rejectMsg: "owner password authentication not configured"}
+			}
+			shareP, err1 := base64.RawURLEncoding.DecodeString(req.ShareP)
+			confirmP, err2 := base64.RawURLEncoding.DecodeString(req.ConfirmP)
+			if err1 != nil || err2 != nil {
+				a.authLimiter.RecordFailure(clientIP, now)
+				a.metrics.AuthFailureTotal.Add(1)
+				return authOutcome{rejectCode: "AUTH_FAILED", rejectMsg: "malformed SPAKE2+ parameters"}
+			}
+			ctxBytes, ctxErr := BuildSPAKE2PContext(
+				a.cfg.NodeID, visitorFP, agentFP, a.cfg.Identity.PublicKeyBase64(), visitorNonce, agentNonce,
+			)
+			if ctxErr != nil {
+				a.authLimiter.RecordFailure(clientIP, now)
+				a.metrics.AuthFailureTotal.Add(1)
+				return authOutcome{rejectCode: "AUTH_FAILED", rejectMsg: "invalid SPAKE2+ context"}
+			}
+			confirmV, _, err := spakeSess.Finish(ctxBytes, shareP, confirmP)
+			if err != nil {
+				a.authLimiter.RecordFailure(clientIP, now)
+				a.metrics.AuthFailureTotal.Add(1)
+				return authOutcome{rejectCode: "AUTH_FAILED", rejectMsg: "invalid access password"}
+			}
+			out.confirmVB64 = base64.RawURLEncoding.EncodeToString(confirmV)
+			out.role = "owner"
+			out.cookiePrefix = "owner"
+			resetOwnerLimiter = true
+
+		case "cap":
+			p, err := a.cfg.Identity.VerifyCapability(req.CapToken, a.cfg.NodeID, now)
+			if err != nil {
+				a.authLimiter.RecordFailure(clientIP, now)
+				a.metrics.AuthFailureTotal.Add(1)
+				return authOutcome{rejectCode: "CAP_INVALID", rejectMsg: err.Error()}
+			}
+			if !a.capStore.AcquireConn(p) {
+				a.metrics.AuthFailureTotal.Add(1)
+				return authOutcome{rejectCode: "CAP_REVOKED_OR_FULL", rejectMsg: "capability token revoked or connection limit reached"}
+			}
+			out.role = "capability"
+			out.capJTI = p.JTI
+			out.capExp = p.Exp
+			out.capScope = &proxy.CapabilityScope{
+				PathPrefix: p.PathPrefix,
+				Readonly:   p.Readonly,
+			}
+			out.cookiePrefix = "cap:" + p.JTI
+
+		default:
+			a.authLimiter.RecordFailure(clientIP, now)
+			a.metrics.AuthFailureTotal.Add(1)
+			return authOutcome{rejectCode: "UNSUPPORTED_AUTH_METHOD", rejectMsg: "unsupported auth method"}
+		}
+
+		if resetOwnerLimiter {
+			a.authLimiter.Reset(clientIP)
+		}
+		return out
+	}()
+
+	if outcome.rejectCode != "" {
+		a.rejectDTLSAuth(sess, outcome.rejectCode, outcome.rejectMsg, outcome.retryAfter)
 		return
 	}
 
-	var role string
-	var capScope *proxy.CapabilityScope
-	var capJTI string
-	var capExp int64
-	var confirmVB64 string
-	var cookiePrefix string
-	resetOwnerLimiter := false
-
-	switch req.Method {
-	case "public":
-		if !a.cfg.AllowPublic {
-			a.authLimiter.RecordFailure(clientIP, now)
-			a.metrics.AuthFailureTotal.Add(1)
-			a.rejectDTLSAuth(sess, "AUTH_REQUIRED", "public access is disabled on this node", 0)
-			return
-		}
-		role = "public"
-		cookiePrefix = "public"
-
-	case "spake2p":
-		if a.spakeVerifier == nil || spakeSess == nil {
-			a.authLimiter.RecordFailure(clientIP, now)
-			a.metrics.AuthFailureTotal.Add(1)
-			a.rejectDTLSAuth(sess, "AUTH_UNAVAILABLE", "owner password authentication not configured", 0)
-			return
-		}
-		shareP, err1 := base64.RawURLEncoding.DecodeString(req.ShareP)
-		confirmP, err2 := base64.RawURLEncoding.DecodeString(req.ConfirmP)
-		if err1 != nil || err2 != nil {
-			a.authLimiter.RecordFailure(clientIP, now)
-			a.metrics.AuthFailureTotal.Add(1)
-			a.rejectDTLSAuth(sess, "AUTH_FAILED", "malformed SPAKE2+ parameters", 0)
-			return
-		}
-		ctxBytes, ctxErr := BuildSPAKE2PContext(
-			a.cfg.NodeID, visitorFP, agentFP, a.cfg.Identity.PublicKeyBase64(), visitorNonce, agentNonce,
-		)
-		if ctxErr != nil {
-			a.authLimiter.RecordFailure(clientIP, now)
-			a.metrics.AuthFailureTotal.Add(1)
-			a.rejectDTLSAuth(sess, "AUTH_FAILED", "invalid SPAKE2+ context", 0)
-			return
-		}
-		confirmV, _, err := spakeSess.Finish(ctxBytes, shareP, confirmP)
-		if err != nil {
-			a.authLimiter.RecordFailure(clientIP, now)
-			a.metrics.AuthFailureTotal.Add(1)
-			a.rejectDTLSAuth(sess, "AUTH_FAILED", "invalid access password", 0)
-			return
-		}
-		confirmVB64 = base64.RawURLEncoding.EncodeToString(confirmV)
-		role = "owner"
-		cookiePrefix = "owner"
-		resetOwnerLimiter = true
-
-	case "cap":
-		p, err := a.cfg.Identity.VerifyCapability(req.CapToken, a.cfg.NodeID, now)
-		if err != nil {
-			a.authLimiter.RecordFailure(clientIP, now)
-			a.metrics.AuthFailureTotal.Add(1)
-			a.rejectDTLSAuth(sess, "CAP_INVALID", err.Error(), 0)
-			return
-		}
-		if !a.capStore.AcquireConn(p) {
-			a.metrics.AuthFailureTotal.Add(1)
-			a.rejectDTLSAuth(sess, "CAP_REVOKED_OR_FULL", "capability token revoked or connection limit reached", 0)
-			return
-		}
-		role = "capability"
-		capJTI = p.JTI
-		capExp = p.Exp
-		capScope = &proxy.CapabilityScope{
-			PathPrefix: p.PathPrefix,
-			Readonly:   p.Readonly,
-		}
-		cookiePrefix = "cap:" + p.JTI
-
-	default:
-		a.authLimiter.RecordFailure(clientIP, now)
-		a.metrics.AuthFailureTotal.Add(1)
-		a.rejectDTLSAuth(sess, "UNSUPPORTED_AUTH_METHOD", "unsupported auth method", 0)
-		return
-	}
-
-	if resetOwnerLimiter {
-		a.authLimiter.Reset(clientIP)
-	}
+	role := outcome.role
+	capScope := outcome.capScope
+	capJTI := outcome.capJTI
+	capExp := outcome.capExp
+	confirmVB64 := outcome.confirmVB64
+	cookiePrefix := outcome.cookiePrefix
 
 	cookieKey, resumeTok, jar := a.cookieMgr.AcquireOrMint(cookiePrefix, req.CookieResumeToken)
 
@@ -228,28 +256,62 @@ func (a *Agent) handleDTLSAuthResponse(sess *VisitorSession, raw []byte) {
 
 	pol := a.cfg.HTTPProxy.Policy()
 	backendOrigin := pol.EffectiveOrigin()
-	if role == "capability" {
+	if role != "owner" {
 		backendOrigin = "http://" + a.cfg.NodeID + ".internal"
 	}
 
-	resObj := map[string]any{
-		"ok":                  true,
-		"role":                role,
-		"cookie_resume_token": resumeTok,
-		"meta": BackendMeta{
-			NodeID:         a.cfg.NodeID,
-			BackendOrigin:  backendOrigin,
-			IsStaticMode:   a.cfg.IsStaticMode,
-			InitialCookies: jar.ExportNonHttpOnlySnapshot(pol.EffectiveBaseURL()),
-		},
-	}
-	if confirmVB64 != "" {
-		resObj["confirm_v"] = confirmVB64
-	}
-	resPayload, _ := json.Marshal(resObj)
+	allCookies := jar.ExportNonHttpOnlySnapshot(pol.EffectiveBaseURL())
+	resPayload := marshalBoundedAuthResult(m.MaxControlPayloadSize(), role, resumeTok, confirmVB64, BackendMeta{
+		NodeID:        a.cfg.NodeID,
+		BackendOrigin: backendOrigin,
+		IsStaticMode:  a.cfg.IsStaticMode,
+	}, allCookies)
 	if err := m.SendControlFrame(protocol.TypeAuthResult, resPayload); err != nil {
 		go a.closeSession(sess)
 	}
+}
+
+// marshalBoundedAuthResult serializes AUTH_RESULT while ensuring InitialCookies never cause the
+// control JSON frame to exceed the negotiated max control payload (preventing reconnect crash loops).
+func marshalBoundedAuthResult(maxPayload int, role, resumeTok, confirmVB64 string, meta BackendMeta, allCookies []proxy.CookieDelta) []byte {
+	build := func(cookies []proxy.CookieDelta) []byte {
+		m := meta
+		m.InitialCookies = cookies
+		obj := map[string]any{
+			"ok":                  true,
+			"role":                role,
+			"cookie_resume_token": resumeTok,
+			"meta":                m,
+		}
+		if confirmVB64 != "" {
+			obj["confirm_v"] = confirmVB64
+		}
+		raw, _ := json.Marshal(obj)
+		return raw
+	}
+	if maxPayload <= 0 || maxPayload > protocol.MaxControlJSONSize {
+		maxPayload = protocol.MaxControlJSONSize
+	}
+	if len(allCookies) == 0 {
+		return build(nil)
+	}
+	if full := build(allCookies); len(full) <= maxPayload {
+		return full
+	}
+	// Binary search largest prefix of InitialCookies that strictly fits inside maxPayload.
+	lo, hi := 0, len(allCookies)
+	best := build(nil)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		cand := build(allCookies[:mid])
+		if len(cand) <= maxPayload {
+			best = cand
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return best
 }
 
 func (a *Agent) rejectDTLSAuth(sess *VisitorSession, code, msg string, retryAfterSec int) {
@@ -288,6 +350,10 @@ func (a *Agent) handleCapabilityRPC(sess *VisitorSession, raw []byte) {
 	now := time.Now()
 	switch req.Action {
 	case "mint":
+		if req.MaxConns < 0 {
+			a.sendCapResp(sess, m, req.ReqID, false, "max_conns cannot be negative", nil)
+			return
+		}
 		ttl := time.Duration(req.TTLSec) * time.Second
 		if ttl <= 0 {
 			ttl = 2 * time.Hour
@@ -333,31 +399,70 @@ func (a *Agent) handleCapabilityRPC(sess *VisitorSession, raw []byte) {
 			limit = MaxCapListLimit
 		}
 		items, total, hasMore := a.capStore.ListPage(now, offset, limit)
+		packed, packedHasMore := fitCapListPage(m.MaxControlPayloadSize(), req.ReqID, items, total, offset, limit, hasMore)
 		a.sendCapResp(sess, m, req.ReqID, true, "", map[string]any{
-			"items":    items,
+			"items":    packed,
 			"total":    total,
 			"offset":   offset,
 			"limit":    limit,
-			"has_more": hasMore,
+			"has_more": packedHasMore,
 		})
 
 	case "revoke":
-		if req.JTI == "" {
-			a.sendCapResp(sess, m, req.ReqID, false, "missing jti", nil)
+		jti := strings.TrimSpace(req.JTI)
+		if jti == "" || len(jti) > maxCapabilityJTILen {
+			a.sendCapResp(sess, m, req.ReqID, false, "invalid jti", nil)
 			return
 		}
-		persistErr := a.capStore.Revoke(req.JTI)
-		a.cookieMgr.DeleteByPrefix("cap:" + req.JTI + ":")
-		go a.disconnectCapabilitySessions(req.JTI)
+		persistErr := a.capStore.Revoke(jti)
+		a.cookieMgr.DeleteByPrefix("cap:" + jti + ":")
+		go a.disconnectCapabilitySessions(jti)
 		if persistErr != nil {
-			a.sendCapResp(sess, m, req.ReqID, false, "revoked in memory but failed to persist state", map[string]any{"revoked": req.JTI})
+			a.sendCapResp(sess, m, req.ReqID, false, "revoked in memory but failed to persist state", map[string]any{"revoked": jti})
 			return
 		}
-		a.sendCapResp(sess, m, req.ReqID, true, "", map[string]any{"revoked": req.JTI})
+		a.sendCapResp(sess, m, req.ReqID, true, "", map[string]any{"revoked": jti})
 
 	default:
 		a.sendCapResp(sess, m, req.ReqID, false, fmt.Sprintf("unknown action %q", req.Action), nil)
 	}
+}
+
+// fitCapListPage dynamically packs CAP_RESP list items to strictly fit within maxPayload,
+// marking has_more=true whenever any page items are trimmed for small negotiated chunk sizes.
+func fitCapListPage(maxPayload int, reqID string, items []CapabilityRecord, total, offset, limit int, hasMore bool) ([]CapabilityRecord, bool) {
+	if maxPayload <= 0 || maxPayload > protocol.MaxControlJSONSize {
+		maxPayload = protocol.MaxControlJSONSize
+	}
+	marshalLen := func(subset []CapabilityRecord, hm bool) int {
+		raw, _ := json.Marshal(map[string]any{
+			"req_id":   reqID,
+			"ok":       true,
+			"items":    subset,
+			"total":    total,
+			"offset":   offset,
+			"limit":    limit,
+			"has_more": hm,
+		})
+		return len(raw)
+	}
+	if len(items) == 0 || marshalLen(items, hasMore) <= maxPayload {
+		return items, hasMore
+	}
+	lo, hi := 0, len(items)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		hm := hasMore || mid < len(items)
+		if marshalLen(items[:mid], hm) <= maxPayload {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if lo == 0 {
+		return []CapabilityRecord{}, true
+	}
+	return items[:lo], hasMore || lo < len(items)
 }
 
 func (a *Agent) sendCapResp(sess *VisitorSession, m *mux.Mux, reqID string, ok bool, errMsg string, data map[string]any) {

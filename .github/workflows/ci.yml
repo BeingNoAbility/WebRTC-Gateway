@@ -63,9 +63,10 @@ jobs:
             exit 1
           fi
           go vet ./...
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go vet -tags embedweb ./...
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
           "$(go env GOPATH)/bin/staticcheck" ./...
           "$(go env GOPATH)/bin/govulncheck" ./...
           "$(go env GOPATH)/bin/gosec" ./...
@@ -75,7 +76,7 @@ jobs:
 
       - name: Run Go Fuzz Smoke Tests
         run: |
-          for pkg in ./pkg/protocol ./pkg/proxy; do
+          for pkg in ./pkg/protocol ./pkg/proxy ./pkg/signaling; do
             fuzz_tests=$(go test -list '^Fuzz' "$pkg" 2>/dev/null | grep '^Fuzz' || true)
             for ft in $fuzz_tests; do
               go test -run='^$' -fuzz="^${ft}\$" -fuzztime=2s "$pkg"

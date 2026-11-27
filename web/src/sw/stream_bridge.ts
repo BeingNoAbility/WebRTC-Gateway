@@ -57,7 +57,7 @@ function nextReqId(): string {
 }
 
 export async function executeTunnelRequest(
-  swScope: ServiceWorkerGlobalScope,
+  _swScope: ServiceWorkerGlobalScope,
   registry: SessionRegistry,
   session: TabSession,
   request: Request,
@@ -68,49 +68,37 @@ export async function executeTunnelRequest(
   cookieMutations: ClientCookieMutation[] = []
 ): Promise<{ session: TabSession; response: TunnelResponseHead }> {
   const method = request.method.toUpperCase();
-  const canRetryOnDeadPort = !hasBody && IDEMPOTENT_METHODS.has(method);
+  const isIdempotent = !hasBody && IDEMPOTENT_METHODS.has(method);
 
-  let activeSession = session;
-  if (!activeSession.port) {
-    activeSession = await registry.ensureLivePort(swScope, activeSession.tabId);
+  if (!session.port) {
+    registry.evictDeadPort(session.tabId, null);
+    throw new DeadBridgePortError();
   }
 
   try {
     const resp = await sendSingleAttempt(
-      activeSession,
+      session,
       request,
       target,
       headers,
       hasBody,
-      canRetryOnDeadPort,
+      isIdempotent,
       fetchCtx,
       cookieMutations
     );
-    return { session: activeSession, response: resp };
+    return { session, response: resp };
   } catch (err) {
-    if (err instanceof DeadBridgePortError && canRetryOnDeadPort) {
-      const alive = await registry.pingBridgePort(activeSession, 500);
+    if (err instanceof DeadBridgePortError) {
+      const alive = await registry.pingBridgePort(session, 500);
       if (!alive) {
-        registry.evictDeadPort(activeSession.tabId, activeSession.port);
+        registry.evictDeadPort(session.tabId, session.port);
       }
-      const freshSession = await registry.ensureLivePort(swScope, activeSession.tabId);
-      const resp = await sendSingleAttempt(
-        freshSession,
-        request,
-        target,
-        headers,
-        hasBody,
-        false,
-        fetchCtx,
-        cookieMutations
-      );
-      return { session: freshSession, response: resp };
     }
     throw err;
   }
 }
 
-class DeadBridgePortError extends Error {
+export class DeadBridgePortError extends Error {
   constructor() {
     super('bridge port did not acknowledge request within timeout');
   }
@@ -159,13 +147,22 @@ function sendSingleAttempt(
     let uploadStarted = false;
     let uploadAborted = false;
     let uploadReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    // Declare timer handles BEFORE cleanupPort() so early-abort paths never hit TDZ ReferenceError!
+    let ackTimer: ReturnType<typeof setTimeout> | undefined;
+    let headTimer: ReturnType<typeof setTimeout> | undefined;
 
     const cleanupPort = () => {
       if (closed) return;
       closed = true;
       uploadAborted = true;
-      clearTimeout(ackTimer);
-      clearTimeout(headTimer);
+      if (ackTimer !== undefined) {
+        clearTimeout(ackTimer);
+        ackTimer = undefined;
+      }
+      if (headTimer !== undefined) {
+        clearTimeout(headTimer);
+        headTimer = undefined;
+      }
       if (uploadCreditWaiter) {
         clearTimeout(uploadCreditWaiter.timer);
         uploadCreditWaiter.reject(new Error('request closed'));
@@ -233,7 +230,7 @@ function sendSingleAttempt(
     }
 
     const ackTimeoutMs = allowAckRetry ? IDEMPOTENT_ACK_TIMEOUT_MS : MUTATING_ACK_TIMEOUT_MS;
-    const ackTimer = setTimeout(() => {
+    ackTimer = setTimeout(() => {
       if (!acked && !closed) {
         if (allowAckRetry) {
           sendCancelAndCleanup();
@@ -247,7 +244,7 @@ function sendSingleAttempt(
       }
     }, ackTimeoutMs);
 
-    const headTimer = setTimeout(() => {
+    headTimer = setTimeout(() => {
       if (!headResolved && !closed) {
         failRequest(new Error('Gateway timeout waiting for response headers'));
       }

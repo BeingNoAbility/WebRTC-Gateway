@@ -60,6 +60,8 @@ export function pipeThroughBoundedDecompression(
         }
         await decompWriter!.close();
       } catch (err) {
+        // Cancel upstream source immediately so corrupt gzip never pins an HTTP pool slot!
+        void srcReader?.cancel(err).catch(() => {});
         await decompWriter!.abort(err).catch(() => {});
       }
     })();
@@ -91,31 +93,44 @@ export function pipeThroughBoundedDecompression(
         return;
       }
 
-      const { done, value } = await decompReader.read();
-      if (done) {
-        if (pumpPromise) await pumpPromise.catch(() => {});
-        controller.close();
+      // Loop over 0-byte decompressed chunks so pull() NEVER returns without enqueuing or closing!
+      while (true) {
+        let readRes: ReadableStreamReadResult<Uint8Array>;
+        try {
+          readRes = await decompReader.read();
+        } catch (err) {
+          void srcReader?.cancel(err).catch(() => {});
+          void decompWriter?.abort(err).catch(() => {});
+          controller.error(err);
+          return;
+        }
+        const { done, value } = readRes;
+        if (done) {
+          if (pumpPromise) await pumpPromise.catch(() => {});
+          controller.close();
+          return;
+        }
+        if (!value || value.byteLength === 0) {
+          continue;
+        }
+        totalOut += value.byteLength;
+        if (totalOut > maxOut) {
+          const err = new Error('decompressed response exceeded maximum allowed size');
+          void srcReader?.cancel(err).catch(() => {});
+          void decompReader.cancel(err).catch(() => {});
+          controller.error(err);
+          return;
+        }
+        if (totalOut >= minOut && totalIn > 0 && totalOut / totalIn > maxRatio) {
+          const err = new Error('decompression bomb detected (expansion ratio exceeded)');
+          void srcReader?.cancel(err).catch(() => {});
+          void decompReader.cancel(err).catch(() => {});
+          controller.error(err);
+          return;
+        }
+        controller.enqueue(value);
         return;
       }
-      if (!value || value.byteLength === 0) {
-        return;
-      }
-      totalOut += value.byteLength;
-      if (totalOut > maxOut) {
-        const err = new Error('decompressed response exceeded maximum allowed size');
-        void srcReader?.cancel(err).catch(() => {});
-        void decompReader.cancel(err).catch(() => {});
-        controller.error(err);
-        return;
-      }
-      if (totalOut >= minOut && totalIn > 0 && totalOut / totalIn > maxRatio) {
-        const err = new Error('decompression bomb detected (expansion ratio exceeded)');
-        void srcReader?.cancel(err).catch(() => {});
-        void decompReader.cancel(err).catch(() => {});
-        controller.error(err);
-        return;
-      }
-      controller.enqueue(value);
     },
     cancel(reason) {
       void srcReader?.cancel(reason).catch(() => {});

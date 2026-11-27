@@ -71,7 +71,7 @@ All multi-byte integers are big-endian (network byte order). Every DataChannel m
 - **Gen (4 bytes)**: Always `0` on `p2pctrl`; strictly monotonic non-zero generation (`>= 1`) on HTTP pool slots; always `1` on dedicated `"p2pws"` channels.
 - **Type (1 byte)**: Frame opcode; unknown opcodes or channel mismatches fail immediately.
 - **Flags (1 byte)**: Only `FlagFin = 0x01`, `FlagMsgFin = 0x02` (end-of-message marker on `WS_TEXT`/`WS_BINARY`/`WS_CONT`), and `FlagMoreHeaders = 0x04` are defined; all reserved bits must be `0`.
-- **Payload Length (2 bytes)**: Ceiling `MaxPayloadSize = 65535` bytes (`uint16` max); default chunk size `DefaultChunkSize = 32760` bytes, clamped strictly downward against SCTP `maxMessageSize` (floor `MinMaxMessageSize = 4096` bytes, chunk floor `MinChunkSize = 1024` bytes).
+- **Payload Length (2 bytes)**: Ceiling `MaxPayloadSize = 65535` bytes (`uint16` max); default chunk size `DefaultChunkSize = 32760` bytes, clamped strictly downward against SCTP `maxMessageSize` (floor `MinMaxMessageSize = 4096` bytes, chunk floor `MinChunkSize = 4088` bytes, rejecting values `< 4096` and guaranteeing `17 * 4088 >= 64 KiB` header reassembly).
 
 ---
 
@@ -104,7 +104,7 @@ All multi-byte integers are big-endian (network byte order). Every DataChannel m
 
 ### 1. Request and Response TLV Encoding
 
-Request and response headers use big-endian binary TLV encoding carrying `FetchCtx` (`SameOriginClient`, `TopLevelNav`, `ClientDecompressGzip`, `CredentialsOmit`), `RespFlags` (`DecompressGzip`), and inline cookie mutations/deltas (eliminating out-of-band ordering races), preserving multi-value headers (such as multiple `Content-Security-Policy` or `Vary` entries) while rejecting control bytes, CR/LF/NUL, and ASCII spaces (`0x20`) in request targets:
+Request and response headers use big-endian binary TLV encoding carrying `FetchCtx` (`SameOriginClient`, `TopLevelNav` set strictly for `mode === 'navigate' && destination === 'document'`, `ClientDecompressGzip`, `CredentialsOmit` suppressing cookie mutations and response cookie storage), `RespFlags` (`DecompressGzip`), and inline cookie mutations/deltas (eliminating out-of-band ordering races, enforcing `0 <= expiresMs <= Number.MAX_SAFE_INTEGER`), preserving multi-value headers (such as multiple `Content-Security-Policy` or `Vary` entries) while rejecting control bytes, CR/LF/NUL, and ASCII spaces (`0x20`) in request targets:
 
 ```text
 Request TLV:
@@ -133,7 +133,7 @@ Close:
   Frame  : [Gen=1][Type=WS_CLOSE]         [Flags=0x00]           [u16 code][reason <= 123B]
 ```
 
-Receivers replenish `CREDIT` progressively per chunk within the `16 MiB` message cap so messages exceeding the `2 MiB` initial window stream without deadlock; violations close immediately with code `1009`.
+Receivers replenish `CREDIT` progressively per chunk within the `16 MiB` message cap and `16384`-chunk ceiling (ensuring full `16 MiB` reassembly even at `4088`-byte minimum chunks) so messages exceeding the `2 MiB` initial window stream without deadlock; violations close immediately with code `1009`.
 
 ---
 

@@ -10,7 +10,7 @@ Choose the isolation tier matching your domain and TLS certificate setup (loopba
 
 | Tier | Flags | Required DNS Records | TLS Certificate | Isolation Properties |
 | :--- | :--- | :--- | :--- | :--- |
-| **Tier 1: Dual Fixed Cross-Site** | `-portal-domain portal.example.com` + `-sandbox-host app.example.net` | Two standard `A`/`AAAA`/`CNAME` records | Standard ACME HTTP-01 certs (zero wildcard cert needed) | Full cross-site isolation (distinct eTLD+1); apps share the fixed sandbox origin |
+| **Tier 1: Dual Fixed Cross-Site** | `-portal-domain portal.example.com` + `-sandbox-host app.example.net` | Two standard `A`/`AAAA`/`CNAME` records | One multi-SAN HTTP-01 cert (direct `-tls-cert`) or two separate single-host certs behind Nginx/Caddy (zero wildcard cert needed) | Full cross-site isolation (distinct eTLD+1); apps share the fixed sandbox origin |
 | **Tier 2: Single-Root Same-Site Wildcard** | `-portal-domain portal.example.com` + `-sandbox-domain sbx.example.com` + `-allow-same-site-sandbox` | `portal.example.com` + `*.sbx.example.com` | Wildcard cert `*.sbx.example.com` | Per-node `sbx-<24hex>` origins + `Origin-Agent-Cluster: ?1` process isolation (same-site warning banner) |
 | **Tier 3: Dual-Root Cross-Site Wildcard (Recommended)** | `-portal-domain portal.example.com` + `-sandbox-domain sandbox.example.net` | `portal.example.com` + `*.sandbox.example.net` | `portal.example.com` + wildcard `*.sandbox.example.net` | Full cross-site isolation + per-node device-salted HMAC `sbx-<24hex>` origins |
 
@@ -42,7 +42,7 @@ When terminating TLS behind Nginx or Caddy, forward the original `Host`, `X-Forw
 
 ## 3. Hardened Container Deployment (`docker-compose.yml`)
 
-The root `docker-compose.yml` enforces `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges:true`, and resource limits, persisting signaling node key bindings in the `signal_state` volume and Agent Ed25519 keys plus capability revocations in `agent_identity`:
+The root `docker-compose.yml` binds signaling to `127.0.0.1:8888:8888` by default (for TLS termination via a host reverse proxy), enforces `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges:true`, and resource limits, and persists signaling node key bindings in `signal_state` and Agent Ed25519 keys plus capability revocations in `agent_identity` (when a host reverse proxy forwards traffic over Docker bridge, add that bridge CIDR such as `172.17.0.0/16` to `TRUSTED_PROXIES`):
 
 ```bash
 cat <<'EOF' > .env
@@ -59,7 +59,7 @@ docker compose up -d --build
 
 ## 4. No Wildcard Cert: Tier 1 Dual Fixed Cross-Site Example
 
-When only standard HTTP-01 single-host certificates are available, configure two fixed hostnames on distinct eTLD+1 sites (`portal.example.com` and `app.example.net`) via `-sandbox-host` to obtain cross-site isolation and W3C Fetch anti-CSRF gating:
+When only standard HTTP-01 certificates are available, configure two fixed hostnames on distinct eTLD+1 sites (`portal.example.com` and `app.example.net`) via `-sandbox-host` to obtain cross-site isolation and W3C Fetch anti-CSRF gating. Direct TLS termination on `cmd/signal` via `-tls-cert` loads a single PEM certificate (use one multi-SAN cert covering both hostnames); to serve two separate single-host certificates by SNI, terminate TLS at Nginx or Caddy and reverse-proxy to `127.0.0.1:8888`:
 
 ```bash
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \

@@ -109,11 +109,15 @@ func ExtractSessionDescriptor(rawSDP string, sdpVer uint64) (*signaling.SessionD
 	if sdpVer < 2 {
 		sdpVer = 2
 	}
+	// RFC 8841 §6.6: max-message-size:0 denotes unlimited -> clamp to our safe 256 KiB cap.
+	// Positive values below MinNegotiatedMaxMsgSize (4096) fail closed.
+	if maxMsgSize == 0 {
+		maxMsgSize = 262144
+	} else if maxMsgSize < protocol.MinNegotiatedMaxMsgSize {
+		return nil, fmt.Errorf("max-message-size %d below minimum %d", maxMsgSize, protocol.MinNegotiatedMaxMsgSize)
+	}
 	if maxMsgSize > 1073741824 {
 		maxMsgSize = 1073741824
-	}
-	if maxMsgSize < protocol.MinNegotiatedMaxMsgSize {
-		maxMsgSize = protocol.MinNegotiatedMaxMsgSize
 	}
 
 	desc := &signaling.SessionDescriptor{
