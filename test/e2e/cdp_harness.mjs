@@ -310,6 +310,8 @@ export async function openPageTab(cdp, url) {
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   const attachedSessions = new Set([sessionId]);
+  /** @type {Map<string, { sid: string, ready: Promise<void> }>} */
+  const childSessionsByTarget = new Map();
   const portalOrigin = new URL(url).origin;
   const gatewayErrors = [];
   const uncaughtExceptions = [];
@@ -332,14 +334,26 @@ export async function openPageTab(cdp, url) {
     if (parentSid && attachedSessions.has(parentSid) && params.sessionId) {
       const childSid = params.sessionId;
       attachedSessions.add(childSid);
-      Promise.all([
+      const ready = Promise.all([
         cdp.send('Network.enable', {}, childSid).catch(() => {}),
         cdp.send('Runtime.enable', {}, childSid).catch(() => {}),
-      ]).finally(() => {
+      ]).then(() => {
         if (params.waitingForDebugger) {
-          cdp.send('Runtime.runIfWaitingForDebugger', {}, childSid).catch(() => {});
+          return cdp.send('Runtime.runIfWaitingForDebugger', {}, childSid).catch(() => {});
         }
       });
+      if (params.targetInfo?.targetId) {
+        childSessionsByTarget.set(params.targetInfo.targetId, { sid: childSid, ready });
+      }
+    }
+  });
+  const offDetached = cdp.on('Target.detachedFromTarget', (params) => {
+    if (!params.sessionId || !attachedSessions.has(params.sessionId)) return;
+    attachedSessions.delete(params.sessionId);
+    for (const [tid, entry] of childSessionsByTarget) {
+      if (entry.sid === params.sessionId) {
+        childSessionsByTarget.delete(tid);
+      }
     }
   });
   const offResponse = cdp.on('Network.responseReceived', (params, sid) => {
@@ -396,26 +410,27 @@ export async function openPageTab(cdp, url) {
   };
 
   /**
-   * Evaluates JS inside a real cross-origin OOPIF iframe matching `urlPredicate` using CDP Target attachment
-   * (works for cross-site / cross-origin sandboxes WITHOUT SecurityError!).
+   * Evaluates JS inside a real cross-origin OOPIF iframe belonging to THIS tab and
+   * matching `urlPredicate` using its auto-attached CDP Target session (never leaks
+   * duplicate sessions and never cross-matches another tab's iframes).
    */
   const evalInChildFrame = async (urlPredicate, expression) => {
     const { targetInfos } = await cdp.send('Target.getTargets');
-    const frameTarget = targetInfos.find(
-      (t) => (t.type === 'iframe' || t.type === 'page') && urlPredicate(t.url)
+    const ownTargets = targetInfos.filter(
+      (t) => (t.type === 'iframe' || t.type === 'page') && childSessionsByTarget.has(t.targetId)
     );
+    const frameTarget = ownTargets.find((t) => urlPredicate(t.url));
     if (!frameTarget) {
       throw new Error(
-        `No child iframe target matched predicate. Open targets: ${targetInfos.map((t) => `${t.type}:${t.url}`).join(', ')}`
+        `No child iframe target matched predicate for tab ${targetId}. Own child targets: ${ownTargets.map((t) => `${t.type}:${t.url}`).join(', ')}`
       );
     }
-    const { sessionId: frameSid } = await cdp.send('Target.attachToTarget', {
-      targetId: frameTarget.targetId,
-      flatten: true,
-    });
-    attachedSessions.add(frameSid);
-    await cdp.send('Runtime.enable', {}, frameSid);
-    return evalInSession(frameSid, expression);
+    const entry = childSessionsByTarget.get(frameTarget.targetId);
+    if (!entry) {
+      throw new Error(`Child iframe target ${frameTarget.targetId} detached before eval`);
+    }
+    await entry.ready;
+    return evalInSession(entry.sid, expression);
   };
 
   return {
@@ -435,11 +450,24 @@ export async function openPageTab(cdp, url) {
     },
     navigate: (nextUrl) => cdp.send('Page.navigate', { url: nextUrl }, sessionId),
     reload: () => cdp.send('Page.reload', { ignoreCache: true }, sessionId),
-    close: () => {
+    close: async () => {
+      // Disable auto-attach and resume any in-flight debugger-paused child OOPIFs
+      // BEFORE detaching listeners so Target.closeTarget cannot deadlock on a frozen iframe.
+      await cdp.send('Target.setAutoAttach', {
+        autoAttach: false,
+        waitForDebuggerOnStart: false,
+        flatten: true,
+      }, sessionId).catch(() => {});
+      for (const entry of [...childSessionsByTarget.values()]) {
+        await cdp.send('Runtime.runIfWaitingForDebugger', {}, entry.sid).catch(() => {});
+      }
+      await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
       offAttached();
+      offDetached();
       offResponse();
       offException();
-      return cdp.send('Target.closeTarget', { targetId }).catch(() => {});
+      attachedSessions.clear();
+      childSessionsByTarget.clear();
     },
   };
 }

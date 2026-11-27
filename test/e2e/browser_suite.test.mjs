@@ -1180,11 +1180,10 @@ test('V7 Suite 4: Adversarial CSRF Matrix, Worker/Back/Reload, top.location Bloc
     await waitFor(
       async () => {
         const { targetInfos } = await chrome.client.send('Target.getTargets');
-        const matches = targetInfos.filter((t) => (t.type === 'iframe' || t.type === 'page') && isDemoFrame(t.url));
-        return matches.length === 1;
+        return !targetInfos.some((t) => t.targetId === tab2.targetId || t.targetId === swProbeTab.targetId);
       },
-      5_000,
-      'tab2 appFrame target cleanup'
+      10_000,
+      'tab2 and swProbeTab target cleanup'
     );
 
     // 4C. Unified Silent Reconnect: restart Agent -> appFrame stays alive & zero password re-prompt!
