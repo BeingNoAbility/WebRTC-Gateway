@@ -1,0 +1,208 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag name (e.g. v5.0.0)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-release-readiness:
+    name: Verify Release Tag, Hygiene & Full Tests
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.validate_tag.outputs.tag }}
+      is_prerelease: ${{ steps.validate_tag.outputs.is_prerelease }}
+    steps:
+      - name: Validate & Resolve Release Tag
+        id: validate_tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$'; then
+            echo "::error::Invalid release tag format: must match vX.Y.Z or vX.Y.Z-(alpha|beta|rc).N"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if printf '%s' "$TAG" | grep -q -- '-'; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ steps.validate_tag.outputs.tag }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24'
+
+      - name: Verify Tag Alignment & Hygiene Gate
+        env:
+          RELEASE_TAG: ${{ steps.validate_tag.outputs.tag }}
+        run: |
+          git rev-parse --verify "refs/tags/${RELEASE_TAG}" >/dev/null
+          node scripts/verify-release-hygiene.mjs --check-tag "$RELEASE_TAG"
+          node --test test/hygiene/release_hygiene.test.mjs
+
+      - name: Build & Test Web, Signaling Conformance, Go (-race) & Chrome E2E
+        run: |
+          npm --prefix web ci
+          npm --prefix web audit --audit-level=high
+          bash scripts/gate.sh --full
+
+  build-matrix:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: verify-release-readiness
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            binary_ext: ''
+            archive_ext: tar.gz
+          - goos: linux
+            goarch: arm64
+            binary_ext: ''
+            archive_ext: tar.gz
+          - goos: windows
+            goarch: amd64
+            binary_ext: .exe
+            archive_ext: zip
+          - goos: windows
+            goarch: arm64
+            binary_ext: .exe
+            archive_ext: zip
+          - goos: darwin
+            goarch: amd64
+            binary_ext: ''
+            archive_ext: tar.gz
+          - goos: darwin
+            goarch: arm64
+            binary_ext: ''
+            archive_ext: tar.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.verify-release-readiness.outputs.tag }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Embedded Web Frontend
+        run: |
+          npm --prefix web ci
+          npm --prefix web run build
+
+      - name: Compile Binaries
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          BIN_EXT: ${{ matrix.binary_ext }}
+          RELEASE_TAG: ${{ needs.verify-release-readiness.outputs.tag }}
+        run: |
+          mkdir -p build_output
+          LDFLAGS="-s -w -buildid= -X main.Version=${RELEASE_TAG}"
+          go build -trimpath -ldflags="$LDFLAGS" -o "build_output/agent${BIN_EXT}" ./cmd/agent
+          go build -trimpath -tags embedweb -ldflags="$LDFLAGS" -o "build_output/signal${BIN_EXT}" ./cmd/signal
+
+      - name: Create Archive
+        id: archive
+        env:
+          RELEASE_TAG: ${{ needs.verify-release-readiness.outputs.tag }}
+          TARGET_OS: ${{ matrix.goos }}
+          TARGET_ARCH: ${{ matrix.goarch }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        run: |
+          ARCHIVE_NAME="webrtc-gateway_${RELEASE_TAG}_${TARGET_OS}_${TARGET_ARCH}"
+          cp README.md README_en.md LICENSE build_output/
+          if [ "$ARCHIVE_EXT" = "zip" ]; then
+            (cd build_output && zip -9 -r "../${ARCHIVE_NAME}.zip" .)
+            echo "filename=${ARCHIVE_NAME}.zip" >> "$GITHUB_OUTPUT"
+          else
+            (cd build_output && tar -czvf "../${ARCHIVE_NAME}.tar.gz" .)
+            echo "filename=${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ${{ steps.archive.outputs.filename }}
+          path: ${{ steps.archive.outputs.filename }}
+          retention-days: 1
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [ verify-release-readiness, build-matrix ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.verify-release-readiness.outputs.tag }}
+          persist-credentials: false
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Generate Checksums
+        run: |
+          cd release_assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
+        with:
+          tag_name: ${{ needs.verify-release-readiness.outputs.tag }}
+          name: ${{ needs.verify-release-readiness.outputs.tag }} - Zero-Client WebRTC P2P Gateway
+          body_path: docs/RELEASE_NOTES.md
+          files: release_assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ needs.verify-release-readiness.outputs.is_prerelease == 'true' }}

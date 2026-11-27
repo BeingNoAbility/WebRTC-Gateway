@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebRTC Gateway</title>
+  <link rel="icon" type="image/svg+xml" href="/__p2p_gw__/favicon.svg">
+  <link rel="stylesheet" href="/__p2p_gw__/portal.css">
+</head>
+<body>
+  <div id="sameSiteBanner"></div>
+  <div id="statusBanner" class="p2p-status-banner"></div>
+
+  <main id="landingView">
+    <section class="p2p-landing-card">
+      <div class="p2p-landing-head">
+        <h1>WebRTC Gateway</h1>
+        <span id="versionBadge" class="p2p-badge"></span>
+      </div>
+      <p id="landingSubtitle" class="p2p-muted"></p>
+      <div id="landingError" class="p2p-modal-error"></div>
+      <form id="landingForm">
+        <input id="nodeIdInput" class="p2p-input" type="text" autocomplete="off" spellcheck="false" required>
+        <button id="connectBtn" class="p2p-btn p2p-btn-primary" type="submit">Connect</button>
+      </form>
+    </section>
+  </main>
+
+  <div id="appStage"></div>
+  <div id="hudHost"></div>
+  <div id="modalHost"></div>
+
+  <script type="module" src="/__p2p_gw__/portal.js"></script>
+</body>
+</html>

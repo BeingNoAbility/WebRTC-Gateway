@@ -1,0 +1,23 @@
+{
+  "name": "webrtc-gateway-docs",
+  "version": "5.0.0-alpha.3",
+  "private": true,
+  "description": "Official documentation site for Zero-Client WebRTC P2P Gateway",
+  "scripts": {
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview",
+    "docs:lint": "node ./scripts/lint-docs.cjs && node ./scripts/lint-mermaid.mjs"
+  },
+  "devDependencies": {
+    "katex": "^0.19.1",
+    "vitepress": "^1.6.4",
+    "vitepress-plugin-mermaid": "^2.0.17",
+    "mermaid": "^11.17.2"
+  },
+  "overrides": {
+    "katex": "$katex",
+    "esbuild": "^0.25.0",
+    "vite": "^6.4.6"
+  }
+}

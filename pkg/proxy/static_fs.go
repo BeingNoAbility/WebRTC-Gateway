@@ -1,0 +1,576 @@
+package proxy
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"html"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+const (
+	maxStaticDirEntries = 10000
+	dirReadBatchSize    = 512
+	maxSymlinkHops      = 16
+
+	// Applied to ALL served files when !inlineActive (blocks extensionless HTML/SVG XSS).
+	staticFileSandboxCSP = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'"
+	// Applied to generated directory listings (includes allow-downloads so browsers permit file downloads).
+	staticDirSandboxCSP = "sandbox allow-downloads; default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:"
+)
+
+// StaticFSOptions configures the minimal Go 1.24+ os.Root read-only static handler.
+type StaticFSOptions struct {
+	RootDir      string // Directory to serve (mutually exclusive with SingleFile)
+	SingleFile   string // Optional single file path to serve at /
+	HideDotfiles bool   // Default true: blocks dotfiles AND multi-hop symlinks reaching dotfiles
+	InlineActive bool   // Default false: applies CSP: sandbox to ALL served files
+}
+
+// StaticFSHandler is a minimal read-only http.Handler backed by Go 1.24+ os.Root
+// plugged directly into HTTPProxy via NewInProcessTransport.
+type StaticFSHandler struct {
+	root         *os.Root
+	singleName   string
+	hideDotfiles bool
+	inlineActive bool
+	closeOnce    sync.Once
+}
+
+func NewStaticFSHandler(opts StaticFSOptions) (*StaticFSHandler, error) {
+	dir := opts.RootDir
+	singleName := ""
+	if opts.SingleFile != "" {
+		abs, err := filepath.Abs(opts.SingleFile)
+		if err != nil {
+			return nil, err
+		}
+		dir = filepath.Dir(abs)
+		singleName = filepath.Base(abs)
+	}
+	if dir == "" {
+		return nil, errors.New("proxy/static: RootDir or SingleFile is required")
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("proxy/static: open os.Root %q: %w", dir, err)
+	}
+	return &StaticFSHandler{
+		root:         root,
+		singleName:   singleName,
+		hideDotfiles: opts.HideDotfiles,
+		inlineActive: opts.InlineActive,
+	}, nil
+}
+
+func (h *StaticFSHandler) Close() error {
+	var err error
+	h.closeOnce.Do(func() {
+		err = h.root.Close()
+	})
+	return err
+}
+
+func (h *StaticFSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cleanReqPath := cleanPathPreserveSlash(r.URL.Path)
+
+	if h.singleName != "" {
+		if cleanReqPath != "/" && cleanReqPath != "/"+h.singleName {
+			http.NotFound(w, r)
+			return
+		}
+		h.serveSingleFile(w, r, h.singleName)
+		return
+	}
+
+	rel := strings.TrimPrefix(cleanReqPath, "/")
+	if rel == "" {
+		rel = "."
+	} else {
+		rel = strings.TrimSuffix(rel, "/")
+	}
+
+	f, resolvedRel, err := h.openSafeRootPath(rel, false)
+	if err != nil {
+		if os.IsNotExist(err) || errors.Is(err, os.ErrPermission) {
+			http.NotFound(w, r)
+		} else {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		}
+		return
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	if fi.IsDir() {
+		if !strings.HasSuffix(cleanReqPath, "/") {
+			// Construct redirect path strictly from os.Root-verified resolvedRel so an open
+			// redirect (`//host/...`) is structurally impossible.
+			targetPath := "/"
+			if resolvedRel != "." {
+				targetPath = "/" + resolvedRel + "/"
+			}
+			redir := (&url.URL{Path: targetPath}).EscapedPath()
+			if !strings.HasPrefix(redir, "/") || strings.HasPrefix(redir, "//") {
+				http.Error(w, "Bad Request", http.StatusBadRequest)
+				return
+			}
+			if r.URL.RawQuery != "" {
+				redir += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, redir, http.StatusMovedPermanently) // #nosec G710 -- root-relative path built from os.Root-verified resolvedRel with // prefix rejected
+			return
+		}
+		idxRel := "index.html"
+		if resolvedRel != "." {
+			idxRel = resolvedRel + "/index.html"
+		}
+		if idxFile, _, ierr := h.openSafeRootPath(idxRel, false); ierr == nil {
+			if idxInfo, serr := idxFile.Stat(); serr == nil && idxInfo.Mode().IsRegular() {
+				defer idxFile.Close()
+				h.applyFileSecurityHeaders(w)
+				http.ServeContent(w, r, "index.html", idxInfo.ModTime(), idxFile)
+				return
+			}
+			_ = idxFile.Close()
+		}
+		h.serveDirListing(w, r, f, resolvedRel, cleanReqPath)
+		return
+	}
+
+	if !fi.Mode().IsRegular() {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
+	h.applyFileSecurityHeaders(w)
+	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
+}
+
+func (h *StaticFSHandler) serveSingleFile(w http.ResponseWriter, r *http.Request, name string) {
+	f, _, err := h.openSafeRootPath(name, true)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	h.applyFileSecurityHeaders(w)
+	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
+}
+
+func validateSymlinkTarget(target string) error {
+	if target == "" {
+		return os.ErrPermission
+	}
+	if strings.ContainsRune(target, '\x00') || strings.ContainsRune(target, '\\') {
+		return os.ErrPermission
+	}
+	if path.IsAbs(target) || filepath.IsAbs(target) || filepath.VolumeName(target) != "" {
+		return os.ErrPermission
+	}
+	// Reject Windows drive-letter targets (e.g. "C:secret" or "c:/secret") even on POSIX hosts.
+	if len(target) >= 2 && target[1] == ':' && ((target[0] >= 'a' && target[0] <= 'z') || (target[0] >= 'A' && target[0] <= 'Z')) {
+		return os.ErrPermission
+	}
+	return nil
+}
+
+// openSafeRootPath iteratively resolves multi-hop symlinks (up to maxSymlinkHops = 16)
+// strictly within os.Root by descending stepwise via os.Root.OpenRoot(seg) with SameFile
+// verification, eliminating intermediate-directory symlink swap TOCTOU and FIFO blocking.
+func (h *StaticFSHandler) openSafeRootPath(rel string, allowSingleDotfile bool) (*os.File, string, error) {
+	curPath := path.Clean(rel)
+	if curPath == "." || curPath == "" {
+		f, err := openRootNoFollowNoBlock(h.root, ".")
+		if err != nil {
+			return nil, "", err
+		}
+		fi, serr := f.Stat()
+		if serr != nil || !fi.IsDir() {
+			_ = f.Close()
+			return nil, "", os.ErrPermission
+		}
+		return f, ".", nil
+	}
+	if strings.HasPrefix(curPath, "/") || curPath == ".." || strings.HasPrefix(curPath, "../") {
+		return nil, "", os.ErrPermission
+	}
+
+	hops := 0
+	for {
+		parts := strings.Split(curPath, "/")
+		curRoot := h.root
+		closeCur := func() {
+			if curRoot != h.root {
+				_ = curRoot.Close()
+				curRoot = h.root
+			}
+		}
+
+		prefix := ""
+		restarted := false
+
+		for i, seg := range parts {
+			if seg == "" || seg == "." {
+				continue
+			}
+			if seg == ".." || strings.ContainsRune(seg, '\\') || strings.ContainsRune(seg, '\x00') {
+				closeCur()
+				return nil, "", os.ErrPermission
+			}
+			allowDot := allowSingleDotfile && hops == 0 && len(parts) == 1 && seg == h.singleName
+			if h.hideDotfiles && strings.HasPrefix(seg, ".") && !allowDot {
+				closeCur()
+				return nil, "", os.ErrPermission
+			}
+			if prefix == "" {
+				prefix = seg
+			} else {
+				prefix = prefix + "/" + seg
+			}
+
+			li, err := curRoot.Lstat(seg)
+			if err != nil {
+				closeCur()
+				return nil, "", err
+			}
+			if li.Mode()&os.ModeSymlink != 0 {
+				hops++
+				if hops > maxSymlinkHops {
+					closeCur()
+					return nil, "", os.ErrPermission
+				}
+				target, rerr := curRoot.Readlink(seg)
+				if rerr != nil {
+					closeCur()
+					return nil, "", os.ErrPermission
+				}
+				if verr := validateSymlinkTarget(target); verr != nil {
+					closeCur()
+					return nil, "", os.ErrPermission
+				}
+				parent := path.Dir(prefix)
+				var resolved string
+				if parent == "." {
+					resolved = path.Clean(target)
+				} else {
+					resolved = path.Clean(parent + "/" + target)
+				}
+				if resolved == ".." || strings.HasPrefix(resolved, "../") || strings.HasPrefix(resolved, "/") {
+					closeCur()
+					return nil, "", os.ErrPermission
+				}
+				if h.hideDotfiles {
+					for _, tSeg := range strings.Split(resolved, "/") {
+						if tSeg != "" && tSeg != "." && strings.HasPrefix(tSeg, ".") {
+							closeCur()
+							return nil, "", os.ErrPermission
+						}
+					}
+				}
+				rest := parts[i+1:]
+				if len(rest) > 0 {
+					if resolved == "." {
+						curPath = path.Clean(strings.Join(rest, "/"))
+					} else {
+						curPath = path.Clean(resolved + "/" + strings.Join(rest, "/"))
+					}
+				} else {
+					curPath = resolved
+				}
+				closeCur()
+				if curPath == "." {
+					f, oerr := openRootNoFollowNoBlock(h.root, ".")
+					if oerr != nil {
+						return nil, "", oerr
+					}
+					fi, serr := f.Stat()
+					if serr != nil || !fi.IsDir() {
+						_ = f.Close()
+						return nil, "", os.ErrPermission
+					}
+					return f, ".", nil
+				}
+				restarted = true
+				break
+			}
+
+			if i < len(parts)-1 {
+				if !li.IsDir() {
+					closeCur()
+					return nil, "", os.ErrNotExist
+				}
+				nextRoot, oerr := curRoot.OpenRoot(seg)
+				if oerr != nil {
+					closeCur()
+					return nil, "", oerr
+				}
+				nextFi, serr := nextRoot.Stat(".")
+				if serr != nil || !nextFi.IsDir() || !os.SameFile(li, nextFi) {
+					_ = nextRoot.Close()
+					closeCur()
+					return nil, "", os.ErrPermission
+				}
+				closeCur()
+				curRoot = nextRoot
+				continue
+			}
+
+			// Final component: verify regular file or directory BEFORE opening, then open directly on pinned parent os.Root.
+			if !li.Mode().IsRegular() && !li.IsDir() {
+				closeCur()
+				return nil, "", os.ErrPermission
+			}
+			f, oerr := openRootNoFollowNoBlock(curRoot, seg)
+			closeCur()
+			if oerr != nil {
+				return nil, "", oerr
+			}
+			fi, serr := f.Stat()
+			if serr != nil || (!fi.Mode().IsRegular() && !fi.IsDir()) || !os.SameFile(li, fi) {
+				_ = f.Close()
+				return nil, "", os.ErrPermission
+			}
+			return f, prefix, nil
+		}
+
+		if !restarted {
+			closeCur()
+			f, err := openRootNoFollowNoBlock(h.root, ".")
+			if err != nil {
+				return nil, "", err
+			}
+			return f, ".", nil
+		}
+	}
+}
+
+// applyFileSecurityHeaders applies Fail-Closed CSP: sandbox to ALL files unless -file-inline-active
+// is explicitly set (prevents extensionless HTML / MIME-sniffing script execution).
+func (h *StaticFSHandler) applyFileSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if !h.inlineActive {
+		w.Header().Set("Content-Security-Policy", staticFileSandboxCSP)
+	}
+}
+
+func (h *StaticFSHandler) serveDirListing(w http.ResponseWriter, r *http.Request, dir *os.File, resolvedRel, displayPath string) {
+	type item struct {
+		name  string
+		isDir bool
+	}
+	var items []item
+	truncated := false
+
+	for len(items) < maxStaticDirEntries {
+		if r.Context().Err() != nil {
+			return
+		}
+		batch, err := dir.ReadDir(dirReadBatchSize)
+		for _, de := range batch {
+			name := de.Name()
+			if h.hideDotfiles && strings.HasPrefix(name, ".") {
+				continue
+			}
+			isDir := false
+			typ := de.Type()
+			if typ&os.ModeSymlink != 0 || typ == 0 {
+				childRel := name
+				if resolvedRel != "." {
+					childRel = resolvedRel + "/" + name
+				}
+				cf, _, cerr := h.openSafeRootPath(childRel, false)
+				if cerr != nil {
+					continue // Hide broken, escaping, dotfile-target, or disallowed symlinks.
+				}
+				cfi, serr := cf.Stat()
+				_ = cf.Close()
+				if serr != nil || (!cfi.Mode().IsRegular() && !cfi.IsDir()) {
+					continue
+				}
+				isDir = cfi.IsDir()
+			} else if typ.IsDir() {
+				isDir = true
+			} else if !typ.IsRegular() {
+				continue // Hide FIFOs, sockets, and device nodes.
+			}
+			items = append(items, item{name: name, isDir: isDir})
+			if len(items) >= maxStaticDirEntries {
+				truncated = true
+				break
+			}
+		}
+		if err == io.EOF || truncated {
+			break
+		}
+		if err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].isDir != items[j].isDir {
+			return items[i].isDir
+		}
+		return strings.ToLower(items[i].name) < strings.ToLower(items[j].name)
+	})
+
+	var buf bytes.Buffer
+	buf.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>Index of ")
+	buf.WriteString(html.EscapeString(displayPath))
+	buf.WriteString("</title></head><body><h1>Index of ")
+	buf.WriteString(html.EscapeString(displayPath))
+	buf.WriteString("</h1><ul>")
+	if displayPath != "/" {
+		buf.WriteString(`<li><a href="../">../</a></li>`)
+	}
+	for _, it := range items {
+		label := it.name
+		if it.isDir {
+			label += "/"
+		}
+		href := "./" + (&url.URL{Path: it.name}).EscapedPath()
+		if it.isDir {
+			href += "/"
+		}
+		buf.WriteString(`<li><a href="`)
+		buf.WriteString(html.EscapeString(href))
+		buf.WriteString(`">`)
+		buf.WriteString(html.EscapeString(label))
+		buf.WriteString("</a></li>")
+	}
+	buf.WriteString("</ul></body></html>\n")
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", staticDirSandboxCSP)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		_, _ = w.Write(buf.Bytes())
+	}
+}
+
+// NewInProcessTransport adapts any standard http.Handler into a race-free http.RoundTripper
+// with atomic header snapshots, accurate ContentLength, cancellation propagation, and panic recovery.
+func NewInProcessTransport(handler http.Handler) http.RoundTripper {
+	return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		rw := newPipeResponseWriter(pw)
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					if !rw.wroteHeader {
+						rw.header.Set("Content-Type", "text/plain; charset=utf-8")
+						rw.WriteHeader(http.StatusInternalServerError)
+					}
+					_ = pw.CloseWithError(fmt.Errorf("static handler panic: %v", rec))
+					return
+				}
+				rw.finish()
+			}()
+			handler.ServeHTTP(rw, req)
+		}()
+
+		select {
+		case <-rw.hdrReady:
+		case <-req.Context().Done():
+			_ = pr.Close()
+			return nil, req.Context().Err()
+		}
+
+		hdr := rw.snapshotHeader
+		var contentLen int64 = -1
+		if cl := hdr.Get("Content-Length"); cl != "" {
+			if n, err := strconv.ParseInt(strings.TrimSpace(cl), 10, 64); err == nil && n >= 0 {
+				contentLen = n
+			}
+		}
+		return &http.Response{
+			StatusCode:    rw.status,
+			Status:        fmt.Sprintf("%d %s", rw.status, http.StatusText(rw.status)),
+			Proto:         "HTTP/1.1",
+			ProtoMajor:    1,
+			ProtoMinor:    1,
+			Header:        hdr,
+			Body:          pr,
+			ContentLength: contentLen,
+			Request:       req,
+		}, nil
+	})
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+type pipeResponseWriter struct {
+	header         http.Header
+	snapshotHeader http.Header
+	pw             *io.PipeWriter
+	status         int
+	wroteHeader    bool
+	hdrReady       chan struct{}
+	once           sync.Once
+}
+
+func newPipeResponseWriter(pw *io.PipeWriter) *pipeResponseWriter {
+	return &pipeResponseWriter{
+		header:   make(http.Header),
+		pw:       pw,
+		status:   http.StatusOK,
+		hdrReady: make(chan struct{}),
+	}
+}
+
+func (w *pipeResponseWriter) Header() http.Header { return w.header }
+
+func (w *pipeResponseWriter) WriteHeader(code int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.status = code
+	// Snapshot headers strictly BEFORE closing hdrReady (eliminates data race with RoundTrip!).
+	w.snapshotHeader = w.header.Clone()
+	w.once.Do(func() { close(w.hdrReady) })
+}
+
+func (w *pipeResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.pw.Write(p)
+}
+
+func (w *pipeResponseWriter) finish() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	_ = w.pw.Close()
+}

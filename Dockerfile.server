@@ -1,0 +1,59 @@
+# ==============================================================================
+# Dockerfile.server - Zero-Client WebRTC P2P Integrated Signaling Server
+# ==============================================================================
+
+FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS web-builder
+WORKDIR /build
+COPY VERSION ./VERSION
+WORKDIR /build/web
+
+COPY web/package*.json ./
+RUN npm ci
+
+COPY web/ ./
+RUN npm run build
+
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS server-builder
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ARG VERSION=dev
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY pkg/ ./pkg/
+COPY cmd/ ./cmd/
+COPY --from=web-builder /build/web/dist ./web/dist
+COPY web/assets_embed.go ./web/assets_embed.go
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -trimpath \
+    -tags embedweb \
+    -ldflags="-s -w -buildid= -X main.Version=${VERSION}" \
+    -o /build/server ./cmd/signal
+
+FROM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -g 10001 -S appgroup && \
+    adduser -u 10001 -S appuser -G appgroup -H -D && \
+    mkdir -p /app /var/lib/webrtc-gateway && \
+    chown root:root /app && chmod 0555 /app && \
+    chown 10001:10001 /var/lib/webrtc-gateway && chmod 0700 /var/lib/webrtc-gateway
+
+WORKDIR /app
+COPY --from=server-builder --chown=root:root --chmod=0555 /build/server /app/server
+
+# No default ENV values are baked into the image so YAML -config files and
+# cmd/signal's Fail-Closed defaults (including allow_force_rekey=false under shared
+# SIGNAL_SECRET) are never silently overridden. Mount /var/lib/webrtc-gateway for state.
+
+EXPOSE 8888
+
+USER 10001:10001
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD /app/server -health || exit 1
+
+ENTRYPOINT ["/app/server"]

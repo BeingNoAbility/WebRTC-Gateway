@@ -1,0 +1,64 @@
+# WebRTC Gateway Agent Configuration Example
+# Load explicitly via `-config /path/to/agent.yaml` or `CONFIG_FILE=/path/to/agent.yaml`.
+# Never auto-loads config files from the current working directory.
+# Prefer environment variables (`ACCESS_SECRET_FILE`, `SIGNAL_SECRET_FILE`) over plaintext secrets in files.
+
+node_id: "homeserver"
+signal_url: "wss://portal.example.com/ws"
+
+# Shared cluster or per-node secret for signaling server HTTP Upgrade Bearer authentication.
+# Leave empty here and pass via SIGNAL_SECRET_FILE or SIGNAL_SECRET env in production.
+signal_secret: ""
+
+# Allow plaintext ws:// signaling on non-loopback hosts when signal_secret is set (Fail-Closed default false).
+allow_insecure_signal: false
+
+# Force-update bound Ed25519 node ownership on signaling server (requires signal_secret & server allow_force_rekey).
+force_rekey: false
+
+# Visitor access password for in-DTLS RFC 9383 SPAKE2+ authentication (Fail-Closed unless allow_public: true).
+# Leave empty here and pass via ACCESS_SECRET_FILE or ACCESS_SECRET env in production.
+access_secret: ""
+allow_public: false
+
+# Persistent Ed25519 identity private key PEM path (auto-generated with 0600 perms if missing).
+identity_key: "/var/lib/webrtc-gateway/homeserver.ed25519.key"
+# Persistent capability revocation / state file (auto-created with 0600 perms when configured).
+state_file: "/var/lib/webrtc-gateway/homeserver.state.json"
+ephemeral_identity: false
+
+# Specify EXACTLY ONE of: target_url, dir_path, or file_path.
+target_url: "http://127.0.0.1:8080"
+# dir_path: "/srv/static"
+# file_path: "/srv/static/release.tar.gz"
+
+# Static os.Root adapter security options (applies to dir_path / file_path):
+hide_dotfiles: true
+file_inline_active: false
+
+# Optional RFC 9110 host[:port] Host header override for virtual-host reverse proxies behind target_url.
+upstream_host: ""
+
+# Optional outbound HTTP/HTTPS/SOCKS5 proxy URL for target_url.
+proxy_url: ""
+
+# Optional TLS overrides for HTTPS target_url backends:
+sni: ""
+insecure_target: false
+
+# ICE / NAT traversal settings:
+# Obfuscate local LAN/Docker/VPN host ICE candidates via mDNS (default true).
+ice_mdns: true
+stun_servers: "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
+turn_url: ""
+turn_user: ""
+turn_pass: ""
+
+# Global concurrent stream ceiling across all visitors.
+max_streams: 512
+
+# Optional loopback-only Prometheus /metrics + /healthz endpoint.
+metrics_addr: "127.0.0.1:9091"
+
+# Portal base URL used when printing share links with `-mint-link`.
+portal_url: "https://portal.example.com"

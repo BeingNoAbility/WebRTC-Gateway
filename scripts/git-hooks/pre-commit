@@ -1,0 +1,25 @@
+#!/bin/sh
+# Git Pre-Commit Hook for WebRTC Gateway
+# Enforces release hygiene, version parity, zero tracked web/dist, and Go formatting.
+
+if [ "$SKIP_HYGIENE_CHECK" = "1" ]; then
+    exit 0
+fi
+
+node scripts/verify-release-hygiene.mjs
+hygiene_status=$?
+if [ "$hygiene_status" -ne 0 ]; then
+    echo "[Git Pre-Commit Hook] Release hygiene or version parity check failed."
+    echo "Set SKIP_HYGIENE_CHECK=1 to bypass if strictly necessary."
+    exit 1
+fi
+
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+    echo "[Git Pre-Commit Hook] Unformatted Go files detected:"
+    echo "$unformatted"
+    echo "Run 'gofmt -w .' before committing."
+    exit 1
+fi
+
+exit 0

@@ -1,0 +1,244 @@
+/* ==========================================================================
+ * WebRTC Gateway Docs Custom Theme Enhancements
+ * 1. Fluid desktop doc width & adaptive wrapping tables (zero desktop horizontal scroll)
+ * 2. Build-time KaTeX math presentation
+ * 3. Interactive Mermaid pan / zoom / fullscreen viewport
+ * ========================================================================== */
+
+/* Keep VitePress's native --vp-layout-max-width (1440px) intact so the navbar
+ * and sidebar stay pixel-aligned at every viewport width; reclaim wasted inner
+ * whitespace inside .VPDoc so wide reference tables fit naturally. */
+@media (min-width: 960px) {
+  .VPDoc .content {
+    padding: 0 20px 128px;
+  }
+}
+
+@media (min-width: 1280px) {
+  .VPDoc .aside {
+    max-width: 212px;
+    padding-left: 20px;
+  }
+
+  .VPDoc.has-aside .content-container {
+    max-width: min(100%, 960px) !important;
+  }
+
+  .VPDoc:not(.has-aside) .content-container {
+    max-width: min(100%, 1080px) !important;
+  }
+}
+
+/* ==========================================================================
+ * 1. Adaptive Wrapping Tables (no horizontal scrollbar on desktop/tablet)
+ * ========================================================================== */
+
+@media (min-width: 768px) {
+  .vp-doc table {
+    display: table;
+    width: 100%;
+    table-layout: auto;
+    overflow-x: visible;
+  }
+}
+
+.vp-doc th,
+.vp-doc td {
+  padding: 8px 10px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  vertical-align: top;
+  overflow-wrap: break-word;
+}
+
+.vp-doc th {
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.vp-doc td code,
+.vp-doc th code {
+  font-size: 0.82em;
+  white-space: normal;
+  overflow-wrap: break-word;
+  padding: 1px 4px;
+  line-height: 1.45;
+}
+
+/* On narrower tablet widths (768px..1199px), allow long unhyphenated tokens
+ * (e.g. UPPER_SNAKE_CASE env vars) to wrap cleanly instead of overflowing. */
+@media (max-width: 1199px) {
+  .vp-doc td,
+  .vp-doc td code {
+    overflow-wrap: anywhere;
+  }
+}
+
+/* Preserve clean horizontal scroll fallback only on narrow phone viewports */
+@media (max-width: 767px) {
+  .vp-doc table {
+    display: block;
+    overflow-x: auto;
+    width: 100%;
+  }
+}
+
+/* ==========================================================================
+ * 2. KaTeX Math Rendering
+ * ========================================================================== */
+
+.vp-katex-block {
+  margin: 18px 0;
+  padding: 14px 16px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+  border-radius: 8px;
+  background-color: var(--vp-c-bg-soft);
+}
+
+.vp-katex-block .katex-display {
+  margin: 0;
+}
+
+.vp-katex-inline .katex {
+  font-size: 1.04em;
+}
+
+/* ==========================================================================
+ * 3. Interactive Mermaid Pan / Zoom / Fullscreen Viewport
+ * ========================================================================== */
+
+.vp-doc .mermaid.vp-mermaid-interactive {
+  position: relative;
+  margin: 20px 0;
+  padding: 42px 16px 28px;
+  overflow: hidden;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 10px;
+  background-color: var(--vp-c-bg-soft);
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: pan-y;
+}
+
+.vp-doc .mermaid.vp-mermaid-interactive.is-dragging {
+  cursor: grabbing;
+}
+
+.vp-doc .mermaid.vp-mermaid-interactive > svg {
+  margin: 0 auto;
+  will-change: transform;
+}
+
+.vp-mermaid-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  background-color: color-mix(in srgb, var(--vp-c-bg) 88%, transparent);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.vp-mermaid-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--vp-c-text-1);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.vp-mermaid-btn:hover {
+  background-color: var(--vp-c-default-soft);
+  color: var(--vp-c-brand-1);
+}
+
+.vp-mermaid-btn:focus-visible {
+  outline: 2px solid var(--vp-c-brand-1);
+  outline-offset: 1px;
+}
+
+.vp-mermaid-btn-pct {
+  min-width: 46px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--vp-c-text-2);
+}
+
+.vp-mermaid-hint {
+  position: absolute;
+  left: 12px;
+  bottom: 6px;
+  z-index: 3;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--vp-c-text-3);
+  pointer-events: none;
+  opacity: 0.78;
+  transition: opacity 0.2s ease;
+}
+
+.vp-doc .mermaid.vp-mermaid-interactive:hover .vp-mermaid-hint {
+  opacity: 1;
+}
+
+/* Fullscreen modal overlay (CSS-only promotion keeps Vue DOM ancestry intact) */
+.vp-doc .mermaid.vp-mermaid-fullscreen {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 1000 !important;
+  margin: 0 !important;
+  padding: 56px 24px 36px !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  border: none !important;
+  border-radius: 0 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--vp-c-bg);
+  background-image: radial-gradient(var(--vp-c-divider) 1px, transparent 1px);
+  background-size: 20px 20px;
+  touch-action: none;
+}
+
+.vp-doc .mermaid.vp-mermaid-fullscreen > svg {
+  max-height: calc(100vh - 112px);
+  max-width: calc(100vw - 64px);
+}
+
+.vp-doc .mermaid.vp-mermaid-fullscreen .vp-mermaid-toolbar {
+  top: 14px;
+  right: 16px;
+  padding: 4px;
+}
+
+.vp-doc .mermaid.vp-mermaid-fullscreen .vp-mermaid-hint {
+  left: 16px;
+  bottom: 12px;
+  font-size: 12px;
+}
+
+body.vp-mermaid-scroll-lock {
+  overflow: hidden;
+}

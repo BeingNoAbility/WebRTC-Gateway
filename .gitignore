@@ -1,0 +1,50 @@
+# Binaries and build outputs
+bin/
+build_output/
+release_assets/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*_linux_amd64
+
+# Frontend build output (generated at build / CI / Release time; never committed)
+web/dist/
+
+# Dependencies
+node_modules/
+web/node_modules/
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files and archives
+*.tmp
+*.zip
+*.tar.gz
+
+# Local test configurations, identity keys, and private environment variables
+.env
+.env.*
+!.env.example
+*.ed25519.key
+test/*.local.json
+test/*.local.env
+*.local.json
+.hygiene-private-patterns.local

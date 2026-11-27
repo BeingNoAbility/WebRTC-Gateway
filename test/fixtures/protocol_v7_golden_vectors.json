@@ -1,0 +1,194 @@
+{
+  "version": 7,
+  "valid_frames": [
+    {
+      "name": "ping_8b_seq1",
+      "gen": 0,
+      "type": 8,
+      "flags": 0,
+      "payload_hex": "0000000000000001",
+      "wire_hex": "00000000080000080000000000000001"
+    },
+    {
+      "name": "pong_8b_max_u64",
+      "gen": 0,
+      "type": 9,
+      "flags": 0,
+      "payload_hex": "ffffffffffffffff",
+      "wire_hex": "0000000009000008ffffffffffffffff"
+    },
+    {
+      "name": "goaway_going_away",
+      "gen": 0,
+      "type": 10,
+      "flags": 0,
+      "payload_hex": "00000009",
+      "wire_hex": "000000000a00000400000009"
+    },
+    {
+      "name": "headers_more_and_fin",
+      "gen": 5,
+      "type": 16,
+      "flags": 5,
+      "payload_hex": "deadbeef",
+      "wire_hex": "0000000510050004deadbeef"
+    },
+    {
+      "name": "continuation_nonfinal_nonempty",
+      "gen": 5,
+      "type": 17,
+      "flags": 4,
+      "payload_hex": "aa",
+      "wire_hex": "0000000511040001aa"
+    },
+    {
+      "name": "continuation_final",
+      "gen": 5,
+      "type": 17,
+      "flags": 0,
+      "payload_hex": "cafebabe",
+      "wire_hex": "0000000511000004cafebabe"
+    },
+    {
+      "name": "data_empty_fin",
+      "gen": 7,
+      "type": 18,
+      "flags": 1,
+      "payload_hex": "",
+      "wire_hex": "0000000712010000"
+    },
+    {
+      "name": "credit_high_bit_gen",
+      "gen": 2147483649,
+      "type": 19,
+      "flags": 0,
+      "payload_hex": "7fffffff",
+      "wire_hex": "80000001130000047fffffff"
+    },
+    {
+      "name": "reset_auth_required",
+      "gen": 3,
+      "type": 20,
+      "flags": 0,
+      "payload_hex": "00000007",
+      "wire_hex": "000000031400000400000007"
+    },
+    {
+      "name": "ws_text_single_chunk_fin",
+      "gen": 1,
+      "type": 33,
+      "flags": 2,
+      "payload_hex": "68656c6c6f",
+      "wire_hex": "000000012102000568656c6c6f"
+    },
+    {
+      "name": "ws_cont_nonfinal_nonempty",
+      "gen": 1,
+      "type": 35,
+      "flags": 0,
+      "payload_hex": "bb",
+      "wire_hex": "0000000123000001bb"
+    },
+    {
+      "name": "ws_cont_final",
+      "gen": 1,
+      "type": 35,
+      "flags": 2,
+      "payload_hex": "776f726c64",
+      "wire_hex": "0000000123020005776f726c64"
+    },
+    {
+      "name": "ws_close_normal",
+      "gen": 1,
+      "type": 36,
+      "flags": 0,
+      "payload_hex": "03e8627965",
+      "wire_hex": "000000012400000503e8627965"
+    }
+  ],
+  "invalid_frames": [
+    { "name": "truncated_header_7b", "wire_hex": "00000001120000" },
+    { "name": "trailing_extra_byte", "wire_hex": "0000000712010000ff" },
+    { "name": "unknown_type_0xff", "wire_hex": "00000001ff000000" },
+    { "name": "legacy_cookie_sync_0x07_removed", "wire_hex": "00000000070000027b7d" },
+    { "name": "ping_oversized_9b", "wire_hex": "0000000008000009000000000000000100" },
+    { "name": "ping_nonzero_gen", "wire_hex": "00000001080000080000000000000001" },
+    { "name": "credit_zero_delta", "wire_hex": "000000011300000400000000" },
+    { "name": "credit_msb_set", "wire_hex": "000000011300000480000000" },
+    { "name": "continuation_with_fin_forbidden", "wire_hex": "0000000111010001aa" },
+    { "name": "continuation_0b_nonfinal_forbidden", "wire_hex": "0000000111040000" },
+    { "name": "ws_cont_0b_nonfinal_forbidden", "wire_hex": "0000000123000000" },
+    { "name": "headers_reserved_flag_0xfa", "wire_hex": "0000000110fa0000" },
+    { "name": "data_gen_zero", "wire_hex": "0000000012000001aa" },
+    { "name": "ws_close_too_short_1b", "wire_hex": "000000012400000103" }
+  ],
+  "tlv_requests": [
+    {
+      "name": "http_get_v7_with_cookie_mutations",
+      "kind": 1,
+      "fetch_ctx": 5,
+      "method": "GET",
+      "target": "/api/v1/items?a=1&b=2",
+      "headers": [
+        { "name": "accept", "value": "application/json" },
+        { "name": "x-trace", "value": "t-1" }
+      ],
+      "cookie_mutations": [
+        { "op": 1, "name": "theme", "value": "dark", "path": "/", "expires_ms": 1800000000000 },
+        { "op": 2, "name": "old", "value": "", "path": "/app", "expires_ms": 0 }
+      ],
+      "hex": "01050347455400152f6170692f76312f6974656d733f613d3126623d320002000661636365707400106170706c69636174696f6e2f6a736f6e0007782d74726163650003742d31000201057468656d6500046461726b00012f000001a3185c500002036f6c64000000042f6170700000000000000000"
+    },
+    {
+      "name": "ws_connect_utf8",
+      "kind": 2,
+      "fetch_ctx": 1,
+      "method": "GET",
+      "target": "/ws/聊天室",
+      "headers": [
+        { "name": "sec-websocket-protocol", "value": "chat.v1" },
+        { "name": "x-room-label", "value": "测试房间🚀" }
+      ],
+      "cookie_mutations": [],
+      "hex": "020103474554000d2f77732fe8818ae5a4a9e5aea4000200167365632d776562736f636b65742d70726f746f636f6c0007636861742e7631000c782d726f6f6d2d6c6162656c0010e6b58be8af95e688bfe997b4f09f9a800000"
+    }
+  ],
+  "tlv_responses": [
+    {
+      "name": "http_200_v7_gzip_with_cookie_deltas",
+      "status": 200,
+      "resp_flags": 1,
+      "headers": [
+        { "name": "content-type", "value": "text/html; charset=utf-8" }
+      ],
+      "cookie_deltas": [
+        { "op": 1, "name": "theme", "value": "dark", "path": "/", "expires_ms": 1800000000000 },
+        { "op": 2, "name": "stale", "value": "", "path": "/", "expires_ms": 0 }
+      ],
+      "hex": "00c8010001000c636f6e74656e742d747970650018746578742f68746d6c3b20636861727365743d7574662d38000201057468656d6500046461726b00012f000001a3185c500002057374616c65000000012f0000000000000000"
+    }
+  ],
+  "rfc9383_appendix_c": {
+    "suite": "SPAKE2+-P256-SHA256-HKDF-SHA256-HMAC-SHA256",
+    "context": "SPAKE2+-P256-SHA256-HKDF-SHA256-HMAC-SHA256 Test Vectors",
+    "id_prover": "client",
+    "id_verifier": "server",
+    "w0_hex": "bb8e1bbcf3c48f62c08db243652ae55d3e5586053fca77102994f23ad95491b3",
+    "w1_hex": "7e945f34d78785b8a3ef44d0df5a1a97d6b3b460409a345ca7830387a74b1dba",
+    "L_hex": "04eb7c9db3d9a9eb1f8adab81b5794c1f13ae3e225efbe91ea487425854c7fc00f00bfedcbd09b2400142d40a14f2064ef31dfaa903b91d1faea7093d835966efd",
+    "x_hex": "d1232c8e8693d02368976c174e2088851b8365d0d79a9eee709c6a05a2fad539",
+    "share_p_hex": "04ef3bd051bf78a2234ec0df197f7828060fe9856503579bb1733009042c15c0c1de127727f418b5966afadfdd95a6e4591d171056b333dab97a79c7193e341727",
+    "y_hex": "717a72348a182085109c8d3917d6c43d59b224dc6a7fc4f0483232fa6516d8b3",
+    "share_v_hex": "04c0f65da0d11927bdf5d560c69e1d7d939a05b0e88291887d679fcadea75810fb5cc1ca7494db39e82ff2f50665255d76173e09986ab46742c798a9a68437b048",
+    "confirm_p_hex": "926cc713504b9b4d76c9162ded04b5493e89109f6d89462cd33adc46fda27527",
+    "confirm_v_hex": "9747bcc4f8fe9f63defee53ac9b07876d907d55047e6ff2def2e7529089d3e68",
+    "shared_key_hex": "0c5f8ccd1413423a54f6c1fb26ff01534a87f893779c6e68666d772bfd91f3e7"
+  },
+  "v7_spake2p_kdf": {
+    "password": "v7-golden-password",
+    "node_id": "node-golden",
+    "agent_pk_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "w0_hex": "41f64610b86eadeb8d75173b3652b5cc2b8a76a02296dbe9417b816e289e45f3",
+    "w1_hex": "84a96bb9979c1b9f6d7836fb022f80591415ad63c575837b1ff3369f361d4ed0"
+  }
+}

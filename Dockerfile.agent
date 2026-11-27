@@ -1,0 +1,43 @@
+# ==============================================================================
+# Dockerfile.agent - Zero-Client WebRTC P2P Gateway Agent
+# ==============================================================================
+
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS agent-builder
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ARG VERSION=dev
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY pkg/ ./pkg/
+COPY cmd/ ./cmd/
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -trimpath \
+    -ldflags="-s -w -buildid= -X main.Version=${VERSION}" \
+    -o /build/agent ./cmd/agent
+
+FROM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -g 10001 -S appgroup && \
+    adduser -u 10001 -S appuser -G appgroup -H -D && \
+    mkdir -p /app /var/lib/webrtc-gateway && \
+    chown root:root /app && chmod 0555 /app && \
+    chown 10001:10001 /var/lib/webrtc-gateway && chmod 0700 /var/lib/webrtc-gateway
+
+WORKDIR /app
+COPY --from=agent-builder --chown=root:root --chmod=0555 /build/agent /app/agent
+
+# No default ENV values are baked into the image so YAML -config files and
+# cmd/agent's Fail-Closed defaults are never silently overridden.
+# Mount /var/lib/webrtc-gateway for persistent Ed25519 identity and capability state.
+
+USER 10001:10001
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD /app/agent -health || exit 1
+
+ENTRYPOINT ["/app/agent"]

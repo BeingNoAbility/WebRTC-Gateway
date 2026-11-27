@@ -1,0 +1,122 @@
+# ==============================================================================
+# Zero-Client WebRTC P2P Gateway - Hardened Docker Compose
+#
+# Quick start:
+#   1. Create a local `.env` (gitignored) with:
+#        SIGNAL_SECRET=<strong-random-cluster-secret>
+#        ACCESS_SECRET=<strong-visitor-access-secret>
+#        PORTAL_DOMAIN=portal.example.com
+#        SANDBOX_HOST=app.example.net       # Tier 1 fixed dual-domain (or set SANDBOX_DOMAIN for Tier 3 wildcard)
+#   2. Run: docker compose up -d
+#   3. Mint a scoped Ed25519 share link:
+#        docker compose run --rm agent -mint-link 24h -mint-readonly -portal-url https://portal.example.com
+# ==============================================================================
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: ghcr.io/beingnoability/webrtc-p2p-server:v5.0.0-alpha.3
+    container_name: webrtc-p2p-server
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "1.0"
+    healthcheck:
+      test: ["CMD", "/app/server", "-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    ports:
+      - "8888:8888"
+    environment:
+      - ADDR=:8888
+      - PORTAL_DOMAIN=${PORTAL_DOMAIN?Set PORTAL_DOMAIN in .env (e.g. portal.example.com)}
+      - SANDBOX_HOST=${SANDBOX_HOST:-}
+      - SANDBOX_DOMAIN=${SANDBOX_DOMAIN:-}
+      - ALLOW_SAME_SITE_SANDBOX=${ALLOW_SAME_SITE_SANDBOX:-false}
+      - BOUND_KEYS_FILE=/var/lib/webrtc-gateway/bound-keys.json
+      - NODE_SECRETS_FILE=${NODE_SECRETS_FILE:-}
+      - SIGNAL_SECRET=${SIGNAL_SECRET:-}
+      - ALLOW_FORCE_REKEY=${ALLOW_FORCE_REKEY:-}
+      - ALLOW_ANONYMOUS_AGENTS=${ALLOW_ANONYMOUS_AGENTS:-false}
+      - TLS_AUTO=${TLS_AUTO:-false}
+      - TLS_CERT=${TLS_CERT:-}
+      - TLS_KEY=${TLS_KEY:-}
+      - MAX_IP_CONNS=${MAX_IP_CONNS:-64}
+      - MAX_IP_MSGS=${MAX_IP_MSGS:-120}
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-127.0.0.0/8,::1/128}
+      - CLIENT_IP_HEADER=${CLIENT_IP_HEADER:-}
+    volumes:
+      - signal_state:/var/lib/webrtc-gateway
+      - /etc/localtime:/etc/localtime:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    image: ghcr.io/beingnoability/webrtc-p2p-agent:v5.0.0-alpha.3
+    container_name: webrtc-p2p-agent
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "2.0"
+    network_mode: "host"
+    environment:
+      - NODE_ID=${NODE_ID:-homeserver}
+      - SIGNAL_URL=${SIGNAL_URL:-ws://127.0.0.1:8888/ws}
+      - SIGNAL_SECRET=${SIGNAL_SECRET?Set SIGNAL_SECRET in .env}
+      - ACCESS_SECRET=${ACCESS_SECRET?Set ACCESS_SECRET in .env (or set ACCESS_SECRET= with ALLOW_PUBLIC=true)}
+      - ALLOW_PUBLIC=${ALLOW_PUBLIC:-false}
+      - IDENTITY_KEY=/var/lib/webrtc-gateway/agent.ed25519.key
+      - STATE_FILE=/var/lib/webrtc-gateway/agent.state.json
+      - TARGET_URL=${TARGET_URL:-http://127.0.0.1:8080}
+      - ICE_MDNS=${ICE_MDNS:-true}
+      - INSECURE_TARGET=${INSECURE_TARGET:-false}
+      - UPSTREAM_HOST=${UPSTREAM_HOST:-}
+      - STUN_SERVERS=${STUN_SERVERS:-}
+      - TURN_URL=${TURN_URL:-}
+      - TURN_USER=${TURN_USER:-}
+      - TURN_PASS=${TURN_PASS:-}
+      - MAX_STREAMS=${MAX_STREAMS:-512}
+      - METRICS_ADDR=${METRICS_ADDR:-127.0.0.1:9091}
+    volumes:
+      - agent_identity:/var/lib/webrtc-gateway
+      - /etc/localtime:/etc/localtime:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  signal_state:
+  agent_identity:

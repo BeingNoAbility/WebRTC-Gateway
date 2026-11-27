@@ -1,0 +1,48 @@
+# WebRTC Gateway Signaling Server Configuration Example
+# Load explicitly via `-config /path/to/server.yaml` or `CONFIG_FILE=/path/to/server.yaml`.
+# Never auto-loads config files from the current working directory.
+
+addr: "0.0.0.0:8888"
+
+# Optional external directory overriding embedded web assets (leave empty to serve embedded assets).
+static_dir: ""
+
+# TLS settings (either mount PEM cert/key with hot-reload or set tls_auto: true for local/dev self-signed TLS).
+tls_auto: false
+tls_cert: ""
+tls_key: ""
+
+# Cluster admission secret for Agent HTTP Upgrade Bearer authentication (Fail-Closed unless allow_anonymous_agents: true).
+# Leave empty here and pass via SIGNAL_SECRET_FILE or SIGNAL_SECRET env in production.
+signal_secret: ""
+# Optional YAML/JSON map of `node_id: secret` for per-node registration secret isolation.
+node_secrets_file: ""
+# Allow authenticated agents to rotate bound Ed25519 node keys via -force-rekey.
+# Defaults to false under a shared SIGNAL_SECRET and true under isolated per-node node_secrets_file.
+allow_force_rekey: false
+allow_anonymous_agents: false
+
+# Optional JSON file path to persist Ed25519 node-to-key bindings across server restarts.
+bound_keys_file: "/var/lib/webrtc-gateway/bound-keys.json"
+
+# 3-Tier Cross-Site Sandbox Deployment (non-loopback production):
+#   Tier 1 (no wildcard cert): set portal_domain + sandbox_host (distinct eTLD+1)
+#   Tier 2 (single root wildcard): set portal_domain + sandbox_domain (same eTLD+1) + allow_same_site_sandbox: true
+#   Tier 3 (dual root wildcard, recommended): set portal_domain + sandbox_domain (distinct eTLD+1)
+portal_domain: "portal.example.com"
+sandbox_domain: "sandbox.example.net"
+sandbox_host: ""
+allow_same_site_sandbox: false
+allow_all_origins: false
+
+# Per-IP WebSocket connection & signaling message rate limits (IPv6 normalized to /64).
+max_ip_conns: 64
+max_ip_msgs: 120
+
+# Comma-separated trusted reverse proxy IPs/CIDRs (Fail-Closed default: loopback only).
+trusted_proxies: "127.0.0.0/8,::1/128"
+# Optional single-value client IP header from trusted proxies (e.g. CF-Connecting-IP, Fastly-Client-IP, CloudFront-Viewer-Address, X-Real-IP).
+client_ip_header: ""
+
+# Optional loopback-only Prometheus /metrics listen address.
+metrics_addr: "127.0.0.1:9090"

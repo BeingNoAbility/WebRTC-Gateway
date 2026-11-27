@@ -1,0 +1,33 @@
+#!/bin/sh
+# Git Pre-Push Hook for WebRTC Gateway
+# Enforces release tag-vs-VERSION alignment on v* tag pushes.
+
+z40="0000000000000000000000000000000000000000"
+
+while read -r local_ref local_sha remote_ref remote_sha
+do
+    case "$local_ref" in
+        refs/tags/v*)
+            if [ "$local_sha" != "$z40" ]; then
+                head_sha=$(git rev-parse HEAD)
+                tag_commit=$(git rev-parse "${local_sha}^{commit}" 2>/dev/null || echo "$local_sha")
+
+                if [ "$tag_commit" = "$head_sha" ]; then
+                    tag_ver=$(echo "$local_ref" | sed 's|refs/tags/v||')
+                    echo ""
+                    echo "================================================================="
+                    echo "[Git Pre-Push Hook] Verifying release tag v$tag_ver against VERSION..."
+                    node scripts/verify-release-hygiene.mjs --check-tag "v$tag_ver"
+                    ver_status=$?
+
+                    if [ "$ver_status" -ne 0 ]; then
+                        echo "[Git Pre-Push Hook] Release tag v$tag_ver failed hygiene/version verification."
+                        exit 1
+                    fi
+                fi
+            fi
+            ;;
+    esac
+done
+
+exit 0
