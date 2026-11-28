@@ -1,6 +1,6 @@
 {
   "name": "webrtc-gateway-web",
-  "version": "5.0.0-alpha.3",
+  "version": "5.0.0-alpha.4",
   "private": true,
   "description": "Zero-Client WebRTC P2P Gateway Web Portal & Service Worker",
   "scripts": {

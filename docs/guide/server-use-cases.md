@@ -277,7 +277,7 @@ docker run -d \
   -e IDENTITY_KEY=/var/lib/webrtc-gateway/nas-media.ed25519.key \
   -e STATE_FILE=/var/lib/webrtc-gateway/nas-media.state.json \
   -e TARGET_URL=http://127.0.0.1:8096 \
-  ghcr.io/beingnoability/webrtc-p2p-agent:v5.0.0-alpha.3
+  ghcr.io/beingnoability/webrtc-p2p-agent:v5.0.0-alpha.4
 ```
 
 > [!TIP]

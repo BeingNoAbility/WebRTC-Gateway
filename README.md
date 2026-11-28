@@ -18,7 +18,7 @@
 [![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions)](https://github.com/BeingNoAbility/WebRTC-Gateway/actions/workflows/ci.yml)
 
 > [!IMPORTANT]
-> **版本状态**：当前为 **v5.0.0-alpha.3** 预发布版本，现行线协议为 `P2PMux V8`（规范见[协议规范](docs/guide/protocol-specification.md)；[V7 架构 RFC](docs/rfcs/v7.0-architecture.md) 为历史架构决策记录）。版本演进与历史变更见 [CHANGELOG](CHANGELOG.md)。
+> **版本状态**：当前为 **v5.0.0-alpha.4** 预发布版本，现行线协议为 `P2PMux V8`（规范见[协议规范](docs/guide/protocol-specification.md)；[V7 架构 RFC](docs/rfcs/v7.0-architecture.md) 为历史架构决策记录）。版本演进与历史变更见 [CHANGELOG](CHANGELOG.md)。
 
 ---
 

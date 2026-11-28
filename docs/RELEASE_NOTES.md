@@ -1,8 +1,8 @@
 # WebRTC Gateway Release Notes
 
-## [v5.0.0-alpha.3] - 2026-11-27
+## [v5.0.0-alpha.4] - 2026-11-28
 
-> 预发布版本（pre-release）：WebRTC Gateway V7 架构预发布版本，不建议用于生产环境。预发布标签不移动 `:latest`（可通过 `:v5.0.0-alpha.3` 或 `:alpha` 拉取）。
+> 预发布版本（pre-release）：WebRTC Gateway P2PMux V8 安全审计加固预发布版本，不建议用于生产环境。预发布标签不移动 `:latest`（可通过 `:v5.0.0-alpha.4` 或 `:alpha` 拉取）。
 >
 > **English readers**: see [CHANGELOG.md](https://github.com/BeingNoAbility/WebRTC-Gateway/blob/main/CHANGELOG.md) for the full English release notes.
 
@@ -16,8 +16,8 @@
 ### 容器镜像拉取
 
 ```bash
-docker pull ghcr.io/beingnoability/webrtc-p2p-server:v5.0.0-alpha.3
-docker pull ghcr.io/beingnoability/webrtc-p2p-agent:v5.0.0-alpha.3
+docker pull ghcr.io/beingnoability/webrtc-p2p-server:v5.0.0-alpha.4
+docker pull ghcr.io/beingnoability/webrtc-p2p-agent:v5.0.0-alpha.4
 # 或拉取 alpha 通道最新构建（不会影响 :latest）
 docker pull ghcr.io/beingnoability/webrtc-p2p-server:alpha
 docker pull ghcr.io/beingnoability/webrtc-p2p-agent:alpha
