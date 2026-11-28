@@ -77,7 +77,7 @@ export interface TunnelBridgeCallbacks {
   onRouteSync?: (path: string) => void;
   onTitleSync?: (title: string) => void;
   onCookieDeltas?: (deltas: CookieDelta[]) => void;
-  onSwEvicted?: () => void;
+  onSwEvicted?: (path?: string) => void;
   onLog?: (line: string) => void;
 }
 
@@ -99,13 +99,15 @@ function toCookieTLVEntries(raw: unknown): CookieTLVEntry[] {
   const out: CookieTLVEntry[] = [];
   for (const item of raw) {
     if (!isClientCookieMutation(item)) continue;
-    out.push({
+    const entry: CookieTLVEntry = {
       op: item.op === 'del' ? CookieOp.DEL : CookieOp.SET,
       name: item.name,
       value: item.value ?? '',
       path: item.path ?? '/',
       expiresMs: typeof item.expires === 'number' && Number.isFinite(item.expires) ? Math.trunc(item.expires) : 0,
-    });
+    };
+    if (item.secure) entry.secure = true;
+    out.push(entry);
     if (out.length >= MAX_REQUEST_COOKIE_MUTATIONS) break;
   }
   return out;
@@ -124,6 +126,9 @@ function fromCookieTLVEntries(entries: CookieTLVEntry[] | undefined): CookieDelt
     }
     if (e.expiresMs > 0) {
       out.expires = e.expiresMs;
+    }
+    if (e.secure) {
+      out.secure = true;
     }
     return out;
   });
@@ -337,8 +342,21 @@ export class TunnelBridge {
 
     // P2P_SW_EVICTED may originate from a nested child iframe on the same sandboxOrigin;
     // it only triggers a safe Portal-side SW liveness check / recovery.
+    // Only accept a recovery path override when posted directly by the root appFrame.
     if (data.type === 'P2P_SW_EVICTED') {
-      this.callbacks.onSwEvicted?.();
+      let recoveryPath: string | undefined;
+      if (
+        this.appFrame &&
+        ev.source === this.appFrame.contentWindow &&
+        typeof data.path === 'string' &&
+        data.path.startsWith('/') &&
+        !data.path.startsWith('//') &&
+        data.path.length <= MAX_ROUTE_SYNC_LEN &&
+        !/[\r\n\0]/.test(data.path)
+      ) {
+        recoveryPath = data.path;
+      }
+      this.callbacks.onSwEvicted?.(recoveryPath);
       return;
     }
 

@@ -155,6 +155,9 @@ export function validateFrameMeta(streamId: number, type: number, flags: number,
       if ((flags & ~(FrameFlag.FIN | FrameFlag.MORE)) !== 0) {
         throw new Error('invalid flags on HEADERS');
       }
+      if ((flags & (FrameFlag.FIN | FrameFlag.MORE)) === (FrameFlag.FIN | FrameFlag.MORE)) {
+        throw new Error('non-final HEADERS chunk cannot carry FlagFin');
+      }
       if (payloadLen === 0 && (flags & FrameFlag.MORE) !== 0) {
         throw new Error('non-final 0-byte HEADERS chunk is forbidden');
       }

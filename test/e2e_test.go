@@ -172,6 +172,37 @@ func TestCLI_Binaries_VersionMintAndFailClosed(t *testing.T) {
 	if !strings.HasPrefix(link, "https://portal.example.com/#clitest?pk=") || !strings.Contains(link, "&cap=") {
 		t.Fatalf("unexpected minted share link: %q", link)
 	}
+
+	// Offline -revoke-cap writes revocation cleanly to the persistent state file and rejects -ephemeral-identity!
+	capIdx := strings.Index(link, "&cap=")
+	capTok := link[capIdx+5:]
+	payloadB64 := strings.Split(capTok, ".")[0]
+	payloadJSON, derr := base64.RawURLEncoding.DecodeString(payloadB64)
+	if derr != nil {
+		t.Fatalf("decode minted cap payload: %v", derr)
+	}
+	var capPayload struct {
+		JTI string `json:"jti"`
+	}
+	if err := json.Unmarshal(payloadJSON, &capPayload); err != nil || capPayload.JTI == "" {
+		t.Fatalf("extract minted cap jti: err=%v payload=%s", err, string(payloadJSON))
+	}
+	revOut, revErr := exec.Command(
+		builtAgentBin,
+		"-id", "clitest",
+		"-identity-key", keyPath,
+		"-revoke-cap", capPayload.JTI,
+	).CombinedOutput()
+	if revErr != nil || !strings.Contains(string(revOut), "revoked "+capPayload.JTI) {
+		t.Fatalf("agent -revoke-cap failed: err=%v out=%s", revErr, string(revOut))
+	}
+	revStore, serr := agent.NewCapabilityStoreWithFile(keyPath + ".state.json")
+	if serr != nil || !revStore.IsRevoked(capPayload.JTI) {
+		t.Fatalf("expected -revoke-cap JTI %q to be persisted as revoked (err=%v)", capPayload.JTI, serr)
+	}
+	if out, err := exec.Command(builtAgentBin, "-id", "clitest", "-ephemeral-identity", "-revoke-cap", capPayload.JTI).CombinedOutput(); err == nil {
+		t.Fatalf("expected -revoke-cap + -ephemeral-identity to Fail-Closed, got: %s", string(out))
+	}
 }
 
 type e2eAuthResult struct {

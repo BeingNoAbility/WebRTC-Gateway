@@ -46,6 +46,7 @@ type CookieDelta struct {
 	Value   string `json:"value,omitempty"`
 	Path    string `json:"path"`
 	Expires int64  `json:"expires,omitempty"` // unix ms (0 = session cookie)
+	Secure  bool   `json:"secure,omitempty"`
 }
 
 // ClientCookieMutation describes a JS `document.cookie = ...` write or deletion sent from browser.
@@ -55,6 +56,7 @@ type ClientCookieMutation struct {
 	Value   string `json:"value,omitempty"`
 	Path    string `json:"path,omitempty"`
 	Expires int64  `json:"expires,omitempty"` // unix ms (0 = session cookie)
+	Secure  bool   `json:"secure,omitempty"`
 }
 
 // CookieRequestContext carries FetchCtx-derived SameSite context.
@@ -513,6 +515,7 @@ func (j *ProxyCookieJar) SaveResponseCookies(reqURL *url.URL, rawSetCookies []st
 				Value:   entry.wireValue(),
 				Path:    cPath,
 				Expires: expMs,
+				Secure:  entry.secure,
 			})
 		}
 	}
@@ -557,15 +560,22 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 		if !isValidCookieName(name) {
 			continue
 		}
-		lowerName := strings.ToLower(name)
-		if strings.HasPrefix(lowerName, "__host-") || strings.HasPrefix(lowerName, "__secure-") {
-			continue
-		}
 		cPath := m.Path
 		if cPath == "" {
 			cPath = defaultCookiePath(targetURL.Path)
 		}
 		if !isValidClientCookiePath(cPath) {
+			continue
+		}
+		if m.Secure && !isSecureOrigin {
+			continue
+		}
+		// RFC 6265bis §4.1.3: enforce __Secure- and __Host- prefix invariants using wire Secure flag.
+		lowerName := strings.ToLower(name)
+		if strings.HasPrefix(lowerName, "__secure-") && (!isSecureOrigin || !m.Secure) {
+			continue
+		}
+		if strings.HasPrefix(lowerName, "__host-") && (!isSecureOrigin || !m.Secure || cPath != "/") {
 			continue
 		}
 
@@ -646,7 +656,7 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 				domain:       reqHost,
 				hostOnly:     true,
 				path:         cPath,
-				secure:       inheritedSecure,
+				secure:       inheritedSecure || m.Secure,
 				httpOnly:     false,
 				sameSite:     inheritedSameSite,
 				fromServer:   false,
@@ -686,6 +696,7 @@ func (j *ProxyCookieJar) ExportNonHttpOnlySnapshot(targetURL *url.URL) []CookieD
 		wireVal      string
 		path         string
 		expiresMs    int64
+		secure       bool
 	}
 
 	j.mu.RLock()
@@ -711,6 +722,7 @@ func (j *ProxyCookieJar) ExportNonHttpOnlySnapshot(targetURL *url.URL) []CookieD
 			wireVal:      c.wireValue(),
 			path:         c.path,
 			expiresMs:    expMs,
+			secure:       c.secure,
 		})
 	}
 	j.mu.RUnlock()
@@ -736,6 +748,7 @@ func (j *ProxyCookieJar) ExportNonHttpOnlySnapshot(targetURL *url.URL) []CookieD
 			Value:   c.wireVal,
 			Path:    c.path,
 			Expires: c.expiresMs,
+			Secure:  c.secure,
 		})
 	}
 	return out

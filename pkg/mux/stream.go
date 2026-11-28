@@ -46,6 +46,7 @@ type Stream struct {
 	hdrMemCost   int64
 	hdrChunks    int
 	hdrComplete  bool
+	hdrClosed    bool
 	hasReqBody   bool
 	hdrReadyCh   chan struct{}
 	hdrReadyOnce sync.Once
@@ -194,6 +195,10 @@ func (s *Stream) ReadResponseHeaders(ctx context.Context) ([]byte, error) {
 func (s *Stream) onInboundHeaders(flags uint8, payload []byte) {
 	s.touch()
 	s.hdrMu.Lock()
+	if s.hdrClosed {
+		s.hdrMu.Unlock()
+		return
+	}
 	if s.hdrComplete {
 		s.hdrMu.Unlock()
 		s.Reset(protocol.ErrCodeProtocolError)
@@ -706,15 +711,21 @@ func (s *Stream) WriteWSChunk(ctx context.Context, op uint8, fin bool, payload [
 			return protocol.ErrInvalidPayloadSize
 		}
 		if err := s.waitSCTPBackpressure(ctx); err != nil {
+			s.writeFailed.Store(true)
 			return err
 		}
 		s.touch()
-		return s.lane.sendFrame(s.streamID, op, protocol.FlagMsgFin, nil)
+		if err := s.lane.sendFrame(s.streamID, op, protocol.FlagMsgFin, nil); err != nil {
+			s.writeFailed.Store(true)
+			return err
+		}
+		return nil
 	}
 
 	written := 0
 	for written < len(payload) {
 		if err := s.waitSCTPBackpressure(ctx); err != nil {
+			s.writeFailed.Store(true)
 			return err
 		}
 		cs := s.mux.ChunkSize()
@@ -724,6 +735,7 @@ func (s *Stream) WriteWSChunk(ctx context.Context, op uint8, fin bool, payload [
 		}
 		grant, err := s.acquireSendWindow(ctx, rem)
 		if err != nil {
+			s.writeFailed.Store(true)
 			return err
 		}
 		flags := protocol.FlagNone
@@ -731,6 +743,7 @@ func (s *Stream) WriteWSChunk(ctx context.Context, op uint8, fin bool, payload [
 			flags = protocol.FlagMsgFin
 		}
 		if err := s.lane.sendFrame(s.streamID, op, flags, payload[written:written+grant]); err != nil {
+			s.writeFailed.Store(true)
 			return err
 		}
 		written += grant
@@ -801,8 +814,14 @@ func (s *Stream) Close() error {
 	s.localFin.Store(true)
 	s.writeClosed = true
 	if needFin {
-		if err := s.waitSCTPBackpressure(s.ctx); err == nil {
+		finCtx, finCancel := context.WithTimeout(s.ctx, 1*time.Second)
+		err := s.waitSCTPBackpressure(finCtx)
+		finCancel()
+		if err == nil {
 			_ = s.lane.sendFrame(s.streamID, protocol.TypeData, protocol.FlagFin, nil)
+		} else if !s.resetSent {
+			s.resetSent = true
+			_ = s.lane.sendFrame(s.streamID, protocol.TypeReset, protocol.FlagNone, protocol.EncodeResetPayload(protocol.ErrCodeCancel))
 		}
 	}
 	s.writeMu.Unlock()
@@ -846,6 +865,7 @@ func (s *Stream) abortLocal(err error) {
 
 func (s *Stream) purgeInbound(err error) {
 	s.hdrMu.Lock()
+	s.hdrClosed = true
 	hdrCost := s.hdrMemCost
 	s.hdrBuf = nil
 	s.hdrMemCost = 0

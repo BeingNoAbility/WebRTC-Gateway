@@ -80,11 +80,11 @@ All multi-byte integers are big-endian (network byte order). Every DataChannel m
 | `0x03` | `AUTH_RESPONSE` | `p2pctrl` | `0` | `MORE` | JSON (`method`: `spake2p`/`cap`/`public`, `share_p`, `confirm_p`, `cap_token`, `cookie_resume_token`) |
 | `0x04` | `AUTH_RESULT` | `p2pctrl` | `0` | `MORE` | JSON (`ok`, `role`, `confirm_v`, `cookie_resume_token`, `meta`) |
 | `0x05` | `CAP_REQ` | `p2pctrl` | `0` | `MORE` | JSON (Owner capability mint / list / revoke request) |
-| `0x06` | `CAP_RESP` | `p2pctrl` | `0` | `MORE` | JSON (minted token or active record list; chunkable via `FlagMore` up to `128 KiB`) |
+| `0x06` | `CAP_RESP` | `p2pctrl` | `0` | `MORE` | JSON (minted token, record list, or revoke result with `jti` and boolean `revoked`; chunkable via `FlagMore` up to `128 KiB`) |
 | `0x08` | `PING` | `p2pctrl` | `0` | `0x00` | Exact 8-byte `uint64` sequence |
 | `0x09` | `PONG` | `p2pctrl` | `0` | `0x00` | Exact 8-byte `uint64` echoed sequence |
 | `0x0A` | `GOAWAY` | `p2pctrl` | `0` | `0x00` | Exact 4-byte BE `ErrorCode` |
-| `0x10` | `HEADERS` | `p2p_01..12` | `> 0` | `FIN \| MORE` | Compact binary TLV header block (multi-frame continuation reuses `HEADERS` + `FlagMore`, max `64 KiB` / `17` frames; zero-byte non-final frames forbidden) |
+| `0x10` | `HEADERS` | `p2p_01..12` | `> 0` | `FIN` or `MORE` | Compact binary TLV header block (multi-frame continuation reuses `HEADERS` + `FlagMore`; combining `FIN \| MORE` on a non-final chunk is forbidden; max `64 KiB` / `17` frames; zero-byte non-final frames forbidden) |
 | `0x12` | `DATA` | `p2p_01..12` | `> 0` | `FIN` | Raw HTTP body bytes (zero-byte payload without `FIN` forbidden) |
 | `0x13` | `CREDIT` | `p2p_01..12` | `> 0` | `0x00` | Exact 4-byte BE `uint32` pure payload byte delta, `1 <= delta <= 0x7fffffff` |
 | `0x14` | `RESET` | `p2p_01..12` | `> 0` | `0x00` | Exact 4-byte BE `ErrorCode` |
@@ -98,7 +98,7 @@ All multi-byte integers are big-endian (network byte order). Every DataChannel m
 
 ### 1. Request and Response TLV Encoding
 
-Request and response headers use big-endian binary TLV encoding carrying `FetchCtx` (`SameOriginClient`, `ClientDecompressGzip`, `CredentialsOmit` suppressing cookie mutations and response cookie storage; legacy bit 1 is removed and strictly rejected as reserved), `RespFlags` (`DecompressGzip`), and inline cookie mutations/deltas (eliminating out-of-band ordering races, enforcing `0 <= expiresMs <= Number.MAX_SAFE_INTEGER`), preserving multi-value headers (such as multiple `Content-Security-Policy` or `Vary` entries) and valid UTF-8 characters (including BOM), while rejecting control bytes, CR/LF/NUL, and ASCII spaces (`0x20`) in request targets:
+Request and response headers use big-endian binary TLV encoding carrying `FetchCtx` (bit 0 = `SameOriginClient`, bit 1 = `ClientDecompressGzip`, bit 2 = `CredentialsOmit`; all higher reserved bits strictly rejected), `RespFlags` (`DecompressGzip`), and inline cookie mutations/deltas (packing the `Secure` attribute into bit 7 (`0x80`) of the 1-byte `opFlags` field to support RFC 6265bis `__Host-` / `__Secure-` cookies in Secure Contexts, eliminating out-of-band ordering races, and enforcing `0 <= expiresMs <= Number.MAX_SAFE_INTEGER`), preserving multi-value headers (such as multiple `Content-Security-Policy` or `Vary` entries) and valid UTF-8 characters (including BOM), while rejecting control bytes, CR/LF/NUL, and ASCII spaces (`0x20`) in request targets:
 
 ```text
 Request TLV:
@@ -106,13 +106,13 @@ Request TLV:
   [u16 targetLen] [target UTF-8 (no spaces/ctl)] [u16 headerCount <= 256]
   repeat headerCount: [u16 nameLen] [lowercase name] [u16 valLen] [value UTF-8]
   [u16 cookieMutCount <= 32]
-  repeat cookieMutCount: [u8 op (1=set, 2=del)] [u8 nameLen] [name] [u16 valLen] [val] [u16 pathLen] [path] [i64 expiresMs]
+  repeat cookieMutCount: [u8 opFlags (bits0..1: 1=set, 2=del; bit7=Secure)] [u8 nameLen] [name] [u16 valLen] [val] [u16 pathLen] [path] [i64 expiresMs]
 
 Response TLV:
   [u16 status (100..599)] [u8 respFlags (bit0=DecompressGzip)] [u16 headerCount <= 256]
   repeat headerCount: [u16 nameLen] [lowercase name] [u16 valLen] [value UTF-8]
   [u16 cookieDeltaCount <= 64]
-  repeat cookieDeltaCount: [u8 op (1=set, 2=del)] [u8 nameLen] [name] [u16 valLen] [val] [u16 pathLen] [path] [i64 expiresMs]
+  repeat cookieDeltaCount: [u8 opFlags (bits0..1: 1=set, 2=del; bit7=Secure)] [u8 nameLen] [name] [u16 valLen] [val] [u16 pathLen] [path] [i64 expiresMs]
 ```
 
 ### 2. In-Lane Streaming WebSocket Framing

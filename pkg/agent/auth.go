@@ -319,7 +319,7 @@ func (s *CapabilityStore) buildSnapshotLocked(nowUnix int64) *persistedCapState 
 	return out
 }
 
-func (s *CapabilityStore) applyAndPersist(mutate func(nowUnix int64) error, isRevoke bool) error {
+func (s *CapabilityStore) applyRevokeAndPersist(mutate func(nowUnix int64) error) error {
 	if s.stateFile == "" {
 		s.mu.Lock()
 		err := mutate(time.Now().Unix())
@@ -359,17 +359,11 @@ func (s *CapabilityStore) applyAndPersist(mutate func(nowUnix int64) error, isRe
 		raw, err := json.Marshal(snap)
 		if err != nil {
 			log.Printf("[Agent] Marshal capability state failed: %v", err)
-			if isRevoke {
-				return fmt.Errorf("%w: %v", ErrCapPersistFailed, err)
-			}
-			return err
+			return fmt.Errorf("%w: %v", ErrCapPersistFailed, err)
 		}
 		if err := state.WriteAtomic(s.stateFile, raw, 0600); err != nil {
 			log.Printf("[Agent] Persist capability state failed: %v", err)
-			if isRevoke {
-				return fmt.Errorf("%w: %v", ErrCapPersistFailed, err)
-			}
-			return err
+			return fmt.Errorf("%w: %v", ErrCapPersistFailed, err)
 		}
 		if fi, serr := os.Stat(s.stateFile); serr == nil {
 			s.mu.Lock()
@@ -386,15 +380,74 @@ func (s *CapabilityStore) Track(p CapabilityPayload) error {
 		return errors.New("agent: invalid capability jti")
 	}
 	p.JTI = jti
-	return s.applyAndPersist(func(nowUnix int64) error {
+
+	if s.stateFile == "" {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		nowUnix := time.Now().Unix()
 		s.pruneExpiredLocked(nowUnix)
 		if _, exists := s.records[p.JTI]; !exists && len(s.records) >= maxCapabilityRecords {
 			return errors.New("agent: capability record limit reached")
 		}
 		_, isRev := s.revoked[p.JTI]
 		s.records[p.JTI] = &CapabilityRecord{Payload: p, Revoked: isRev}
+		s.publishRevokedLocked()
 		return nil
-	}, false)
+	}
+
+	return state.WithFileLock(s.lockPath(), func() error {
+		var diskState *persistedCapState
+		rawDisk, rerr := os.ReadFile(s.stateFile) // #nosec G304 -- operator-configured state file path
+		if rerr == nil {
+			st, perr := parsePersistedCapState(rawDisk)
+			if perr != nil {
+				return fmt.Errorf("agent: refusing to overwrite corrupt capability state %q: %w", s.stateFile, perr)
+			}
+			diskState = st
+		} else if !os.IsNotExist(rerr) {
+			return rerr
+		}
+
+		nowUnix := time.Now().Unix()
+		s.mu.Lock()
+		if diskState != nil {
+			s.mergeStateLocked(diskState, nowUnix)
+		}
+		s.pruneExpiredLocked(nowUnix)
+		if _, exists := s.records[p.JTI]; !exists && len(s.records) >= maxCapabilityRecords {
+			s.mu.Unlock()
+			return errors.New("agent: capability record limit reached")
+		}
+		// Build candidate snapshot BEFORE mutating s.records so a disk write failure
+		// never leaves an un-minted phantom JTI in memory (P1-6).
+		snap := s.buildSnapshotLocked(nowUnix)
+		if snap.Records == nil {
+			snap.Records = make(map[string]CapabilityPayload, 1)
+		}
+		snap.Records[p.JTI] = p
+		s.mu.Unlock()
+
+		raw, err := json.Marshal(snap)
+		if err != nil {
+			log.Printf("[Agent] Marshal capability state failed: %v", err)
+			return err
+		}
+		if err := state.WriteAtomic(s.stateFile, raw, 0600); err != nil {
+			log.Printf("[Agent] Persist capability state failed: %v", err)
+			return err
+		}
+
+		fi, _ := os.Stat(s.stateFile)
+		s.mu.Lock()
+		_, isRev := s.revoked[p.JTI]
+		s.records[p.JTI] = &CapabilityRecord{Payload: p, Revoked: isRev}
+		s.publishRevokedLocked()
+		if fi != nil {
+			s.fileInfo = fi
+		}
+		s.mu.Unlock()
+		return nil
+	})
 }
 
 func (s *CapabilityStore) Revoke(jti string) error {
@@ -402,7 +455,7 @@ func (s *CapabilityStore) Revoke(jti string) error {
 	if jti == "" || len(jti) > maxCapabilityJTILen {
 		return errors.New("agent: invalid capability jti")
 	}
-	return s.applyAndPersist(func(nowUnix int64) error {
+	return s.applyRevokeAndPersist(func(nowUnix int64) error {
 		s.pruneExpiredLocked(nowUnix)
 		var exp int64
 		if r, ok := s.records[jti]; ok {
@@ -427,7 +480,7 @@ func (s *CapabilityStore) Revoke(jti string) error {
 		}
 		s.revoked[jti] = exp
 		return nil
-	}, true)
+	})
 }
 
 // IsRevoked performs a lock-free pure-memory lookup against the latest published revocation snapshot.

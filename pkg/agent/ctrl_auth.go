@@ -48,7 +48,6 @@ type settingsEnvelope struct {
 type BackendMeta struct {
 	NodeID              string              `json:"nodeId"`
 	BackendOrigin       string              `json:"backendOrigin"`
-	IsStaticMode        bool                `json:"isStaticMode"`
 	CookieSecureContext bool                `json:"cookieSecureContext"`
 	InitialCookies      []proxy.CookieDelta `json:"initialCookies,omitempty"`
 }
@@ -377,7 +376,6 @@ func (a *Agent) handleDTLSAuthResponse(sess *VisitorSession, raw []byte) {
 	meta := BackendMeta{
 		NodeID:              a.cfg.NodeID,
 		BackendOrigin:       backendOrigin,
-		IsStaticMode:        a.cfg.IsStaticMode,
 		CookieSecureContext: proxy.IsSecureCookieOrigin(pol.EffectiveBaseURL()),
 		InitialCookies:      jar.ExportNonHttpOnlySnapshot(pol.EffectiveBaseURL()),
 	}
@@ -499,10 +497,10 @@ func (a *Agent) handleCapabilityRPC(sess *VisitorSession, raw []byte) {
 		a.cookieMgr.DeleteByPrefix("cap:" + jti + ":")
 		go a.disconnectCapabilitySessions(jti)
 		if revokeErr != nil {
-			a.sendCapResp(sess, m, req.ReqID, false, "revoked in memory but failed to persist state", map[string]any{"revoked": jti})
+			a.sendCapResp(sess, m, req.ReqID, false, "revoked in memory but failed to persist state", map[string]any{"jti": jti, "revoked": true})
 			return
 		}
-		a.sendCapResp(sess, m, req.ReqID, true, "", map[string]any{"revoked": jti})
+		a.sendCapResp(sess, m, req.ReqID, true, "", map[string]any{"jti": jti, "revoked": true})
 
 	default:
 		a.sendCapResp(sess, m, req.ReqID, false, fmt.Sprintf("unknown action %q", req.Action), nil)

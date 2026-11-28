@@ -139,7 +139,7 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
-	sendCh := make(chan []byte, 256)
+	sendCh := make(chan []byte, 1024)
 
 	connStart := time.Now()
 	var lastAliveNanos atomic.Int64

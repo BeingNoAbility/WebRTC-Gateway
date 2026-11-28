@@ -55,6 +55,20 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
 
   if (data.type === 'SW_ATTACH_PORT') {
     const port = event.ports?.[0];
+    const ackPort = event.ports?.[1];
+    const sendAck = (ok: boolean) => {
+      if (!ackPort) return;
+      try {
+        ackPort.postMessage({ type: 'SW_ATTACH_ACK', ok });
+      } catch {
+        // ignore
+      }
+      try {
+        ackPort.close();
+      } catch {
+        // ignore
+      }
+    };
     if (
       !isBridgeWindowSource(event.source) ||
       !port ||
@@ -65,9 +79,12 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
       !isBackendMeta(data.meta)
     ) {
       port?.close();
+      sendAck(false);
       return;
     }
-    if (registry.attachPort(data.tabId, data.portalOrigin, data.meta, port)) {
+    const attached = registry.attachPort(data.tabId, data.portalOrigin, data.meta, port);
+    sendAck(attached);
+    if (attached) {
       event.waitUntil(registry.pruneDeadSessions(sw, data.tabId).catch(() => {}));
     }
     return;

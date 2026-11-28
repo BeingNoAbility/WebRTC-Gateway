@@ -137,7 +137,7 @@ const pill = new SmartPill(hudHostEl, {
     if (transport) {
       void transport.resetCookieSessionAndReconnect();
     } else {
-      void mountSandboxAndApp(activeAuthInfo, false, true);
+      void mountSandboxAndApp(activeAuthInfo, false);
     }
   },
 });
@@ -301,21 +301,24 @@ async function attachEphemeralBridge(
   }
 }
 
-async function recoverEvictedSw(): Promise<void> {
+async function recoverEvictedSw(recoveryPath?: string): Promise<void> {
   if (recoveringSw || !activeBridge || !activeAuthInfo || !activeSandboxOrigin || !activeMeta) return;
-  if (await activeBridge.pingSw(1_500)) {
-    return;
-  }
-  if (recoveringSw || !activeAuthInfo) return;
   recoveringSw = true;
   try {
+    if (await activeBridge.pingSw(1_500)) {
+      return;
+    }
+    if (!activeAuthInfo) return;
+    if (recoveryPath && recoveryPath.startsWith('/') && !recoveryPath.startsWith('//')) {
+      currentAppPath = recoveryPath;
+    }
     pill.appendLog('[Bridge] Service Worker was evicted by browser — re-bootstrapping sandbox cleanly');
     if (appFrame) {
       appFrame.remove();
       appFrame = null;
       activeBridge.setAppFrame(null);
     }
-    await mountSandboxAndApp(activeAuthInfo, activeIsCap, false);
+    await mountSandboxAndApp(activeAuthInfo, activeIsCap);
   } finally {
     recoveringSw = false;
   }
@@ -323,8 +326,7 @@ async function recoverEvictedSw(): Promise<void> {
 
 async function mountSandboxAndApp(
   info: AuthSuccessInfo,
-  isCap: boolean,
-  skipInitialCookiesMerge = false
+  isCap: boolean
 ): Promise<void> {
   const myMountGen = ++mountGeneration;
   const activeTransport = transport;
@@ -354,9 +356,6 @@ async function mountSandboxAndApp(
   }
   if (signal.aborted || myMountGen !== mountGeneration || transport !== activeTransport) return;
 
-  if (!skipInitialCookiesMerge) {
-    mergeCookieDeltas(info.meta.initialCookies);
-  }
   activeMeta = {
     ...info.meta,
     initialCookies: exportLiveCookieSnapshot(),
@@ -373,8 +372,8 @@ async function mountSandboxAndApp(
       onCookieDeltas: (deltas) => {
         mergeCookieDeltas(deltas);
       },
-      onSwEvicted: () => {
-        void recoverEvictedSw();
+      onSwEvicted: (recoveryPath) => {
+        void recoverEvictedSw(recoveryPath);
       },
       onLog: (line) => pill.appendLog(line),
     });
@@ -559,6 +558,7 @@ function startRouteConnection(): void {
           () => transport?.getMux() ?? null,
           (snap) => pill.updateStats(snap)
         );
+        mergeCookieDeltas(info.meta.initialCookies);
         void mountSandboxAndApp(info, isCap);
       },
       onDisconnected: (reason, willReconnect) => {

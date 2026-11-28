@@ -420,10 +420,8 @@ export type FetchAuthResult =
  *  1. Bound `clientId`, pre-bound `resultingClientId` (from `/__p2p_gw__/enter`), or W3C
  *     `replacesClientId` (Back/Forward/Reload) -> authorized.
  *  2. Non-navigate or non-GET/HEAD or non-iframe -> rejected (`403`).
- *  3. Unbound iframe GET/HEAD -> rejected in proxy `-target` mode (`isStaticMode === false`);
- *     permitted ONLY in cookie-less read-only static `-dir`/`-file` (`isStaticMode === true`,
- *     `sessions.size === 1`, `sameOriginClient: false`) where `CSP: sandbox` opaque origins omit
- *     both `clientId` and `replacesClientId`.
+ *  3. Unbound iframe GET/HEAD -> rejected Fail-Closed across BOTH `-target` and static `-dir`/`-file`
+ *     modes (only single-use `P2P_EXPECT_NAV` root navigation fallback for engines lacking `replacesClientId`).
  */
 export function authorizeFetchRequest(
   registry: SessionRegistry,
@@ -477,20 +475,12 @@ export function authorizeFetchRequest(
     }
   }
 
-  // 3b. Only cookie-less read-only static `-dir`/`-file` (`CSP: sandbox` opaque origin) lacks
-  //     clientId/replacesClientId on in-iframe directory link clicks. Proxy `-target` mode NEVER falls back!
-  //     Supports multiple Portal tabs viewing the SAME static nodeId (fails closed on mixed/different nodes).
-  const staticSession = registry.getStaticFallbackSession();
-  if (!staticSession) {
-    return {
-      allowed: false,
-      reason: 'Unbound iframe navigation blocked (missing enter token or bound client)',
-    };
-  }
-  if (input.resultingClientId) {
-    registry.bindClient(input.resultingClientId, staticSession.tabId, false);
-  }
-  return { allowed: true, session: staticSession, sameOriginClient: false };
+  // All remaining unbound iframe navigations fail closed uniformly (both `-target` and static `-dir`/`-file`
+  // preserve sandbox origin via `sandbox allow-same-origin` without `allow-scripts`, eliminating any SW bypass!).
+  return {
+    allowed: false,
+    reason: 'Unbound iframe navigation blocked (missing enter token or bound client)',
+  };
 }
 
 export function collectRequestHeaders(
@@ -661,7 +651,7 @@ function buildSwEvictedResponse(isNavigate: boolean): Response {
   if (isNavigate) {
     const html =
       '<!doctype html><html><head><meta charset="utf-8"><title>Reconnecting…</title></head>' +
-      '<body><script>try{window.parent.postMessage({type:"P2P_SW_EVICTED"},"*")}catch{}</script></body></html>';
+      '<body><script>try{window.parent.postMessage({type:"P2P_SW_EVICTED",path:location.pathname+location.search+location.hash},"*")}catch{}</script></body></html>';
     return new Response(html, {
       status: 503,
       headers: {

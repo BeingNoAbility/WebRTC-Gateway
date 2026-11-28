@@ -475,6 +475,31 @@ test('decompress_pipeline V7: native gzip bomb aborts, rejects zstd, safe transf
     await assert.rejects(() => new Response(decompMod.pipeThroughBoundedDecompression(corruptSrc, 'gzip')).arrayBuffer());
     assert.equal(srcCancelled, true, 'corrupt gzip error must cancel upstream srcReader');
 
+    // P0-2 Negative test: mid-stream upstream error MUST propagate as stream error (NEVER silent HTTP 200 truncation!).
+    const randomPayload = new Uint8Array(256 * 1024);
+    for (let off = 0; off < randomPayload.byteLength; off += 65536) {
+      crypto.getRandomValues(randomPayload.subarray(off, off + 65536));
+    }
+    const fullGz = new Uint8Array(
+      await new Response(new Blob([randomPayload]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer()
+    );
+    const halfGz = fullGz.subarray(0, Math.floor(fullGz.byteLength / 2));
+    let midStep = 0;
+    const midErrSrc = new ReadableStream({
+      pull(ctrl) {
+        if (midStep++ === 0) {
+          ctrl.enqueue(halfGz);
+        } else {
+          ctrl.error(new Error('P2P_STREAM_RESET mid-download'));
+        }
+      },
+    });
+    await assert.rejects(
+      () => new Response(decompMod.pipeThroughBoundedDecompression(midErrSrc, 'gzip')).arrayBuffer(),
+      /P2P_STREAM_RESET/i,
+      'P0-2: mid-stream upstream error must reject consumer instead of silently truncating as HTTP 200'
+    );
+
     // Negative test: gzip stream with empty 0-byte input chunks between header and payload must not hang!
     const realGz = new Uint8Array(
       await new Response(new Blob(['hello-zero-chunk']).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer()
@@ -1150,8 +1175,8 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
     assert.equal(reloadAuth.sameOriginClient, true);
     assert.equal(reg.getSessionByTabId('tab-1').rootClientId, 'c-app-reloaded', 'rootClientId must transfer on reload');
 
-    // Static `-dir`/`-file` (cookie-less, isStaticMode=true) allows opaque-origin iframe navigation
-    // AND binds resultingClientId so subresources work!
+    // R1 / P2-10: Static `-dir`/`-file` preserves sandbox origin (`sandbox allow-same-origin` without
+    // `allow-scripts`) so unbound cross-site/empty-clientId iframe navigations MUST fail closed uniformly!
     const staticReg = new sessionRegMod.SessionRegistry(new Set([portalOrigin]));
     const chStatic = makeCh();
     staticReg.attachPort(
@@ -1169,9 +1194,19 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
       referrer: '',
       swOrigin,
     });
-    assert.equal(emptyRefStatic.allowed, true, 'static -dir mode must allow opaque-origin iframe navigation');
-    assert.equal(emptyRefStatic.sameOriginClient, false);
-    assert.equal(staticReg.isBoundClient('r-emptyref-dir'), true, 'static -dir mode must bind resultingClientId for subresources');
+    assert.equal(emptyRefStatic.allowed, false, 'R1: unbound iframe navigation must fail closed even in static mode');
+    staticReg.bindClient('c-static-root', 'tab-dir', true);
+    const boundStaticLink = fetchMod.authorizeFetchRequest(staticReg, {
+      clientId: 'c-static-root',
+      resultingClientId: 'c-static-sub',
+      mode: 'navigate',
+      destination: 'iframe',
+      method: 'GET',
+      referrer: `${swOrigin}/`,
+      swOrigin,
+    });
+    assert.equal(boundStaticLink.allowed, true, 'R1: bound static client link navigation must succeed cleanly');
+    assert.equal(staticReg.isBoundClient('c-static-sub'), true, 'R1: bound static navigation must bind resultingClientId');
 
     // Bound appFrame client spawning Worker -> inherits session, sameOriginClient === true, binds resultingClientId!
     const workerAuth = fetchMod.authorizeFetchRequest(reg, {
@@ -1238,7 +1273,7 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
     assert.ok(await reg.isLiveNestedAppClient(mockSwScope, 'nested-app'));
     assert.ok(await reg.isLiveNestedAppClient(mockSwScope, 'app-worker'));
 
-    // 6. P0-2 / P1-23 / P3-2 collectRequestHeaders: removed legacy TOP_LEVEL_NAV bit (0x02) is NEVER set,
+    // 6. P0-2 / P1-23 / P3-2 collectRequestHeaders: no reserved FetchCtx bits are ever set,
     //    and credentials==='omit' sets CREDENTIALS_OMIT and suppresses mutations!
     const iframeNavReq = {
       mode: 'navigate',
@@ -1249,9 +1284,9 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
     };
     const iframeCtx = fetchMod.collectRequestHeaders(iframeNavReq, swOrigin, [], true);
     assert.equal(
-      (iframeCtx.fetchCtx & 0x02) !== 0,
-      false,
-      'removed bit 0x02 must NEVER be set'
+      iframeCtx.fetchCtx & ~tlvMod.FETCH_CTX_VALID_MASK,
+      0,
+      'reserved FetchCtx bits must NEVER be set'
     );
     const docNavReq = {
       mode: 'navigate',
@@ -1261,7 +1296,7 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
       headers: new Headers(),
     };
     const docCtx = fetchMod.collectRequestHeaders(docNavReq, swOrigin, [], true);
-    assert.equal((docCtx.fetchCtx & 0x02) !== 0, false, 'removed bit 0x02 must NEVER be set even on document');
+    assert.equal(docCtx.fetchCtx & ~tlvMod.FETCH_CTX_VALID_MASK, 0, 'reserved FetchCtx bits must NEVER be set on document');
 
     const omitReq = {
       mode: 'cors',
@@ -1927,13 +1962,30 @@ test('Audit Regressions (P1-2, P1-5, P2-2, P2-4, P2-5, P2-6, P2-9): Cross-Browse
     ch2.port2.close();
   }
 
-  // 3. P2-2: Cookie prefix parity with Go ProxyCookieJar (__Host- & __Secure- rejected even on secure context).
+  // 3. P1-9: RFC 6265bis __Host- & __Secure- parity with Go ProxyCookieJar (via TLV CookieOpFlagSecure).
+  assert.deepEqual(
+    patchMod.parseDocumentCookieAssignment('__Host-csrf=tok1; Secure; Path=/', { pathname: '/', isSecureContext: true }),
+    { op: 'set', name: '__Host-csrf', value: 'tok1', path: '/', expires: undefined, secure: true }
+  );
+  assert.deepEqual(
+    patchMod.parseDocumentCookieAssignment('__Secure-pref=1; Secure; Path=/app', { pathname: '/app', isSecureContext: true }),
+    { op: 'set', name: '__Secure-pref', value: '1', path: '/app', expires: undefined, secure: true }
+  );
+  // Missing Secure, non-root Path, Domain attribute, or non-secure origin MUST still be rejected!
   assert.equal(
-    patchMod.parseDocumentCookieAssignment('__Host-x=1; Secure; Path=/', { pathname: '/', isSecureContext: true }),
+    patchMod.parseDocumentCookieAssignment('__Host-csrf=tok1; Path=/', { pathname: '/', isSecureContext: true }),
     null
   );
   assert.equal(
-    patchMod.parseDocumentCookieAssignment('__Secure-x=1; Secure', { pathname: '/', isSecureContext: true }),
+    patchMod.parseDocumentCookieAssignment('__Host-csrf=tok1; Secure; Domain=app.example; Path=/', { pathname: '/', isSecureContext: true }),
+    null
+  );
+  assert.equal(
+    patchMod.parseDocumentCookieAssignment('__Host-csrf=tok1; Secure; Path=/', { pathname: '/', isSecureContext: false }),
+    null
+  );
+  assert.equal(
+    patchMod.parseDocumentCookieAssignment('__Secure-pref=1; Path=/', { pathname: '/', isSecureContext: true }),
     null
   );
 
@@ -2182,13 +2234,14 @@ test('Chief-Architect Audit Regressions: WSStream credit deadlock (P0-4), close 
     );
   }
 
-  // 4. P1-6: Multi-tab same-node static `-dir` mode succeeds; mixed nodes or non-static fail closed.
+  // 4. R1 / P2-10: Unbound iframe navigation fails closed uniformly even with multiple static `-dir` tabs;
+  //    each bound tab routes deterministically to its own session (even across DIFFERENT static nodes!).
   {
     const reg = new sessionRegMod.SessionRegistry(new Set(['https://portal.example']));
     const mkPort = () => ({ postMessage() {}, close() {}, onmessage: null });
     reg.attachPort('tab-1', 'https://portal.example', { nodeId: 'docs', backendOrigin: 'http://static.invalid', isStaticMode: true }, mkPort());
-    reg.attachPort('tab-2', 'https://portal.example', { nodeId: 'docs', backendOrigin: 'http://static.invalid', isStaticMode: true }, mkPort());
-    const authSameNode = fetchMod.authorizeFetchRequest(reg, {
+    reg.attachPort('tab-2', 'https://portal.example', { nodeId: 'other-docs', backendOrigin: 'http://static.invalid', isStaticMode: true }, mkPort());
+    const unboundStatic = fetchMod.authorizeFetchRequest(reg, {
       clientId: '',
       resultingClientId: 'r-1',
       replacesClientId: '',
@@ -2199,22 +2252,23 @@ test('Chief-Architect Audit Regressions: WSStream credit deadlock (P0-4), close 
       secFetchSite: 'same-origin',
       swOrigin: 'https://sbx.example',
     });
-    assert.equal(authSameNode.allowed, true, 'P1-6: multi-tab same static node must allow opaque-origin navigation');
+    assert.equal(unboundStatic.allowed, false, 'R1: unbound static iframe must fail closed with no SW fallback hole');
 
-    // Adding a DIFFERENT static node must fail closed!
-    reg.attachPort('tab-3', 'https://portal.example', { nodeId: 'other-docs', backendOrigin: 'http://static.invalid', isStaticMode: true }, mkPort());
-    const authMixedNode = fetchMod.authorizeFetchRequest(reg, {
-      clientId: '',
-      resultingClientId: 'r-2',
+    reg.bindClient('c-tab-1', 'tab-1', true);
+    reg.bindClient('c-tab-2', 'tab-2', true);
+    const authTab2 = fetchMod.authorizeFetchRequest(reg, {
+      clientId: 'c-tab-2',
+      resultingClientId: 'c-tab-2-next',
       replacesClientId: '',
       mode: 'navigate',
       destination: 'iframe',
       method: 'GET',
-      referrer: '',
+      referrer: 'https://sbx.example/',
       secFetchSite: 'same-origin',
       swOrigin: 'https://sbx.example',
     });
-    assert.equal(authMixedNode.allowed, false, 'P1-6: mixed static nodes sharing origin must still fail closed');
+    assert.equal(authTab2.allowed, true, 'R1: bound static client works cleanly even with mixed static nodes on shared origin');
+    assert.equal(authTab2.session.tabId, 'tab-2');
   }
 
   // 5. P1-5: SW-evicted iframe reload with clientId === '' recovers via 503 SW_EVICTED (while cross-site stays 403).
@@ -2298,8 +2352,15 @@ test('Chief-Architect Audit Regressions: WSStream credit deadlock (P0-4), close 
     assert.equal(siblingMsgs[0].type, 'P2P_COOKIE_MIRROR_UPDATE');
   }
 
-  // 7. P2-3: WebCrypto Ed25519 NotSupportedError throws UnsupportedCryptoError (not silent false).
+  // 7. Pure-JS BigInt RFC 8032 Ed25519 Verify fallback when WebCrypto Ed25519 throws NotSupportedError.
   {
+    const fromHex = (h) => new Uint8Array(Buffer.from(h, 'hex'));
+    // RFC 8032 §7.1 Test Vector 1 (empty message) & Test Vector 2 (1-byte 0x72)
+    const vec1Pub = fromHex('d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a');
+    const vec1Sig = fromHex('e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b');
+    const vec2Pub = fromHex('3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c');
+    const vec2Sig = fromHex('92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00');
+
     const origImport = crypto.subtle.importKey;
     try {
       crypto.subtle.importKey = async () => {
@@ -2307,13 +2368,24 @@ test('Chief-Architect Audit Regressions: WSStream credit deadlock (P0-4), close 
         err.name = 'NotSupportedError';
         throw err;
       };
-      await assert.rejects(
-        () => cryptoMod.verifyEd25519(new Uint8Array(32), new Uint8Array([1]), new Uint8Array(64)),
-        (err) => err instanceof cryptoMod.UnsupportedCryptoError && /Chrome 137\+/i.test(err.message)
-      );
+      assert.equal(await cryptoMod.verifyEd25519(vec1Pub, new Uint8Array(0), vec1Sig), true, 'RFC 8032 Vec 1 pure-JS verify');
+      assert.equal(await cryptoMod.verifyEd25519(vec2Pub, new Uint8Array([0x72]), vec2Sig), true, 'RFC 8032 Vec 2 pure-JS verify');
+      assert.equal(await cryptoMod.verifyEd25519(vec2Pub, new Uint8Array([0x73]), vec2Sig), false, 'tampered message must fail pure-JS verify');
+      const nonCanonicalSig = new Uint8Array(vec1Sig);
+      nonCanonicalSig[63] |= 0x80; // S >= L
+      assert.equal(await cryptoMod.verifyEd25519(vec1Pub, new Uint8Array(0), nonCanonicalSig), false, 'non-canonical S >= L must fail');
     } finally {
       crypto.subtle.importKey = origImport;
     }
+  }
+
+  // 7b. P2-6: RFC 6455 WebSocket subprotocol validation rejects empty, duplicate, and invalid tokens.
+  {
+    const wsPatchMod = await loadTsModule('web/src/patch/ws_client_patch.ts');
+    wsPatchMod.validateWebSocketSubprotocols(['chat.v1', 'json-rpc']);
+    assert.throws(() => wsPatchMod.validateWebSocketSubprotocols(['chat', 'chat']), /SyntaxError|duplicate/i);
+    assert.throws(() => wsPatchMod.validateWebSocketSubprotocols(['']), /SyntaxError|Invalid/i);
+    assert.throws(() => wsPatchMod.validateWebSocketSubprotocols(['bad proto']), /SyntaxError|Invalid/i);
   }
 
   // 8. P3-1: AuthClient CAP_RESP preserves boolean `revoked` field.
@@ -2369,4 +2441,22 @@ test('Chief-Architect Audit Regressions: WSStream credit deadlock (P0-4), close 
     fetchPatchMod.isSameCanonicalRequestUrl('/api/x', 'https://sbx.example/api/x', 'https://sbx.example/app/'),
     true
   );
+
+  // 10. P1-1: Sub-iframe P2P_NAV_SETTLED MUST NOT hijack rootClientId!
+  {
+    const reg = new sessionRegMod.SessionRegistry(new Set(['https://portal.example']));
+    const mkPort = () => ({ postMessage() {}, close() {}, onmessage: null });
+    reg.attachPort('tab-r1', 'https://portal.example', { nodeId: 'n1', backendOrigin: 'http://app.local', isStaticMode: false }, mkPort());
+    reg.registerEnterNonce('nonce-root-guard-1234', 'tab-r1', '/');
+    reg.handleEnterNavigation(
+      new URL('https://sbx.example/__p2p_gw__/enter?tab=tab-r1&nonce=nonce-root-guard-1234&next=/'),
+      'root-frame-1',
+      ''
+    );
+    reg.bindClient('sub-iframe-2', 'tab-r1');
+    reg.clearExpectedRootNav('sub-iframe-2');
+    const sess = reg.getBoundSession('root-frame-1', '', '');
+    assert.equal(sess.rootClientId, 'root-frame-1', 'P1-1: sub-iframe must not hijack rootClientId via P2P_NAV_SETTLED');
+    assert.equal(reg.markExpectedRootNav('root-frame-1'), true, 'P1-1: real root frame must retain root nav tracking');
+  }
 });

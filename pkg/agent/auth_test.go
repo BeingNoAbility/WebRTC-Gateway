@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"webrtc-gateway/pkg/mux"
+	"webrtc-gateway/pkg/protocol"
 	"webrtc-gateway/pkg/proxy"
 )
 
@@ -474,3 +476,84 @@ func TestAgentSecurityRegressions(t *testing.T) {
 		t.Fatal("P2-12 regression: max-message-size:1024 below 4096 must fail closed")
 	}
 }
+
+func TestCapabilityStoreTrackAtomicNoPhantomOnPersistFailure(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "cap-state.json")
+	store, err := NewCapabilityStoreWithFile(stateFile)
+	if err != nil {
+		t.Fatalf("NewCapabilityStoreWithFile: %v", err)
+	}
+	now := time.Now()
+	if err := store.Track(CapabilityPayload{V: CapabilityVersion, JTI: "persisted-ok", Node: "nas", Exp: now.Unix() + 3600}); err != nil {
+		t.Fatalf("seed Track: %v", err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod read-only: %v", err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o700) }()
+
+	err = store.Track(CapabilityPayload{V: CapabilityVersion, JTI: "phantom-must-not-commit", Node: "nas", Exp: now.Unix() + 3600})
+	if err == nil {
+		t.Fatal("expected Track to fail when state directory is read-only")
+	}
+	items, total, _ := store.ListPage(now, 0, 10)
+	if total != 1 || len(items) != 1 || items[0].Payload.JTI != "persisted-ok" {
+		t.Fatalf("P1-6 regression: failed Track left phantom JTI in memory: total=%d items=%+v", total, items)
+	}
+}
+
+func TestCapRespRevokeWireSchemaMatchesTS(t *testing.T) {
+	id, err := GenerateEphemeralIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := proxy.NewDestinationPolicy("http://127.0.0.1:8080", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hp, err := proxy.NewHTTPProxy(proxy.HTTPProxyOptions{Policy: pol})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := New(Config{
+		NodeID:       "nas",
+		AccessSecret: "owner-pass",
+		Identity:     id,
+		HTTPProxy:    hp,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ag.Close()
+
+	var captured []byte
+	ctrlDC := &capTestDC{onSend: func(b []byte) { captured = append([]byte(nil), b...) }}
+	m := mux.New(mux.Config{PoolSize: 1})
+	defer m.Close()
+	m.AttachControlDC(ctrlDC)
+	sess := &VisitorSession{state: StateAuthenticated, role: "owner", mux: m}
+
+	reqRaw, _ := json.Marshal(capReqEnvelope{ReqID: "r-rev-1", Action: "revoke", JTI: "jti-abc-123"})
+	ag.handleCapabilityRPC(sess, reqRaw)
+
+	f, err := protocol.Decode(captured)
+	if err != nil || f.Type != protocol.TypeCapResp {
+		t.Fatalf("expected CAP_RESP frame, got err=%v frame=%+v", err, f)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(f.Payload, &parsed); err != nil {
+		t.Fatalf("unmarshal CAP_RESP: %v", err)
+	}
+	if parsed["ok"] != true || parsed["jti"] != "jti-abc-123" || parsed["revoked"] != true {
+		t.Fatalf("P1-4 regression: CAP_RESP revoke wire schema drifted from TS contract: %+v", parsed)
+	}
+}
+
+type capTestDC struct {
+	onSend func([]byte)
+}
+
+func (d *capTestDC) Send(b []byte) error    { d.onSend(b); return nil }
+func (d *capTestDC) BufferedAmount() uint64 { return 0 }
+func (d *capTestDC) Close() error           { return nil }

@@ -34,12 +34,20 @@
       "wire_hex": "00000000040400057b226f6b22"
     },
     {
-      "name": "headers_more_and_fin",
+      "name": "headers_more_nonfinal",
       "stream_id": 5,
       "type": 16,
-      "flags": 5,
+      "flags": 4,
       "payload_hex": "deadbeef",
-      "wire_hex": "0000000510050004deadbeef"
+      "wire_hex": "0000000510040004deadbeef"
+    },
+    {
+      "name": "headers_single_fin",
+      "stream_id": 5,
+      "type": 16,
+      "flags": 1,
+      "payload_hex": "cafebabe",
+      "wire_hex": "0000000510010004cafebabe"
     },
     {
       "name": "headers_final",
@@ -126,6 +134,7 @@
     { "name": "credit_zero_delta", "wire_hex": "000000011300000400000000" },
     { "name": "credit_msb_set", "wire_hex": "000000011300000480000000" },
     { "name": "headers_0b_more_forbidden", "wire_hex": "0000000110040000" },
+    { "name": "headers_more_and_fin_forbidden", "wire_hex": "0000000510050004deadbeef" },
     { "name": "ws_text_0b_nonfinal_forbidden", "wire_hex": "0000000121000000" },
     { "name": "ctrl_json_0b_more_forbidden", "wire_hex": "0000000004040000" },
     { "name": "headers_reserved_flag_0xfa", "wire_hex": "0000000110fa0000" },
@@ -136,7 +145,7 @@
     {
       "name": "http_get_with_cookie_mutations",
       "kind": 1,
-      "fetch_ctx": 5,
+      "fetch_ctx": 3,
       "method": "GET",
       "target": "/api/v1/items?a=1&b=2",
       "headers": [
@@ -145,9 +154,10 @@
       ],
       "cookie_mutations": [
         { "op": 1, "name": "theme", "value": "dark", "path": "/", "expires_ms": 1800000000000 },
-        { "op": 2, "name": "old", "value": "", "path": "/app", "expires_ms": 0 }
+        { "op": 2, "name": "old", "value": "", "path": "/app", "expires_ms": 0 },
+        { "op": 1, "secure": true, "name": "__Host-csrf", "value": "tok1", "path": "/", "expires_ms": 0 }
       ],
-      "hex": "01050347455400152f6170692f76312f6974656d733f613d3126623d320002000661636365707400106170706c69636174696f6e2f6a736f6e0007782d74726163650003742d31000201057468656d6500046461726b00012f000001a3185c500002036f6c64000000042f6170700000000000000000"
+      "hex": "01030347455400152f6170692f76312f6974656d733f613d3126623d320002000661636365707400106170706c69636174696f6e2f6a736f6e0007782d74726163650003742d31000301057468656d6500046461726b00012f000001a3185c500002036f6c64000000042f6170700000000000000000810b5f5f486f73742d637372660004746f6b3100012f0000000000000000"
     },
     {
       "name": "ws_connect_utf8",
@@ -184,8 +194,12 @@
       "hex": "01800347455400012f00000000"
     },
     {
-      "name": "removed_top_level_nav_fetch_ctx_bit",
-      "hex": "01020347455400012f00000000"
+      "name": "reserved_fetch_ctx_bit_0x08",
+      "hex": "01080347455400012f00000000"
+    },
+    {
+      "name": "invalid_cookie_op_reserved_flag",
+      "hex": "01000347455400012f0000000141016100013100012f0000000000000000"
     },
     {
       "name": "target_missing_leading_slash",

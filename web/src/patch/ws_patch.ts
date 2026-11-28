@@ -4,7 +4,6 @@
  * captures & stubs `navigator.serviceWorker`, and wires modular cookie/fetch/XHR/WebSocket/navigation patches.
  */
 
-import { base64UrlDecode } from '../shared/crypto';
 import { isCookieDelta, isRecord } from '../shared/ipc';
 import { installCookiePatch, parseDocumentCookieAssignment, type CookieParseContext } from './cookie_patch';
 import {
@@ -23,8 +22,6 @@ export {
   parseDocumentCookieAssignment,
   type CookieParseContext,
 };
-
-const textDecoder = new TextDecoder();
 
 function captureAndStubServiceWorker(): PrivateSWHandle | null {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
@@ -122,20 +119,7 @@ function loadRuntimeConfig(isWorker: boolean): RuntimePatchConfig | null {
     }
     return parseRawBootObject(raw);
   }
-
-  // Fallback for legacy inline attribute in standalone tests.
-  if (typeof document === 'undefined') return null;
-  const scriptEl =
-    (document.currentScript as HTMLScriptElement | null) ||
-    (document.querySelector('script[data-p2p-boot]') as HTMLScriptElement | null);
-  const bootB64 = scriptEl?.getAttribute('data-p2p-boot');
-  if (!bootB64) return null;
-  scriptEl?.removeAttribute('data-p2p-boot');
-  try {
-    return parseRawBootObject(JSON.parse(textDecoder.decode(base64UrlDecode(bootB64))));
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 if (typeof window !== 'undefined' || typeof self !== 'undefined') {

@@ -12,6 +12,7 @@ import (
 
 type goldenCookieEntry struct {
 	Op        uint8  `json:"op"`
+	Secure    bool   `json:"secure,omitempty"`
 	Name      string `json:"name"`
 	Value     string `json:"value"`
 	Path      string `json:"path"`
@@ -306,8 +307,8 @@ func TestFrameBoundariesAndV8Validation(t *testing.T) {
 		t.Fatal("expected > 64 KiB response header block to fail")
 	}
 
-	// Reserved FetchCtx / RespFlags bits (including removed bit 1 / 0x02) MUST be rejected.
-	for _, badCtx := range []uint8{0x02, 0x80} {
+	// Reserved FetchCtx / RespFlags bits MUST be rejected.
+	for _, badCtx := range []uint8{0x08, 0x80} {
 		if _, err := EncodeRequestHeaders(&RequestHeaders{
 			Kind: StreamKindHTTP, FetchCtx: badCtx, Method: "GET", Target: "/",
 		}); err == nil {

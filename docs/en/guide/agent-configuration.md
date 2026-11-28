@@ -42,6 +42,7 @@ See complete templates in [`configs/agent.example.yaml`](https://github.com/Bein
 | `-portal-url` | `PORTAL_URL` | `portal_url` | empty | Portal base URL for printing pinned and share links |
 | `-mint-link` | — | — | empty | Mint an offline Ed25519 capability share link (e.g. `2h`, `7d`) and exit |
 | `-mint-path` / `-mint-readonly` / `-mint-max-conns` | — | — | empty / `false` / `0` | Path prefix, read-only, and concurrency limits for `-mint-link` |
+| `-revoke-cap` | — | — | empty | Revoke a capability token by JTI in the persistent state file and exit (cross-process lock safe) |
 | `-health` / `-health-url` | — | — | `false` / empty | Run container health probe and exit |
 
 ---

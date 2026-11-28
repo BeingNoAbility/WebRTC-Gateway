@@ -164,6 +164,8 @@ func (s *SignalServer) loadAndPreRenderAssets() error {
 	}
 	if s.opts.StaticDir != "" && s.assets.rawIndexHTML == "" {
 		log.Printf("[Signal] WARNING: static dir %q does not contain index.html; Portal UI will return 404", s.opts.StaticDir)
+	} else if s.opts.StaticDir == "" && s.opts.StaticFS != nil && s.assets.rawSWJS == nil {
+		log.Printf("[Signal] WARNING: embedded web assets are missing (built without '-tags embedweb' and no -static dir); rebuild with 'make build' or pass -static")
 	}
 	return nil
 }

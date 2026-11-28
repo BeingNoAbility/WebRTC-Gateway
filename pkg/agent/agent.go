@@ -46,7 +46,6 @@ type Config struct {
 	StateFile           string // Optional explicit capability revocation persistence path
 	HTTPProxy           *proxy.HTTPProxy
 	WSProxy             *proxy.WSProxy
-	IsStaticMode        bool
 	ICEMDNS             bool // Default true: obfuscate local LAN/Docker/VPN IPs via mDNS
 	STUNServers         []string
 	TURNURL             string

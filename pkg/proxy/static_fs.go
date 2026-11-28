@@ -24,10 +24,12 @@ const (
 	dirReadBatchSize      = 512
 	maxSymlinkHops        = 16
 
-	// Applied to ALL served files and error/redirect responses when !inlineActive (blocks extensionless HTML/SVG XSS).
-	staticFileSandboxCSP = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:"
-	// Applied to generated directory listings (includes allow-downloads so browsers permit file downloads).
-	staticDirSandboxCSP = "sandbox allow-downloads; default-src 'none'; style-src 'unsafe-inline'"
+	// Applied to ALL served files and error/redirect responses when !inlineActive:
+	// blocks scripts/forms/popups/plugins/top-navigation while preserving the sandbox origin
+	// (`allow-same-origin` WITHOUT `allow-scripts`) so SW clientId binding stays unified with `-target` mode.
+	staticFileSandboxCSP = "sandbox allow-same-origin allow-downloads; default-src 'none'; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self'"
+	// Applied to generated directory listings (strictly script-free, preserves sandbox origin & file downloads).
+	staticDirSandboxCSP = "sandbox allow-same-origin allow-downloads; default-src 'none'; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; style-src 'unsafe-inline'"
 )
 
 // StaticFSOptions configures the minimal Go 1.24+ os.Root read-only static handler.

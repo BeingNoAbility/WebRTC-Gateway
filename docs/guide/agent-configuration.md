@@ -42,6 +42,7 @@ WebRTC Gateway 采用统一配置加载器（`pkg/config`）：
 | `-portal-url` | `PORTAL_URL` | `portal_url` | 空 | 门户基地址（用于输出钉扎与分享链接） |
 | `-mint-link` | — | — | 空 | 离线签发 Ed25519 能力分享链接（如 `2h`、`7d`）并退出 |
 | `-mint-path` / `-mint-readonly` / `-mint-max-conns` | — | — | 空 / `false` / `0` | 能力令牌路径前缀、只读与并发连接限制 |
+| `-revoke-cap` | — | — | 空 | 按 JTI 离线吊销持久化状态文件中的能力令牌并退出（支持跨进程锁合并） |
 | `-health` / `-health-url` | — | — | `false` / 空 | 执行容器健康检查并退出 |
 
 ---

@@ -110,4 +110,37 @@ func TestReloadingCertProvider_HotReload(t *testing.T) {
 	if leaf2.Subject.CommonName != "rotated.example.com" {
 		t.Fatalf("expected hot-reloaded CN rotated.example.com, got %q", leaf2.Subject.CommonName)
 	}
+
+	// P2-9: Atomic symlink/rename replacement within the exact same mtime & equal CN length
+	// (different inode) MUST STILL trigger hot-reload via os.SameFile!
+	origInfo, err := os.Stat(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origMtime := origInfo.ModTime()
+	tmpDir := t.TempDir()
+	tmpCert, tmpKey := writeTempSelfSignedCert(t, tmpDir, "atomic2.example.com")
+	_ = os.Chtimes(tmpCert, origMtime, origMtime)
+	_ = os.Chtimes(tmpKey, origMtime, origMtime)
+	if err := os.Rename(tmpCert, certPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmpKey, keyPath); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(certPath, origMtime, origMtime)
+	_ = os.Chtimes(keyPath, origMtime, origMtime)
+
+	prov.mu.Lock()
+	prov.lastCheck = time.Time{}
+	prov.mu.Unlock()
+
+	c3, err := prov.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf3, _ := x509.ParseCertificate(c3.Certificate[0])
+	if leaf3.Subject.CommonName != "atomic2.example.com" {
+		t.Fatalf("P2-9 regression: same-mtime atomic inode replacement did not hot-reload, got CN %q", leaf3.Subject.CommonName)
+	}
 }

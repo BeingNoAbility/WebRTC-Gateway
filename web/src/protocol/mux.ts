@@ -350,6 +350,7 @@ export class PoolStream extends BaseStream {
   private recvInFlightPayload = 0;
   private deliveredUnackedBytes = 0;
   private deliveredUnackedChunks = 0;
+  private deliveredUnackedMem = 0;
   private pendingCreditBytes = 0;
   private pendingCreditChunks = 0;
 
@@ -379,16 +380,29 @@ export class PoolStream extends BaseStream {
 
   /**
    * Consumer acknowledges payload bytes read (pure payload bytes ONLY — fixes C-5!).
-   * Replenishes wire CREDIT every 128 KiB OR 256 chunks so tiny 13B SSE tokens never stall or reset.
+   * Releases matching session memory budget AND replenishes wire CREDIT every 128 KiB OR 256 chunks
+   * so tiny 13B SSE tokens never stall or reset while paused consumers stay strictly bounded.
    */
   ackConsumed(payloadBytes: number, chunkCount = 1): void {
-    if (this.terminated || this.remoteFin || payloadBytes <= 0) return;
+    if (this.terminated || payloadBytes <= 0) return;
     const ackBytes = Math.min(payloadBytes, this.deliveredUnackedBytes);
     if (ackBytes <= 0) return;
+    const ackChunks = Math.min(Math.max(1, chunkCount), this.deliveredUnackedChunks);
     this.deliveredUnackedBytes -= ackBytes;
-    this.deliveredUnackedChunks = Math.max(0, this.deliveredUnackedChunks - chunkCount);
+    this.deliveredUnackedChunks -= ackChunks;
+
+    const memRelease =
+      this.deliveredUnackedBytes === 0
+        ? this.deliveredUnackedMem
+        : Math.min(this.deliveredUnackedMem, ackBytes + ackChunks * INBOUND_CHUNK_OVERHEAD);
+    if (memRelease > 0) {
+      this.deliveredUnackedMem -= memRelease;
+      this.mux.releaseSessionBytes(memRelease);
+    }
+
+    if (this.remoteFin) return;
     this.pendingCreditBytes += ackBytes;
-    this.pendingCreditChunks += chunkCount;
+    this.pendingCreditChunks += ackChunks;
     if (
       this.pendingCreditBytes >= CREDIT_THRESHOLD_BYTES ||
       this.pendingCreditChunks >= CREDIT_THRESHOLD_CHUNKS
@@ -447,7 +461,7 @@ export class PoolStream extends BaseStream {
     const fin = (flags & FrameFlag.FIN) !== 0;
     const plen = payload.byteLength;
     if (plen > 0) {
-      if (this.recvInFlightPayload + plen > MAX_STREAM_INBOUND_BYTES) {
+      if (this.recvInFlightPayload + this.deliveredUnackedBytes + plen > MAX_STREAM_INBOUND_BYTES) {
         this.reset(ErrorCode.FLOW_CONTROL_ERROR);
         return;
       }
@@ -459,9 +473,9 @@ export class PoolStream extends BaseStream {
       const copy = new Uint8Array(plen);
       copy.set(payload);
       if (this.dataCb) {
-        this.mux.releaseSessionBytes(memCost);
         this.deliveredUnackedBytes += plen;
         this.deliveredUnackedChunks++;
+        this.deliveredUnackedMem += memCost;
         this.dataCb(copy);
       } else {
         this.recvInFlightPayload += plen;
@@ -496,9 +510,9 @@ export class PoolStream extends BaseStream {
     while (this.pendingChunks.length > 0 && !this.terminated) {
       const item = this.pendingChunks.shift()!;
       this.recvInFlightPayload = Math.max(0, this.recvInFlightPayload - item.data.byteLength);
-      this.mux.releaseSessionBytes(item.memCost);
       this.deliveredUnackedBytes += item.data.byteLength;
       this.deliveredUnackedChunks++;
+      this.deliveredUnackedMem += item.memCost;
       this.dataCb(item.data);
     }
     if (this.pendingEnd && this.pendingChunks.length === 0 && !this.terminated && this.endCb) {
@@ -508,7 +522,7 @@ export class PoolStream extends BaseStream {
   }
 
   protected cleanupInbound(): void {
-    let freed = 0;
+    let freed = this.deliveredUnackedMem;
     for (const item of this.pendingChunks) {
       freed += item.memCost;
     }
@@ -516,6 +530,7 @@ export class PoolStream extends BaseStream {
     this.recvInFlightPayload = 0;
     this.deliveredUnackedBytes = 0;
     this.deliveredUnackedChunks = 0;
+    this.deliveredUnackedMem = 0;
     this.pendingCreditBytes = 0;
     this.pendingCreditChunks = 0;
     if (freed > 0) this.mux.releaseSessionBytes(freed);
@@ -557,6 +572,7 @@ export class WSStream extends BaseStream {
   private consumedChunks = 0;
   private writeChain: Promise<void> = Promise.resolve();
   private pendingSends = 0;
+  private pendingSendBytes = 0;
   private closeRequested = false;
 
   private recordConsumed(bytes: number, chunks: number): void {
@@ -631,12 +647,17 @@ export class WSStream extends BaseStream {
     if (raw.byteLength > MAX_WS_MESSAGE_BYTES) {
       return Promise.reject(new RangeError('WebSocket message exceeds 16 MiB'));
     }
+    if (this.pendingSendBytes + raw.byteLength > MAX_WS_MESSAGE_BYTES) {
+      return Promise.reject(new RangeError('WebSocket outbound queue exceeds 16 MiB'));
+    }
     // Serialize multi-chunk message sends internally so concurrent callers can never interleave frames.
     this.pendingSends++;
+    this.pendingSendBytes += raw.byteLength;
     const run = this.writeChain
       .then(() => this.sendMessageSerialized(isBinary, raw))
       .finally(() => {
         this.pendingSends--;
+        this.pendingSendBytes = Math.max(0, this.pendingSendBytes - raw.byteLength);
       });
     this.writeChain = run.catch(() => {});
     return run;

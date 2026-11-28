@@ -72,6 +72,31 @@ function initBridgeRuntime(): void {
   const allowedPortalOrigins = readAllowedPortalOrigins(document);
   const urlTabId = new URLSearchParams(location.search).get('tab') || '';
 
+  async function waitForWorkerActivated(worker: ServiceWorker, timeoutMs = 4_000): Promise<ServiceWorker | null> {
+    if (worker.state === 'activated') return worker;
+    if (worker.state === 'redundant') return null;
+    return new Promise<ServiceWorker | null>((resolve) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        worker.removeEventListener('statechange', onState);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve(worker.state === 'activated' ? worker : null);
+      }, timeoutMs);
+      const onState = () => {
+        if (worker.state === 'activated') {
+          cleanup();
+          resolve(worker);
+        } else if (worker.state === 'redundant') {
+          cleanup();
+          resolve(null);
+        }
+      };
+      worker.addEventListener('statechange', onState);
+    });
+  }
+
   async function ensureServiceWorkerReady(): Promise<ServiceWorker> {
     if (!('serviceWorker' in navigator)) {
       throw new Error('ServiceWorker API unavailable in this browser context');
@@ -87,6 +112,14 @@ function initBridgeRuntime(): void {
     }
     const reg = await swRegPromise;
 
+    // P1-8: If a newer SW version is installing/waiting (about to skipWaiting()+clients.claim()),
+    // wait for it to activate instead of handing bridgePort to the doomed previous reg.active!
+    const incoming = reg.installing || reg.waiting;
+    if (incoming) {
+      const promoted = await waitForWorkerActivated(incoming);
+      if (promoted) return promoted;
+    }
+
     if (reg.active && reg.active.state === 'activated') {
       return reg.active;
     }
@@ -97,6 +130,54 @@ function initBridgeRuntime(): void {
       throw new Error('ServiceWorker failed to activate');
     }
     return worker;
+  }
+
+  function attachPortWithAck(
+    sw: ServiceWorker,
+    tabId: string,
+    portalOrigin: string,
+    meta: unknown,
+    bridgePort: MessagePort,
+    timeoutMs = 3_000
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const ackCh = new MessageChannel();
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ackCh.port1.onmessage = null;
+        try {
+          ackCh.port1.close();
+        } catch {
+          // ignore
+        }
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      ackCh.port1.onmessage = (ackEv: MessageEvent) => {
+        finish(Boolean(isRecord(ackEv.data) && ackEv.data.ok === true));
+      };
+      try {
+        sw.postMessage(
+          {
+            type: 'SW_ATTACH_PORT',
+            tabId,
+            portalOrigin,
+            meta,
+          },
+          [bridgePort, ackCh.port2]
+        );
+      } catch {
+        try {
+          ackCh.port2.close();
+        } catch {
+          // ignore
+        }
+        finish(false);
+      }
+    });
   }
 
   window.addEventListener('message', async (ev: MessageEvent) => {
@@ -120,18 +201,17 @@ function initBridgeRuntime(): void {
 
     try {
       const sw = await ensureServiceWorkerReady();
-      sw.postMessage(
-        {
-          type: 'SW_ATTACH_PORT',
-          tabId: data.tabId,
-          portalOrigin: ev.origin,
-          meta: data.meta,
-        },
-        [bridgePort]
-      );
+      const acked = await attachPortWithAck(sw, data.tabId, ev.origin, data.meta, bridgePort);
+      if (!acked) {
+        throw new Error('Service Worker rejected or timed out on SW_ATTACH_PORT');
+      }
       window.parent.postMessage({ type: 'P2P_BRIDGE_READY', tabId: data.tabId }, ev.origin);
     } catch (err) {
-      bridgePort.close();
+      try {
+        bridgePort.close();
+      } catch {
+        // ignore
+      }
       console.error('[P2P Bridge] Failed to attach Service Worker port:', err);
     }
   });

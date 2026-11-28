@@ -78,13 +78,17 @@ test('P2PMux V8 Golden Vectors (TS codec parity with Go + H-6 BOM preservation)'
   }
 
   for (const tc of golden.tlv_requests) {
-    const cookieMutations = tc.cookie_mutations.map((c) => ({
-      op: c.op,
-      name: c.name,
-      value: c.value,
-      path: c.path,
-      expiresMs: c.expires_ms,
-    }));
+    const cookieMutations = tc.cookie_mutations.map((c) => {
+      const e = {
+        op: c.op,
+        name: c.name,
+        value: c.value,
+        path: c.path,
+        expiresMs: c.expires_ms,
+      };
+      if (c.secure) e.secure = true;
+      return e;
+    });
     const enc = tlvMod.encodeRequestHeaders({
       kind: tc.kind,
       fetchCtx: tc.fetch_ctx,
@@ -106,13 +110,17 @@ test('P2PMux V8 Golden Vectors (TS codec parity with Go + H-6 BOM preservation)'
   }
 
   for (const tc of golden.tlv_responses) {
-    const cookieDeltas = tc.cookie_deltas.map((c) => ({
-      op: c.op,
-      name: c.name,
-      value: c.value,
-      path: c.path,
-      expiresMs: c.expires_ms,
-    }));
+    const cookieDeltas = tc.cookie_deltas.map((c) => {
+      const e = {
+        op: c.op,
+        name: c.name,
+        value: c.value,
+        path: c.path,
+        expiresMs: c.expires_ms,
+      };
+      if (c.secure) e.secure = true;
+      return e;
+    });
     const enc = tlvMod.encodeResponseHeaders({
       status: tc.status,
       respFlags: tc.resp_flags,
@@ -482,5 +490,38 @@ test('PoolMux V8 TS Audit Regressions (P1-7, P2-7): WSStream concurrent sendMess
   }
   assert.equal(ws.isClosed, true, 'P2-7: exceeding MAX_WS_MESSAGE_CHUNKS must reset WSStream');
   assert.equal(mux.sessionMemUsed, 0, 'P2-7: reset WSStream must release all session memory');
+
+  // 3. P1-2: PoolStream with attached onData MUST STILL enforce MAX_STREAM_INBOUND_BYTES (2 MiB)
+  //    when consumer stops calling ackConsumed() (no Portal tab OOM!).
+  const httpReq = tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.HTTP, method: 'GET', target: '/flood', headers: [] });
+  const hs = await mux.openHTTPStream(httpReq, false);
+  const resp200 = tlvMod.encodeResponseHeaders({ status: 200, headers: [] });
+  dc.onmessage({ data: frameMod.encodeFrame(hs.streamId, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, resp200).buffer });
+  await hs.waitResponseHeaders();
+
+  let resetErr = null;
+  hs.onReset((e) => { resetErr = e; });
+  hs.onData(() => { /* intentionally paused consumer: never calls ackConsumed() */ });
+
+  const flood32k = new Uint8Array(32 * 1024);
+  for (let i = 0; i < 128; i++) {
+    if (hs.isClosed) break;
+    dc.onmessage({ data: frameMod.encodeFrame(hs.streamId, frameMod.FrameType.DATA, frameMod.FrameFlag.NONE, flood32k).buffer });
+  }
+  assert.equal(hs.isClosed, true, 'P1-2: PoolStream with paused onData consumer must reset at 2 MiB inbound cap');
+  assert.ok(resetErr, 'P1-2: PoolStream must fire onReset on inbound flow-control violation');
+  assert.equal(mux.sessionMemUsed, 0, 'P1-2: PoolStream reset must release all reserved session memory');
+
+  // 4. P1-2: WSStream.sendMessage enforces standalone 16 MiB outbound queue bound.
+  const ws2 = await mux.openWSStream(wsReq);
+  dc.bufferedAmount = 1024 * 1024;
+  const p1 = ws2.sendMessage(new Uint8Array(10 * 1024 * 1024));
+  await assert.rejects(
+    () => ws2.sendMessage(new Uint8Array(7 * 1024 * 1024)),
+    /outbound queue exceeds 16 MiB/i,
+    'WSStream standalone outbound queue must stay bounded to 16 MiB'
+  );
+  ws2.reset(frameMod.ErrorCode.CANCEL);
   mux.close();
+  await p1.catch(() => {});
 });

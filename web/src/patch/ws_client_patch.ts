@@ -32,6 +32,25 @@ function canonicalizeWebSocketUrl(rawUrl: string): string {
   }
 }
 
+const WS_SUBPROTO_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/**
+ * Validates WHATWG / RFC 6455 WebSocket subprotocol list: every entry must be a non-empty
+ * RFC 9110 HTTP token and duplicate subprotocols are forbidden (throws SyntaxError).
+ */
+export function validateWebSocketSubprotocols(protocols: string[]): void {
+  const seen = new Set<string>();
+  for (const p of protocols) {
+    if (!p || !WS_SUBPROTO_TOKEN_RE.test(p) || seen.has(p)) {
+      if (typeof DOMException === 'function') {
+        throw new DOMException(`Invalid or duplicate WebSocket subprotocol '${p}'`, 'SyntaxError');
+      }
+      throw new SyntaxError(`Invalid or duplicate WebSocket subprotocol '${p}'`);
+    }
+    seen.add(p);
+  }
+}
+
 export function installVirtualWebSocket(
   cfg: RuntimePatchConfig,
   swHandle: PrivateSWHandle | null,
@@ -150,9 +169,10 @@ export function installVirtualWebSocket(
       this.url = canonicalizeWebSocketUrl(urlStr);
       const protoList = Array.isArray(protocols)
         ? protocols.map(String)
-        : protocols
+        : protocols !== undefined
           ? [String(protocols)]
           : [];
+      validateWebSocketSubprotocols(protoList);
 
       const ch = new MessageChannel();
       this.port = ch.port1;

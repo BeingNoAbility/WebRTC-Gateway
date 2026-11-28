@@ -786,3 +786,80 @@ func TestRegression_P1_3_HTTPCloseDoesNotStallBehindBlockedWrite(t *testing.T) {
 		t.Fatal("P1-3 regression: blocked Write() did not wake after Close()")
 	}
 }
+
+func TestMuxCloseHandleLaneMessageRaceZeroGlobalLeak(t *testing.T) {
+	globalStreams := &atomic.Int64{}
+	globalBudget := NewMemoryBudget(64 * 1024 * 1024)
+
+	hdr, err := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
+		Kind: protocol.StreamKindHTTP, Method: "GET", Target: "/race-close-leak",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdrFrameMore, err := (&protocol.Frame{
+		StreamID: 1, Type: protocol.TypeHeaders, Flags: protocol.FlagMore, Payload: hdr,
+	}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdrFrameSingle, err := (&protocol.Frame{
+		StreamID: 3, Type: protocol.TypeHeaders, Flags: protocol.FlagFin, Payload: hdr,
+	}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for iter := 0; iter < 500; iter++ {
+		m := New(Config{
+			PoolSize:            1,
+			MaxGlobalStreams:    512,
+			GlobalActiveStreams: globalStreams,
+			GlobalBudget:        globalBudget,
+			SessionBudget:       NewMemoryBudget(16 * 1024 * 1024),
+		})
+		m.AttachControlDC(&captureDC{})
+		m.AttachLaneDC(0, &captureDC{})
+
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			m.HandleLaneMessage(0, hdrFrameMore)
+		}()
+		go func() {
+			defer wg.Done()
+			m.HandleLaneMessage(0, hdrFrameSingle)
+		}()
+		go func() {
+			defer wg.Done()
+			m.Close()
+		}()
+		wg.Wait()
+	}
+
+	if got := globalStreams.Load(); got != 0 {
+		t.Fatalf("P0-1 regression: leaked global active streams after concurrent Close: got %d, want 0", got)
+	}
+	if got := globalBudget.Used(); got != 0 {
+		t.Fatalf("P0-1 regression: leaked global memory budget after concurrent Close: got %d bytes, want 0", got)
+	}
+}
+
+func TestOpenStreamLimitReachedReturnsSentinel(t *testing.T) {
+	m := New(Config{PoolSize: 1, MaxSessionStreams: 1})
+	defer m.Close()
+	m.AttachLaneDC(0, &captureDC{})
+	hdr, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
+		Kind: protocol.StreamKindHTTP, Method: "GET", Target: "/limit",
+	})
+	st1, err := m.OpenStream(hdr, true)
+	if err != nil {
+		t.Fatalf("first OpenStream failed: %v", err)
+	}
+	defer st1.Close()
+
+	if _, err := m.OpenStream(hdr, true); !errors.Is(err, ErrStreamLimitReached) {
+		t.Fatalf("expected ErrStreamLimitReached on second stream, got %v", err)
+	}
+}

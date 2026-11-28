@@ -863,7 +863,6 @@ func TestRegression_P1_AuthResultBoundedWithinMaxControlJSONSize(t *testing.T) {
 	raw, err := marshalBoundedAuthResult("owner", "resume-tok", "", BackendMeta{
 		NodeID:              "demo",
 		BackendOrigin:       "https://app.example.com",
-		IsStaticMode:        false,
 		CookieSecureContext: proxy.IsSecureCookieOrigin(targetURL),
 		InitialCookies:      bigDeltas,
 	})
