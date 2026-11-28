@@ -1,3 +1,4 @@
+import { CookieMirrorStore } from '../shared/cookie_mirror';
 import { base64UrlEncode } from '../shared/crypto';
 import {
   isCookieDelta,
@@ -6,13 +7,6 @@ import {
   type CookieDelta,
 } from '../shared/ipc';
 import type { PrivateSWHandle, RuntimePatchConfig } from './types';
-
-interface MirrorCookie {
-  name: string;
-  value: string;
-  path: string;
-  expires: number; // unix ms, 0 = session
-}
 
 const textEncoder = new TextEncoder();
 
@@ -24,14 +18,6 @@ function defaultCookiePath(pathname: string): string {
   return pathname.slice(0, lastSlash);
 }
 
-function cookiePathMatches(reqPath: string, cookiePath: string): boolean {
-  const p = reqPath || '/';
-  if (p === cookiePath) return true;
-  if (!p.startsWith(cookiePath)) return false;
-  if (cookiePath.endsWith('/')) return true;
-  return p.charCodeAt(cookiePath.length) === 0x2f;
-}
-
 export interface CookieParseContext {
   pathname?: string;
   now?: number;
@@ -41,8 +27,9 @@ export interface CookieParseContext {
 
 /**
  * Parses a JS `document.cookie = "..."` assignment into a structured `ClientCookieMutation`,
- * enforcing RFC 6265 validation (`Domain`, `HttpOnly`, `__Host-`, `__Secure-`, strict `Max-Age`,
- * and CTL/semicolon hygiene).
+ * strictly aligned with Go `ProxyCookieJar.ApplyClientMutations` (rejects `HttpOnly`, `__Host-`,
+ * `__Secure-`, foreign `Domain`, `Secure` on non-secure target origin, and CTL/semicolon hygiene)
+ * so the browser mirror and Agent jar never split-brain.
  */
 export function parseDocumentCookieAssignment(
   raw: string,
@@ -66,14 +53,18 @@ export function parseDocumentCookieAssignment(
   const name = first.slice(0, eq).trim();
   const value = first.slice(eq + 1).trim();
   if (!name || /[\s\r\n\0;=]/.test(name)) return null;
+  // Align strictly with Go ProxyCookieJar.ApplyClientMutations: JS cannot forge __Host-/__Secure-
+  // cookies because ClientCookieMutation does not carry a Secure flag on the wire.
+  const lowerName = name.toLowerCase();
+  if (lowerName.startsWith('__host-') || lowerName.startsWith('__secure-')) {
+    return null;
+  }
   for (let i = 0; i < value.length; i++) {
     const c = value.charCodeAt(i);
     if (c < 0x20 || c === 0x7f || c === 0x3b) return null;
   }
 
   let path = defaultCookiePath(currentPathname);
-  let explicitPath = '';
-  let hasDomainAttr = false;
   let hasSecureAttr = false;
   let expires = 0;
   let hasMaxAge = false;
@@ -91,7 +82,6 @@ export function parseDocumentCookieAssignment(
     } else if (aName === 'secure') {
       hasSecureAttr = true;
     } else if (aName === 'domain') {
-      hasDomainAttr = true;
       const dom = aVal.replace(/^\.+/, '').toLowerCase();
       if (!dom) return null;
       if (allowedHosts.length > 0) {
@@ -99,7 +89,6 @@ export function parseDocumentCookieAssignment(
         if (!matches) return null;
       }
     } else if (aName === 'path' && aVal.startsWith('/')) {
-      explicitPath = aVal;
       path = aVal;
     } else if (aName === 'max-age') {
       if (/^-?\d+$/.test(aVal)) {
@@ -130,15 +119,6 @@ export function parseDocumentCookieAssignment(
     }
   }
 
-  const lowerName = name.toLowerCase();
-  if (lowerName.startsWith('__secure-') && (!hasSecureAttr || !isSecure)) {
-    return null;
-  }
-  if (lowerName.startsWith('__host-')) {
-    if (!hasSecureAttr || !isSecure || hasDomainAttr || explicitPath !== '/') {
-      return null;
-    }
-  }
   if (hasSecureAttr && !isSecure) {
     return null;
   }
@@ -155,55 +135,13 @@ export function parseDocumentCookieAssignment(
   };
 }
 
-export class ClientCookieMirror {
-  private readonly entries = new Map<string, MirrorCookie>();
-
-  applyDeltas(deltas: CookieDelta[], now = Date.now()): void {
-    for (const d of deltas) {
-      if (!isCookieDelta(d)) continue;
-      const p = d.path && d.path.startsWith('/') ? d.path : '/';
-      const key = `${p}\0${d.name}`;
-      if (d.op === 'del' || (d.expires && d.expires > 0 && d.expires <= now)) {
-        this.entries.delete(key);
-        continue;
-      }
-      this.entries.set(key, {
-        name: d.name,
-        value: d.value ?? '',
-        path: p,
-        expires: d.expires && d.expires > 0 ? d.expires : 0,
-      });
-    }
-  }
-
+export class ClientCookieMirror extends CookieMirrorStore {
   applyMutation(mut: ClientCookieMutation, now = Date.now()): void {
-    const p = mut.path && mut.path.startsWith('/') ? mut.path : '/';
-    const key = `${p}\0${mut.name}`;
-    if (mut.op === 'del' || (mut.expires && mut.expires > 0 && mut.expires <= now)) {
-      this.entries.delete(key);
-      return;
-    }
-    this.entries.set(key, {
-      name: mut.name,
-      value: mut.value ?? '',
-      path: p,
-      expires: mut.expires && mut.expires > 0 ? mut.expires : 0,
-    });
+    this.setOrDelete(mut.op, mut.name, mut.value, mut.path, mut.expires, now);
   }
 
   serialize(pathname: string, now = Date.now()): string {
-    const matched: MirrorCookie[] = [];
-    for (const [k, c] of this.entries) {
-      if (c.expires > 0 && c.expires <= now) {
-        this.entries.delete(k);
-        continue;
-      }
-      if (cookiePathMatches(pathname, c.path)) {
-        matched.push(c);
-      }
-    }
-    matched.sort((a, b) => b.path.length - a.path.length);
-    return matched.map((c) => `${c.name}=${c.value}`).join('; ');
+    return this.serializeForPath(pathname, now);
   }
 }
 
@@ -229,6 +167,12 @@ export function installCookiePatch(
       // ignore
     }
   }
+  // Authoritative secure-origin flag delivered by Go Agent (ProxyCookieJar.IsSecureCookieOrigin),
+  // falling back to browser protocol only if omitted in standalone unit tests.
+  const isTargetSecureContext =
+    typeof cfg.cookieSecureContext === 'boolean'
+      ? cfg.cookieSecureContext
+      : location.protocol === 'https:';
 
   let mutSeq = 0;
   const unsyncedMuts: Array<{ seq: number; ts: number; mut: ClientCookieMutation }> = [];
@@ -289,7 +233,7 @@ export function installCookiePatch(
     set(val: string) {
       const mut = parseDocumentCookieAssignment(String(val), {
         pathname: location.pathname,
-        isSecureContext: location.protocol === 'https:',
+        isSecureContext: isTargetSecureContext,
         allowedHosts: allowedCookieHosts,
       });
       if (!mut) return;

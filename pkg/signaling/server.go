@@ -362,16 +362,15 @@ func (s *SignalServer) handleWSRoute(w http.ResponseWriter, r *http.Request, can
 	}
 
 	clientIP := ExtractClientIP(r, s.trustedProxies, s.clientIPHeader)
+	if kind == "agent" {
+		s.handleAgentWS(w, r, nodeID, clientIP)
+		return
+	}
 	if !s.Limiter.AllowUpgrade(clientIP) {
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 		return
 	}
-
-	if kind == "agent" {
-		s.handleAgentWS(w, r, nodeID, clientIP)
-	} else {
-		s.handleClientWS(w, r, nodeID, clientIP)
-	}
+	s.handleClientWS(w, r, nodeID, clientIP)
 }
 
 // NewHTTPServer creates the hardened HTTP/HTTPS server for graceful shutdown.

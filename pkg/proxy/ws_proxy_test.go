@@ -214,3 +214,51 @@ func TestWSProxyStreamingCloseCodesAndDefaultOrigin(t *testing.T) {
 		t.Fatalf("streaming 96 KiB WS mismatch: status=%d code=%d len=%d", st2, cc2, len(data2))
 	}
 }
+
+func TestRegression_P1_WSProxyAbruptBackendCloseNeverEmitsTypeDataFin(t *testing.T) {
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Abruptly close TCP without sending RFC 6455 close frame!
+		_ = c.CloseNow()
+	}))
+	defer wsSrv.Close()
+
+	pol, _ := NewDestinationPolicy(wsSrv.URL, "")
+	wsp, _ := NewWSProxy(WSProxyOptions{Policy: pol})
+	cm, sm := newTestMuxPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		st, err := sm.AcceptStream(context.Background())
+		if err != nil {
+			return
+		}
+		rh, _ := protocol.DecodeRequestHeaders(st.TakeHeadersRaw())
+		wsp.HandleStream(st, rh, "198.51.100.5", NewProxyCookieJar(), nil)
+	}()
+
+	reqTLV, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
+		Kind: protocol.StreamKindWS, Method: "GET", Target: "/abrupt",
+	})
+	cs, err := cm.OpenStream(reqTLV, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+
+	if _, err := cs.ReadResponseHeaders(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// Reading WS chunk must terminate cleanly with an error (reset/EOF) and NEVER hang or panic.
+	_, rerr := cs.ReadWSChunk(ctx)
+	if rerr == nil {
+		t.Fatal("expected error on abrupt backend WS termination")
+	}
+	<-done
+}

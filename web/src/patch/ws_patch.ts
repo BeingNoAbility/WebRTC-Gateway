@@ -93,6 +93,8 @@ function parseRawBootObject(raw: unknown): RuntimePatchConfig | null {
     nodeId: typeof raw.nodeId === 'string' ? raw.nodeId : '',
     portalOrigin: typeof raw.portalOrigin === 'string' ? raw.portalOrigin : '',
     backendOrigin: typeof raw.backendOrigin === 'string' ? raw.backendOrigin : '',
+    cookieSecureContext:
+      typeof raw.cookieSecureContext === 'boolean' ? raw.cookieSecureContext : undefined,
     pinnedPk: typeof raw.pinnedPk === 'string' ? raw.pinnedPk : undefined,
     initCookies: rawInit,
   };
@@ -166,7 +168,7 @@ if (typeof window !== 'undefined' || typeof self !== 'undefined') {
           (maxSeq) => cookieState.pruneUnsyncedUpTo(maxSeq),
           (deltas) => cookieState.applyDeltas(deltas)
         );
-        installNavigationPatch(cfg);
+        installNavigationPatch(cfg, swHandle);
       }
     }
   }

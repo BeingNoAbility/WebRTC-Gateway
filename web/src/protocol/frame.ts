@@ -20,6 +20,7 @@ export const MAX_HEADER_CHUNKS = 17;
 export const MAX_CONTROL_JSON_SIZE = 128 * 1024;
 export const MAX_CONTROL_CHUNKS = 34;
 export const MAX_WS_MESSAGE_BYTES = 16 * 1024 * 1024;
+export const MAX_WS_MESSAGE_CHUNKS = 16384;
 export const MAX_WS_CLOSE_PAYLOAD_BYTES = 125;
 
 export const CONTROL_CHANNEL_ID = 0;

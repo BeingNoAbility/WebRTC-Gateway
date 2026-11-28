@@ -8,6 +8,7 @@
  *   back cookies, while Reset Sandbox starts cleanly without re-injecting stale cookies.
  */
 
+import { CookieMirrorStore } from '../shared/cookie_mirror';
 import { randomHex } from '../shared/crypto';
 import { resetTofuKey } from '../shared/identity';
 import { isRecord, type BackendMeta, type CookieDelta } from '../shared/ipc';
@@ -76,39 +77,21 @@ let mountGeneration = 0;
 let recoveringSw = false;
 
 // Portal-side live cookie mirror snapshot so SW sleep/wake never rolls back cookies.
-const liveCookieSnapshot = new Map<string, CookieDelta>();
+const liveCookieSnapshot = new CookieMirrorStore();
 
 function mergeCookieDeltas(deltas: CookieDelta[] | undefined): void {
   if (!deltas || deltas.length === 0) return;
-  const now = Date.now();
-  for (const d of deltas) {
-    const p = d.path && d.path.startsWith('/') ? d.path : '/';
-    const key = `${p}\0${d.name}`;
-    if (d.op === 'del' || (d.expires && d.expires > 0 && d.expires <= now)) {
-      liveCookieSnapshot.delete(key);
-    } else {
-      liveCookieSnapshot.set(key, { ...d, path: p });
-    }
-  }
+  liveCookieSnapshot.applyDeltas(deltas);
   if (activeMeta) {
     activeMeta = {
       ...activeMeta,
-      initialCookies: exportLiveCookieSnapshot(),
+      initialCookies: liveCookieSnapshot.snapshot(),
     };
   }
 }
 
 function exportLiveCookieSnapshot(): CookieDelta[] {
-  const now = Date.now();
-  const out: CookieDelta[] = [];
-  for (const [k, d] of liveCookieSnapshot) {
-    if (d.expires && d.expires > 0 && d.expires <= now) {
-      liveCookieSnapshot.delete(k);
-      continue;
-    }
-    out.push(d);
-  }
-  return out;
+  return liveCookieSnapshot.snapshot();
 }
 
 const pill = new SmartPill(hudHostEl, {

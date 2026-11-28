@@ -167,41 +167,19 @@ func main() {
 	resolveStr("portal-url", "PORTAL_URL", fileCfg.PortalURL, "", portalURL)
 
 	if *healthFlag {
-		probeURL := strings.TrimSpace(*healthURL)
-		if probeURL == "" && strings.TrimSpace(*metricsAddr) != "" {
-			rawAddr := strings.TrimSpace(*metricsAddr)
-			host, port, splitErr := net.SplitHostPort(rawAddr)
-			if splitErr != nil {
-				fmt.Fprintf(os.Stderr, "agent health check: invalid -metrics-addr %q: %v\n", rawAddr, splitErr)
-				os.Exit(1)
-			}
-			switch host {
-			case "", "0.0.0.0":
-				host = "127.0.0.1"
-			case "::":
-				host = "::1"
-			}
-			probeURL = "http://" + net.JoinHostPort(host, port) + "/healthz"
-		}
-		if probeURL == "" {
-			fmt.Fprintln(os.Stderr, "agent health check requires -metrics-addr / METRICS_ADDR or -health-url")
-			os.Exit(1)
-		}
-		client := &http.Client{
-			Timeout:   5 * time.Second,
-			Transport: &http.Transport{Proxy: nil},
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
-		resp, err := client.Get(probeURL)
+		probeURL, err := resolveAgentHealthURL(
+			config.ResolveString(*healthURL, explicit["health-url"], "HEALTH_URL", "", ""),
+			*metricsAddr,
+		)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "agent health check failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "agent health check: %v\n", err)
+			if errors.Is(err, errAgentHealthNoEndpoint) {
+				os.Exit(2)
+			}
 			os.Exit(1)
 		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			fmt.Fprintf(os.Stderr, "agent health check failed: HTTP %d\n", resp.StatusCode)
+		if err := runAgentHealthCheck(probeURL); err != nil {
+			fmt.Fprintf(os.Stderr, "agent health check failed: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -258,7 +236,7 @@ func main() {
 			JTI:        jti,
 			Node:       normNodeID,
 			Exp:        time.Now().Add(dur).Unix(),
-			PathPrefix: strings.TrimSpace(*mintPath),
+			PathPrefix: normalizeMintPath(*mintPath),
 			Readonly:   *mintReadonly,
 			MaxConns:   *mintMaxConns,
 		}
@@ -553,4 +531,58 @@ func parseSTUNServers(raw string) ([]string, error) {
 		}
 	}
 	return parts, nil
+}
+
+var errAgentHealthNoEndpoint = errors.New("requires -metrics-addr / METRICS_ADDR or -health-url / HEALTH_URL")
+
+func resolveAgentHealthURL(healthURL, metricsAddr string) (string, error) {
+	probeURL := strings.TrimSpace(healthURL)
+	if probeURL != "" {
+		return probeURL, nil
+	}
+	rawAddr := strings.TrimSpace(metricsAddr)
+	if rawAddr == "" {
+		return "", errAgentHealthNoEndpoint
+	}
+	host, port, err := net.SplitHostPort(rawAddr)
+	if err != nil {
+		return "", fmt.Errorf("invalid -metrics-addr %q: %w", rawAddr, err)
+	}
+	switch host {
+	case "", "0.0.0.0":
+		host = "127.0.0.1"
+	case "::":
+		host = "::1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/healthz", nil
+}
+
+func runAgentHealthCheck(probeURL string) error {
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{Proxy: nil},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Get(probeURL)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func normalizeMintPath(raw string) string {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return ""
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return p
 }

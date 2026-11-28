@@ -46,6 +46,9 @@ const (
 	// MaxWSMessageBytes is the maximum reassembled WebSocket message size (16 MiB).
 	MaxWSMessageBytes = 16 * 1024 * 1024
 
+	// MaxWSMessageChunks caps total sub-frames in one streaming WebSocket message (16384 chunks).
+	MaxWSMessageChunks = 16384
+
 	// MaxWSClosePayloadBytes enforces RFC 6455 close frame limit (2-byte code + <=123-byte reason).
 	MaxWSClosePayloadBytes = 125
 

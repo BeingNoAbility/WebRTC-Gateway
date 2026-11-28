@@ -255,8 +255,8 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-// isSecureCookieOrigin implements RFC 6265bis / W3C Secure Contexts trustworthy origin matching.
-func isSecureCookieOrigin(u *url.URL) bool {
+// IsSecureCookieOrigin implements RFC 6265bis / W3C Secure Contexts trustworthy origin matching.
+func IsSecureCookieOrigin(u *url.URL) bool {
 	if u == nil {
 		return false
 	}
@@ -265,6 +265,10 @@ func isSecureCookieOrigin(u *url.URL) bool {
 		return true
 	}
 	return isLoopbackHost(u.Hostname())
+}
+
+func isSecureCookieOrigin(u *url.URL) bool {
+	return IsSecureCookieOrigin(u)
 }
 
 func cookieDomainsOverlap(domA string, hostOnlyA bool, domB string, hostOnlyB bool) bool {
@@ -627,10 +631,6 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 				}
 			}
 
-			// Remove matching non-HttpOnly parent-domain cookie on exact (name, path) so JS update
-			// cleanly supersedes it without duplicate/stale shadowing (M-13).
-			deleteVisibleMatching(name, cPath)
-
 			val := m.Value
 			quoted := false
 			if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
@@ -655,9 +655,15 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 				createdAt:    now,
 				lastAccessed: now,
 			}
+			// Validate full RFC byte budget BEFORE deleting any existing visible cookie on (name, path)
+			// so a rejected oversized write never destroys an existing valid cookie.
 			if entry.byteSize() > 4096 {
 				continue
 			}
+
+			// Remove matching non-HttpOnly parent-domain cookie on exact (name, path) so JS update
+			// cleanly supersedes it without duplicate/stale shadowing (M-13).
+			deleteVisibleMatching(name, cPath)
 			j.upsertLocked(key, entry)
 		}
 	}

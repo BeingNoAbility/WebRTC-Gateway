@@ -183,6 +183,16 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
     return;
   }
 
+  if (data.type === 'P2P_EXPECT_NAV') {
+    registry.markExpectedRootNav(clientId);
+    return;
+  }
+
+  if (data.type === 'P2P_NAV_SETTLED') {
+    registry.clearExpectedRootNav(clientId);
+    return;
+  }
+
   if (data.type === 'SW_COOKIE_MUTATE') {
     const rawMuts = Array.isArray(data.mutations) ? data.mutations.filter(isClientCookieMutation) : [];
     const seq = typeof data.seq === 'number' ? data.seq : undefined;

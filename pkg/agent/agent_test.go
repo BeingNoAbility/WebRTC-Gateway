@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -834,4 +835,71 @@ func TestAgentV7_EndToEnd_RealPionSPAKE2P_StructuredSDP_DTLSBind_AndHTTPProxy(t 
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for GOAWAY on graceful Agent.Close()")
 	}
+}
+
+func TestRegression_P1_AuthResultBoundedWithinMaxControlJSONSize(t *testing.T) {
+	// Populate a valid ProxyCookieJar with 35 RFC 6265 cookies containing `<` (which Go's default
+	// encoding/json would expand 6x into `\u003c`, exploding past MaxControlJSONSize = 128 KiB).
+	jar := proxy.NewProxyCookieJar()
+	targetURL := mustParseTestURL("https://app.example.com/")
+	val := strings.Repeat("<", 1500)
+	for i := 0; i < 40; i++ {
+		jar.SaveResponseCookies(targetURL, []string{
+			"c" + string(rune('a'+i/26)) + string(rune('a'+i%26)) + "=" + val + "; Path=/",
+		})
+	}
+	// Also append huge client cookies to push raw JSON past 128 KiB even without HTML escaping.
+	var bigDeltas []proxy.CookieDelta
+	bigDeltas = append(bigDeltas, jar.ExportNonHttpOnlySnapshot(targetURL)...)
+	for i := 0; i < 80; i++ {
+		bigDeltas = append(bigDeltas, proxy.CookieDelta{
+			Op:    "set",
+			Name:  "extra_" + strings.Repeat("k", 20) + string(rune('0'+i%10)),
+			Value: strings.Repeat("v", 2000),
+			Path:  "/",
+		})
+	}
+
+	raw, err := marshalBoundedAuthResult("owner", "resume-tok", "", BackendMeta{
+		NodeID:              "demo",
+		BackendOrigin:       "https://app.example.com",
+		IsStaticMode:        false,
+		CookieSecureContext: proxy.IsSecureCookieOrigin(targetURL),
+		InitialCookies:      bigDeltas,
+	})
+	if err != nil {
+		t.Fatalf("marshalBoundedAuthResult failed: %v", err)
+	}
+	if len(raw) > protocol.MaxControlJSONSize {
+		t.Fatalf("P1-6 regression: AUTH_RESULT exceeded MaxControlJSONSize: got %d > %d", len(raw), protocol.MaxControlJSONSize)
+	}
+	if bytes.Contains(raw, []byte(`\u003c`)) {
+		t.Fatal("expected SetEscapeHTML(false) to avoid 6x JSON escaping bloat")
+	}
+
+	var decoded struct {
+		OK   bool        `json:"ok"`
+		Meta BackendMeta `json:"meta"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal AUTH_RESULT: %v", err)
+	}
+	if !decoded.OK || !decoded.Meta.CookieSecureContext || len(decoded.Meta.InitialCookies) == 0 {
+		t.Fatalf("unexpected decoded AUTH_RESULT: ok=%v secure=%v cookies=%d", decoded.OK, decoded.Meta.CookieSecureContext, len(decoded.Meta.InitialCookies))
+	}
+
+	if got := normalizeCapPathPrefix("api/v1"); got != "/api/v1" {
+		t.Fatalf("expected leading slash on cap path prefix, got %q", got)
+	}
+	if got := normalizeCapPathPrefix("  "); got != "" {
+		t.Fatalf("expected empty cap path prefix, got %q", got)
+	}
+}
+
+func mustParseTestURL(raw string) *url.URL {
+	u, err := url.Parse(raw)
+	if err != nil {
+		panic(err)
+	}
+	return u
 }

@@ -332,10 +332,17 @@ export class TunnelBridge {
   handleWindowMessage(ev: MessageEvent): void {
     if (ev.isTrusted === false) return;
     if (!this.sandboxOrigin || ev.origin !== this.sandboxOrigin) return;
-    if (!this.appFrame || ev.source !== this.appFrame.contentWindow) return;
     const data = ev.data;
     if (!isRecord(data) || typeof data.type !== 'string') return;
 
+    // P2P_SW_EVICTED may originate from a nested child iframe on the same sandboxOrigin;
+    // it only triggers a safe Portal-side SW liveness check / recovery.
+    if (data.type === 'P2P_SW_EVICTED') {
+      this.callbacks.onSwEvicted?.();
+      return;
+    }
+
+    if (!this.appFrame || ev.source !== this.appFrame.contentWindow) return;
     if (
       data.type === 'P2P_ROUTE_SYNC' &&
       typeof data.path === 'string' &&
@@ -346,8 +353,6 @@ export class TunnelBridge {
       this.callbacks.onRouteSync?.(data.path);
     } else if (data.type === 'P2P_TITLE_SYNC' && typeof data.title === 'string') {
       this.callbacks.onTitleSync?.(data.title.slice(0, 200));
-    } else if (data.type === 'P2P_SW_EVICTED') {
-      this.callbacks.onSwEvicted?.();
     }
   }
 

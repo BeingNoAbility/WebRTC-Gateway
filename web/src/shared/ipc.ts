@@ -27,6 +27,7 @@ export interface BackendMeta {
   backendOrigin: string;
   isStaticMode: boolean;
   sameSiteMode: boolean;
+  cookieSecureContext?: boolean;
   pinnedPk?: string;
   initialCookies?: CookieDelta[];
 }

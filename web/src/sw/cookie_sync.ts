@@ -1,75 +1,32 @@
 /**
- * V7 In-Memory Non-HttpOnly Cookie Mirror (Eliminates Browser Cookie Tossing & Zombie Deletes)
+ * In-Memory Non-HttpOnly Cookie Mirror (Service Worker Side)
  * - NEVER reads or writes real browser `document.cookie` on the sandbox origin.
- * - Maintains per-tab in-memory non-HttpOnly target cookies synchronized from Go Agent's
- *   authoritative `ProxyCookieJar` via V7 binary TLV `RespCookieDelta` and `AUTH_RESULT.meta.initialCookies`.
- * - Tracks JS `document.cookie = ...` mutations (both set and delete) with monotonic per-client
- *   sequence numbers to guarantee zero ordering races between `SW_COOKIE_MUTATE` and `fetch()`.
+ * - Shares core storage/expiry/path-matching with `ClientCookieMirror` via `CookieMirrorStore`.
+ * - Tracks JS `document.cookie = ...` mutations with monotonic per-client sequence numbers
+ *   and non-destructive peek/commit watermarks so failed tunnel sends never lose mutations.
  */
 
+import {
+  CookieMirrorStore,
+  cookiePathMatches,
+  type MirrorCookieEntry,
+} from '../shared/cookie_mirror';
 import { base64UrlDecode } from '../shared/crypto';
 import {
   isClientCookieMutation,
-  isCookieDelta,
   type ClientCookieMutation,
   type CookieDelta,
 } from '../shared/ipc';
 
+export { cookiePathMatches, type MirrorCookieEntry };
+
 const COOKIE_SYNC_ACK_TIMEOUT_MS = 50;
-const MAX_MIRROR_COOKIES = 256;
 const textDecoder = new TextDecoder();
 
-export interface MirrorCookieEntry {
-  name: string;
-  value: string;
-  path: string;
-  expires: number; // unix ms, 0 = session cookie
-}
-
-function normalizeCookiePath(rawPath?: string): string {
-  if (!rawPath || !rawPath.startsWith('/')) return '/';
-  return rawPath;
-}
-
-function cookieKey(path: string, name: string): string {
-  return `${path}\0${name}`;
-}
-
-export function cookiePathMatches(reqPath: string, cookiePath: string): boolean {
-  const p = reqPath || '/';
-  if (p === cookiePath) return true;
-  if (!p.startsWith(cookiePath)) return false;
-  if (cookiePath.endsWith('/')) return true;
-  return p.charCodeAt(cookiePath.length) === 0x2f; // '/'
-}
-
-export class CookieMirror {
-  private readonly entries = new Map<string, MirrorCookieEntry>();
+export class CookieMirror extends CookieMirrorStore {
   private readonly pendingMutations = new Map<string, { mut: ClientCookieMutation; ver: number }>();
   private mutVerSeq = 0;
   private readonly clientLastSeq = new Map<string, number>();
-
-  applyDeltas(deltas: CookieDelta[], now = Date.now()): void {
-    for (const d of deltas) {
-      if (!isCookieDelta(d)) continue;
-      const path = normalizeCookiePath(d.path);
-      const key = cookieKey(path, d.name);
-      if (d.op === 'del' || (d.expires && d.expires > 0 && d.expires <= now)) {
-        this.entries.delete(key);
-        continue;
-      }
-      if (!this.entries.has(key) && this.entries.size >= MAX_MIRROR_COOKIES) {
-        const oldestKey = this.entries.keys().next().value;
-        if (oldestKey) this.entries.delete(oldestKey);
-      }
-      this.entries.set(key, {
-        name: d.name,
-        value: d.value ?? '',
-        path,
-        expires: d.expires && d.expires > 0 ? d.expires : 0,
-      });
-    }
-  }
 
   /**
    * Applies client JS mutations (`document.cookie = ...`) to the in-memory mirror,
@@ -91,32 +48,33 @@ export class CookieMirror {
     const deltas: CookieDelta[] = [];
     for (const m of mutations) {
       if (!isClientCookieMutation(m)) continue;
-      const path = normalizeCookiePath(m.path);
-      const key = cookieKey(path, m.name);
-      const isDelete = m.op === 'del' || (m.expires !== undefined && m.expires > 0 && m.expires <= now);
-
-      if (isDelete) {
-        this.entries.delete(key);
-        const delDelta: CookieDelta = { op: 'del', name: m.name, path };
+      const res = this.setOrDelete(m.op, m.name, m.value, m.path, m.expires, now);
+      if (res.deleted) {
+        const delDelta: CookieDelta = { op: 'del', name: m.name, path: res.path };
         deltas.push(delDelta);
         if (opts.queueForUpstream !== false) {
-          this.pendingMutations.set(key, {
-            mut: { op: 'del', name: m.name, path },
+          this.pendingMutations.set(res.key, {
+            mut: { op: 'del', name: m.name, path: res.path },
             ver: ++this.mutVerSeq,
           });
         }
       } else {
-        if (!this.entries.has(key) && this.entries.size >= MAX_MIRROR_COOKIES) {
-          const oldestKey = this.entries.keys().next().value;
-          if (oldestKey) this.entries.delete(oldestKey);
-        }
-        const exp = m.expires && m.expires > 0 ? m.expires : 0;
-        const val = m.value ?? '';
-        this.entries.set(key, { name: m.name, value: val, path, expires: exp });
-        deltas.push({ op: 'set', name: m.name, value: val, path, expires: exp || undefined });
+        deltas.push({
+          op: 'set',
+          name: m.name,
+          value: res.val,
+          path: res.path,
+          expires: res.exp || undefined,
+        });
         if (opts.queueForUpstream !== false) {
-          this.pendingMutations.set(key, {
-            mut: { op: 'set', name: m.name, value: val, path, expires: exp || undefined },
+          this.pendingMutations.set(res.key, {
+            mut: {
+              op: 'set',
+              name: m.name,
+              value: res.val,
+              path: res.path,
+              expires: res.exp || undefined,
+            },
             ver: ++this.mutVerSeq,
           });
         }
@@ -127,8 +85,7 @@ export class CookieMirror {
 
   /**
    * Non-destructively peeks queued client mutations along with a watermark version so
-   * failed tunnel sends never lose pending mutations. Call `commitPendingMutations(watermark)`
-   * only after the tunnel accepts the request.
+   * failed tunnel sends never lose pending mutations.
    */
   peekPendingMutations(): { mutations: ClientCookieMutation[]; watermark: number } {
     if (this.pendingMutations.size === 0) return { mutations: [], watermark: this.mutVerSeq };
@@ -151,39 +108,6 @@ export class CookieMirror {
     const { mutations, watermark } = this.peekPendingMutations();
     this.commitPendingMutations(watermark);
     return mutations;
-  }
-
-  snapshot(now = Date.now()): CookieDelta[] {
-    const out: CookieDelta[] = [];
-    for (const [k, e] of this.entries) {
-      if (e.expires > 0 && e.expires <= now) {
-        this.entries.delete(k);
-        continue;
-      }
-      out.push({
-        op: 'set',
-        name: e.name,
-        value: e.value,
-        path: e.path,
-        expires: e.expires || undefined,
-      });
-    }
-    return out;
-  }
-
-  serializeForPath(reqPath: string, now = Date.now()): string {
-    const matched: MirrorCookieEntry[] = [];
-    for (const [k, e] of this.entries) {
-      if (e.expires > 0 && e.expires <= now) {
-        this.entries.delete(k);
-        continue;
-      }
-      if (cookiePathMatches(reqPath, e.path)) {
-        matched.push(e);
-      }
-    }
-    matched.sort((a, b) => b.path.length - a.path.length);
-    return matched.map((c) => `${c.name}=${c.value}`).join('; ');
   }
 }
 

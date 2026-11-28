@@ -37,7 +37,7 @@ func (a *Agent) dispatchStream(sess *VisitorSession, stream *mux.Stream) {
 		_ = stream.Close()
 		return
 	}
-	reqHdr, err := protocol.DecodeRequestHeaders(stream.HeadersRaw())
+	reqHdr, err := protocol.DecodeRequestHeaders(stream.TakeHeadersRaw())
 	if err != nil {
 		stream.Reset(protocol.ErrCodeProtocolError)
 		return

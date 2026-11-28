@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -45,10 +46,82 @@ type settingsEnvelope struct {
 
 // BackendMeta is delivered to Portal in AUTH_RESULT (never exposes internal IP to capability guests).
 type BackendMeta struct {
-	NodeID         string              `json:"nodeId"`
-	BackendOrigin  string              `json:"backendOrigin"`
-	IsStaticMode   bool                `json:"isStaticMode"`
-	InitialCookies []proxy.CookieDelta `json:"initialCookies,omitempty"`
+	NodeID              string              `json:"nodeId"`
+	BackendOrigin       string              `json:"backendOrigin"`
+	IsStaticMode        bool                `json:"isStaticMode"`
+	CookieSecureContext bool                `json:"cookieSecureContext"`
+	InitialCookies      []proxy.CookieDelta `json:"initialCookies,omitempty"`
+}
+
+func marshalNoHTMLEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	b := buf.Bytes()
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		b = b[:len(b)-1]
+	}
+	return b, nil
+}
+
+// marshalBoundedAuthResult serializes AUTH_RESULT without HTML escaping and trims the lowest-priority
+// tail of initialCookies via binary search if the JSON payload would exceed MaxControlJSONSize (128 KiB),
+// ensuring valid large cookie jars can never brick session reconnects.
+func marshalBoundedAuthResult(role, resumeTok, confirmVB64 string, meta BackendMeta) ([]byte, error) {
+	build := func(cookies []proxy.CookieDelta) ([]byte, error) {
+		m := meta
+		m.InitialCookies = cookies
+		resObj := map[string]any{
+			"ok":                  true,
+			"role":                role,
+			"cookie_resume_token": resumeTok,
+			"meta":                m,
+		}
+		if confirmVB64 != "" {
+			resObj["confirm_v"] = confirmVB64
+		}
+		return marshalNoHTMLEscape(resObj)
+	}
+
+	raw, err := build(meta.InitialCookies)
+	if err != nil || len(raw) <= protocol.MaxControlJSONSize || len(meta.InitialCookies) == 0 {
+		return raw, err
+	}
+
+	// Binary-search the maximum prefix of deterministically sorted cookies that fits within MaxControlJSONSize.
+	lo, hi := 0, len(meta.InitialCookies)-1
+	var best []byte
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		cand, cerr := build(meta.InitialCookies[:mid])
+		if cerr != nil {
+			return nil, cerr
+		}
+		if len(cand) <= protocol.MaxControlJSONSize {
+			best = cand
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if best != nil {
+		return best, nil
+	}
+	return build(nil)
+}
+
+func normalizeCapPathPrefix(raw string) string {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return ""
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return p
 }
 
 func (a *Agent) handleControlFrame(sess *VisitorSession, f *protocol.Frame) {
@@ -301,23 +374,15 @@ func (a *Agent) handleDTLSAuthResponse(sess *VisitorSession, raw []byte) {
 		backendOrigin = "http://" + a.cfg.NodeID + ".internal"
 	}
 
-	// P2PMux V8 chunks JSON control frames up to 128 KiB natively (no binary-search truncation needed).
-	resObj := map[string]any{
-		"ok":                  true,
-		"role":                role,
-		"cookie_resume_token": resumeTok,
-		"meta": BackendMeta{
-			NodeID:         a.cfg.NodeID,
-			BackendOrigin:  backendOrigin,
-			IsStaticMode:   a.cfg.IsStaticMode,
-			InitialCookies: jar.ExportNonHttpOnlySnapshot(pol.EffectiveBaseURL()),
-		},
+	meta := BackendMeta{
+		NodeID:              a.cfg.NodeID,
+		BackendOrigin:       backendOrigin,
+		IsStaticMode:        a.cfg.IsStaticMode,
+		CookieSecureContext: proxy.IsSecureCookieOrigin(pol.EffectiveBaseURL()),
+		InitialCookies:      jar.ExportNonHttpOnlySnapshot(pol.EffectiveBaseURL()),
 	}
-	if confirmVB64 != "" {
-		resObj["confirm_v"] = confirmVB64
-	}
-	resPayload, _ := json.Marshal(resObj)
-	if err := m.SendControlFrame(protocol.TypeAuthResult, resPayload); err != nil {
+	resPayload, err := marshalBoundedAuthResult(role, resumeTok, confirmVB64, meta)
+	if err != nil || m.SendControlFrame(protocol.TypeAuthResult, resPayload) != nil {
 		go a.closeSession(sess)
 	}
 }
@@ -380,7 +445,7 @@ func (a *Agent) handleCapabilityRPC(sess *VisitorSession, raw []byte) {
 			JTI:        jti,
 			Node:       a.cfg.NodeID,
 			Exp:        now.Add(ttl).Unix(),
-			PathPrefix: strings.TrimSpace(req.PathPrefix),
+			PathPrefix: normalizeCapPathPrefix(req.PathPrefix),
 			Readonly:   req.Readonly,
 			MaxConns:   req.MaxConns,
 		}

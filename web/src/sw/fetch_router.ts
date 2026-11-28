@@ -178,7 +178,7 @@ export function hasSandboxCspDirective(cspValue: string): boolean {
  */
 export function rewriteUpstreamCsp(
   rawValue: string,
-  opts: { swOrigin?: string; backendOrigin?: string } = {}
+  opts: { swOrigin?: string; backendOrigin?: string; preferredNonce?: string } = {}
 ): { policy: string; scriptNonce?: string } {
   const backendOrigin = (opts.backendOrigin || '').replace(/\/+$/, '').toLowerCase();
   let backendWsOrigin = '';
@@ -191,7 +191,7 @@ export function rewriteUpstreamCsp(
     }
   }
   const isHttpSw = Boolean(opts.swOrigin && opts.swOrigin.startsWith('http://'));
-  let detectedNonce: string | undefined;
+  let detectedNonce: string | undefined = opts.preferredNonce;
 
   const rewrittenPolicies: string[] = [];
   for (const rawPolicy of rawValue.split(',')) {
@@ -240,6 +240,13 @@ export function rewriteUpstreamCsp(
         }
         if (dirNonce && (!detectedNonce || detectedNonce === dirNonce)) {
           detectedNonce = dirNonce;
+        } else if (dirNonce && detectedNonce) {
+          // Multi-header/comma-separated CSP with distinct nonces: permit the already-chosen
+          // gateway script nonce alongside this policy's nonce so injected scripts pass ALL policies.
+          const sharedTok = `'nonce-${detectedNonce}'`;
+          if (!tokens.includes(sharedTok)) {
+            tokens = [...tokens, sharedTok];
+          }
         } else {
           // No reusable nonce -> allow external same-origin gateway scripts via 'self' (never 'unsafe-inline').
           tokens = tokens.filter((tok) => {
@@ -313,6 +320,7 @@ export function buildSafeResponseHeaders(
         const rewritten = rewriteUpstreamCsp(f.value, {
           swOrigin: opts.swOrigin,
           backendOrigin: opts.backendOrigin,
+          preferredNonce: scriptNonce,
         });
         if (rewritten.scriptNonce && !scriptNonce) {
           scriptNonce = rewritten.scriptNonce;
@@ -363,6 +371,7 @@ export interface FetchAuthInput {
   destination: string;
   method: string;
   referrer: string;
+  secFetchSite?: string;
   swOrigin: string;
 }
 
@@ -392,10 +401,12 @@ export function authorizeFetchRequest(
   }
 
   // 1. Bound clientId, pre-bound resultingClientId (from `/__p2p_gw__/enter`), or replacesClientId.
+  const isIframeNav = input.mode === 'navigate' && input.destination === 'iframe';
   const bound = registry.getBoundSession(
     input.clientId,
     input.resultingClientId,
-    input.replacesClientId || ''
+    input.replacesClientId || '',
+    isIframeNav
   );
   if (bound) {
     return { allowed: true, session: bound, sameOriginClient: true };
@@ -415,8 +426,25 @@ export function authorizeFetchRequest(
     return { allowed: false, reason: `Unbound navigation destination "${input.destination}" blocked` };
   }
 
-  // Only cookie-less read-only static `-dir`/`-file` (`CSP: sandbox` opaque origin) lacks
-  // clientId/replacesClientId on in-iframe directory link clicks. Proxy `-target` mode NEVER falls back!
+  // 3a. Cross-browser Reload / Back / Forward fallback for engines lacking W3C `replacesClientId`
+  //     (Firefox & Safari): consumes a single-use 3s `P2P_EXPECT_NAV` token previously posted by
+  //     the bound top-level `appFrame` on `beforeunload`, and rejects any cross-site/same-site
+  //     embedder (`Sec-Fetch-Site: cross-site | same-site`) so attacker iframes can never race-steal it.
+  const fetchSite = (input.secFetchSite || '').toLowerCase();
+  const isReloadOrHistorySite =
+    fetchSite === '' || fetchSite === 'same-origin' || fetchSite === 'none';
+  if (!input.clientId && !input.replacesClientId && isReloadOrHistorySite) {
+    const expected = registry.consumeExpectedRootNav();
+    if (expected) {
+      if (input.resultingClientId) {
+        registry.bindClient(input.resultingClientId, expected.tabId, true);
+      }
+      return { allowed: true, session: expected, sameOriginClient: true };
+    }
+  }
+
+  // 3b. Only cookie-less read-only static `-dir`/`-file` (`CSP: sandbox` opaque origin) lacks
+  //     clientId/replacesClientId on in-iframe directory link clicks. Proxy `-target` mode NEVER falls back!
   const single = registry.getSingleActiveSession();
   if (!single || !single.meta.isStaticMode) {
     return {
@@ -675,6 +703,7 @@ export async function handleBootScriptRequest(
     nodeId: session.meta.nodeId,
     portalOrigin: session.portalOrigin,
     backendOrigin: session.meta.backendOrigin,
+    cookieSecureContext: session.meta.cookieSecureContext,
     pinnedPk: session.meta.pinnedPk,
     initCookies: session.cookieMirror.snapshot(),
   });
@@ -708,6 +737,7 @@ export async function handleFetchEvent(
     destination: req.destination,
     method: req.method,
     referrer: req.referrer,
+    secFetchSite: req.headers.get('sec-fetch-site') || '',
     swOrigin: swScope.location.origin,
   };
   let auth = authorizeFetchRequest(registry, authInput);
@@ -867,11 +897,14 @@ export async function handleFetchEvent(
       isJavaScriptContentType(contentType);
 
     const isAnyHtmlResponse = contentType.split(';', 1)[0].trim().toLowerCase() === 'text/html';
-    const willTransformBody = decompressGzip || isNavigateHtml || isWorkerScript;
+    const willMutateBody = isNavigateHtml || isWorkerScript;
+    const willTransformBody = decompressGzip || willMutateBody;
     const { headers, scriptNonce } = buildSafeResponseHeaders(tunnelResp.headers, {
       stripContentLength: willTransformBody,
       stripContentEncoding: decompressGzip,
-      stripEtag: willTransformBody,
+      // Preserve ETag on transparent hop-by-hop gzip decompression (matches Go http_proxy.go);
+      // strip ETag ONLY when HTML or Worker JS response bodies are actually rewritten!
+      stripEtag: willMutateBody,
       frameAncestorsOrigin:
         req.mode === 'navigate' || isAnyHtmlResponse ? activeSession.portalOrigin : undefined,
       originAgentCluster: Boolean(activeSession.meta.sameSiteMode),

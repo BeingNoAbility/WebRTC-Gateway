@@ -1,7 +1,10 @@
 import { resolvePortalPopupUrl, rewriteBackendUrl } from '../shared/url_rewrite';
-import { makeRewriteCtx, type RuntimePatchConfig } from './types';
+import { makeRewriteCtx, type PrivateSWHandle, type RuntimePatchConfig } from './types';
 
-export function installNavigationPatch(cfg: RuntimePatchConfig): void {
+export function installNavigationPatch(
+  cfg: RuntimePatchConfig,
+  swHandle: PrivateSWHandle | null = null
+): void {
   const origWindowOpen = window.open.bind(window);
   window.open = function (url?: string | URL, target?: string, features?: string): Window | null {
     if (url) {
@@ -103,6 +106,21 @@ export function installNavigationPatch(cfg: RuntimePatchConfig): void {
     };
     window.addEventListener('popstate', syncRoute);
     window.addEventListener('hashchange', syncRoute);
+    // Notify the Service Worker around top-level appFrame navigations so engines without W3C
+    // `FetchEvent.replacesClientId` (Firefox & Safari) preserve `rootClientId` ownership and
+    // authorize legitimate iframe reload / history traversal. `pageshow` immediately disarms any
+    // pending expectation (e.g. on BFCache restore) and restores `rootClientId` to the active page.
+    if (swHandle) {
+      const notifySwNav = (type: 'P2P_EXPECT_NAV' | 'P2P_NAV_SETTLED') => {
+        try {
+          swHandle.getController()?.postMessage({ type });
+        } catch {
+          // ignore
+        }
+      };
+      window.addEventListener('beforeunload', () => notifySwNav('P2P_EXPECT_NAV'));
+      window.addEventListener('pageshow', () => notifySwNav('P2P_NAV_SETTLED'));
+    }
     syncRoute();
     syncTitle();
     window.addEventListener('load', syncTitle, { once: true });

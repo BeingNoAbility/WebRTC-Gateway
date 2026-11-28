@@ -14,6 +14,7 @@ export interface PatchInjectConfig {
   nodeId: string;
   portalOrigin: string;
   backendOrigin: string;
+  cookieSecureContext?: boolean;
   pinnedPk?: string;
   initCookies: CookieDelta[];
 }
@@ -49,6 +50,7 @@ export function pruneAndBoundBootConfig(cfg: PatchInjectConfig, now = Date.now()
     nodeId: cfg.nodeId,
     portalOrigin: cfg.portalOrigin,
     backendOrigin: cfg.backendOrigin,
+    cookieSecureContext: cfg.cookieSecureContext,
     pinnedPk: cfg.pinnedPk,
     initCookies: freshCookies,
   };
@@ -777,10 +779,13 @@ export function injectWorkerBootstrap(
     `globalThis.fetch=function(u,i){try{const r=u instanceof Request?u.url:String(u),p=new URL(r,location.href);` +
     `if(__tO&&p.origin===__tO){const n=p.pathname+p.search+p.hash;return u instanceof Request?__oF(new Request(n,u),i):__oF(n,i);}}catch(_){}return __oF(u,i);};}\n`;
 
-  const strictRe = /^(\uFEFF?(?:\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*['"]use strict['"]\s*;?\s*)/;
-  const match = strictRe.exec(source);
-  if (match) {
-    return `${match[1]}\n${preamble}${source.slice(match[1].length)}`;
+  // Preserve leading UTF-8 BOM, ES2023 `#!` hashbang line, and `'use strict'` directive prologue.
+  const prefixRe =
+    /^(\uFEFF?(?:#![^\r\n]*(?:\r?\n|$))?(?:(?:\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*['"]use strict['"]\s*;?\s*)?)/;
+  const match = prefixRe.exec(source);
+  if (match && match[1].length > 0) {
+    const sep = match[1].endsWith('\n') ? '' : '\n';
+    return `${match[1]}${sep}${preamble}${source.slice(match[1].length)}`;
   }
   return `${preamble}${source}`;
 }
