@@ -1,5 +1,7 @@
 # Agent Use Cases & Recipes
 
+> Audience: Agent administrators who have run the local setup and want to expose a NAS, intranet app, static files, or share links.
+
 This guide provides ready-to-use Agent configurations, launch commands, and security boundaries organized by real-world scenarios. See [Agent & Server Configuration](./agent-configuration) for the full parameter reference, [Read-Only Static Adapter](./file-server) for `os.Root` details, and [Security & Cryptography](./security) for threat models.
 
 ---

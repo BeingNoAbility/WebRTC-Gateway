@@ -18,7 +18,7 @@
 [![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions)](https://github.com/BeingNoAbility/WebRTC-Gateway/actions/workflows/ci.yml)
 
 > [!IMPORTANT]
-> **版本状态**：当前为 **v5.0.0-alpha.3** 预发布版本（[V7 架构 RFC](docs/rfcs/v7.0-architecture.md)）。版本演进与历史变更见 [CHANGELOG](CHANGELOG.md)。
+> **版本状态**：当前为 **v5.0.0-alpha.3** 预发布版本，现行线协议为 `P2PMux V8`（规范见[协议规范](docs/guide/protocol-specification.md)；[V7 架构 RFC](docs/rfcs/v7.0-architecture.md) 为历史架构决策记录）。版本演进与历史变更见 [CHANGELOG](CHANGELOG.md)。
 
 ---
 
@@ -33,11 +33,13 @@
 
 ## 核心特性速览
 
-- **统一多路复用数据面（P2PMux V8）**：采用单一 `RTCPeerConnection` + 1 条分片控制通道（`id=0` `p2pctrl`）+ 12 条预协商有序多路复用通道（`id=1..12` `p2p_01..p2p_12`，按单调 `StreamID` 统一承载 HTTP 与流式 WebSocket，无需动态 DCEP 通道），8 字节定长帧头、纯载荷字节 `CREDIT` 流控与紧凑二进制 TLV 头编码（内置 `FetchCtx`、`RespFlags` 与行内 Cookie TLV），消除跨流队头阻塞与微包流控死锁。
-- **抗信令中间人的密码学边界**：信令仅传输严格校验的结构化 `SessionDescriptor` 并由双端确定性合成 16 行 DataChannel-only SDP；每个 Agent 持久化独立 **Ed25519 身份密钥**，对长度前缀转录做 Pure Ed25519 签名（含 `-allow-public` 模式），并在 DTLS 建连后校验远端证书真实指纹（支持 `getRemoteCertificates` 的引擎），配合 `#node?pk=` 钉扎与 Fail-Closed `IndexedDB` TOFU；访客口令在 DTLS 控制通道内运行 **RFC 9383 SPAKE2+（P-256、300,000 轮 PBKDF2 + HKDF）双向零知识认证**，并强制校验双方确认值防降级；支持由 Agent 签发可实时吊销、限路径、限只读且持久化吊销状态的 **Ed25519 能力分享令牌**。
-- **两档沙箱隔离、W3C Fetch 抗 CSRF 门禁与 Transferable 流桥接**：服务端采用启动期显式源配置（`-portal-origin` + `-sandbox-origin`，本地回环使用 `-dev`），提供 **Tier 1 跨站通配符隔离**（不同 eTLD+1 派生 `sbx-<24hex>` 独立源）与 **Tier 2 受限隔离**（固定单域跨站或 `-allow-same-site-sandbox` 同站通配符，门户持续显示 Tier 2 警示条）；门户 CSP 锁定 `style-src 'self'` 与 `connect-src 'self'`（启动期预渲染内容哈希资产与 ETag）；SW 通过原生 Transferable `ReadableStream` 桥接数据流、下发外置 `/__p2p_gw__/boot.js` 并按指令级重写保留上游 CSP，无条件拒绝 `destination=document` 逃逸、按标签页隔离 `clientToTab` 配额并配合 `CookieMirror` / `ProxyCookieJar` 隔离 `HttpOnly` Cookie。
-- **纯管道代理与 Fail-Closed `O_NOFOLLOW` 静态适配器**：HTTP / WebSocket 统一复用严格单目标 `DestinationPolicy`（单一精确目标源、可选 `-upstream-host` 虚拟主机头覆写、WS 302 跳转拦截与 Resolve 后置能力校验）、统一 `ProxyCookieJar`（按 `httpOnly` / `visible` 池分别限额）、16 KiB 真流式 WebSocket 代理与原生流式 `gzip`（浏览器原生 `DecompressionStream('gzip')`，零第三方解压依赖）；`-dir` / `-file` 采用 Go `os.Root` 逐级 `OpenRoot` 只读处理器，默认强制 `O_NOFOLLOW` 拒绝一切软链与点文件（可选 `-follow-symlinks` 仅限根与能力前缀内解析）并对所有静态文件下发 `CSP: sandbox`。
-- **单一权威 Go 信令与构建期前端内嵌**：前端内容哈希资产于构建期经 `make build`（`-tags embedweb`）按显式清单嵌入 Go `signal` 单一二进制，支持节点绑定密钥原子持久化（`-bound-keys-file`）与逐节点注册密钥隔离（`-node-secrets-file`，最小 16 字节）。
+- **零客户端**：访客用 Chrome、Edge、Safari、Firefox 等标准浏览器打开链接即可访问，无需安装软件、插件或证书（详见[浏览器兼容性](docs/guide/browser-compatibility.md)）。
+- **P2P 直连**：浏览器与内网 Agent 之间建立端到端加密通道，信令服务器只负责撮合连接，不转发业务数据（详见[架构](docs/guide/architecture.md)）。
+- **访问口令不经过服务器**：口令在加密通道内完成双向验证，信令服务器无法获得口令或其可离线破解的校验值（详见[安全模型](docs/guide/security.md)）。
+- **可控的分享链接**：Owner 可签发限定路径、只读、可随时吊销的分享令牌，再也不用共享主口令（详见[安全模型](docs/guide/security.md)）。
+- **应用中立**：原样代理现有 HTTP 与 WebSocket 服务，无需修改应用；浏览器中的访问被隔离在独立沙箱，Cookie 不与其他站点混用（详见[Agent 配置](docs/guide/agent-configuration.md)）。
+- **安全的静态文件分享**：一条命令即可分享单个文件或目录（`-file` / `-dir`），默认只读，并拒绝软链接与隐藏文件（详见[文件服务器](docs/guide/file-server.md)）。
+- **单一二进制部署**：信令服务器内嵌全部前端资源，一个可执行文件或一个容器镜像即可运行（详见[部署](docs/guide/deployment.md)）。
 
 ---
 
@@ -128,7 +130,7 @@ sequenceDiagram
 - [Agent 与信令服务端配置](docs/guide/agent-configuration.md)
 - [生产部署与两档沙箱规划](docs/guide/deployment.md)
 - [静态文件与目录只读适配器](docs/guide/file-server.md)
-- [V7 架构决策记录 (RFC)](docs/rfcs/v7.0-architecture.md)
+- [V7 架构决策记录 (RFC，历史)](docs/rfcs/v7.0-architecture.md)
 - [贡献者开发指南 (`CONTRIBUTING.md`)](CONTRIBUTING.md)
 - [测试策略与本地门禁 (`scripts/gate.sh`)](docs/TESTING_CHECKLIST.md)
 

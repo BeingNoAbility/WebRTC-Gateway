@@ -13,7 +13,7 @@ Entry point for AI coding agents working in this repository (human contributors:
 | `VERSION`, `Makefile` | Single source of truth for release version and build/test entry points |
 | `cmd/agent`, `cmd/signal` | Intranet Agent and authoritative Go Signaling Server entry points and CLI wiring |
 | `pkg/config`, `pkg/state` | Strict schema-validated config/secret loading and single-writer atomic state persistence |
-| `pkg/protocol`, `pkg/mux` | Binary wire framing/TLV codec, ordered HTTP channel pool, streaming WebSocket channels, and bounded flow control |
+| `pkg/protocol`, `pkg/mux` | Binary wire framing/TLV codec, unified ordered multiplexed lanes (P2PMux V8) carrying HTTP and streaming WebSocket, and bounded flow control |
 | `pkg/agent`, `pkg/proxy`, `pkg/signaling` | Endpoint identity, in-DTLS mutual auth, structured SDP synthesis, single-target HTTP/WS/static proxy & cookie isolation, and signaling broker |
 | `web/src` | Browser Portal, hidden sandbox bridge, Service Worker fetch/HTML/decompression pipeline, compatibility patch, and TS protocol/crypto modules (built into gitignored `web/dist`, embedded via `-tags embedweb`) |
 | `test/` | Go E2E/benchmarks, `node --test` web & hygiene suites, black-box signaling conformance, and Chrome CDP browser E2E |

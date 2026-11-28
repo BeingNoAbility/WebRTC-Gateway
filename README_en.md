@@ -18,7 +18,7 @@
 [![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions)](https://github.com/BeingNoAbility/WebRTC-Gateway/actions/workflows/ci.yml)
 
 > [!IMPORTANT]
-> **Release Status**: Current pre-release is **v5.0.0-alpha.3** ([V7 Architecture RFC](docs/en/rfcs/v7.0-architecture.md)). Full version history is recorded in [CHANGELOG](CHANGELOG.md).
+> **Release Status**: Current pre-release is **v5.0.0-alpha.3**, using the `P2PMux V8` wire protocol (see the [Protocol Specification](docs/en/guide/protocol-specification.md); the [V7 Architecture RFC](docs/en/rfcs/v7.0-architecture.md) is a historical decision record). Full version history is recorded in [CHANGELOG](CHANGELOG.md).
 
 ---
 
@@ -33,11 +33,13 @@
 
 ## Core Capabilities
 
-- **Unified Multiplexed Data Plane (P2PMux V8)**: Uses one `RTCPeerConnection` with 1 chunked control channel (`id=0` `p2pctrl`) and 12 pre-negotiated ordered multiplexed lanes (`id=1..12` `p2p_01..p2p_12`) carrying both HTTP and streaming WebSocket streams by monotonic `StreamID` without dynamic DCEP channels, over an 8-byte fixed header, pure payload-byte `CREDIT` flow control, and compact binary TLV encoding (`FetchCtx`, `RespFlags`, and inline cookie TLVs).
-- **Anti-MITM Cryptographic Boundary**: Signaling exchanges strictly validated structured `SessionDescriptor` payloads and both peers deterministically synthesize minimal 16-line DataChannel-only SDPs. Each Agent persists an **Ed25519 identity keypair** signing length-prefixed transcripts (including `-allow-public`), verified against the live negotiated DTLS certificate fingerprint (on engines supporting `getRemoteCertificates`), `#node?pk=` pinning, and Fail-Closed `IndexedDB` TOFU. Visitor password auth runs **RFC 9383 SPAKE2+ (P-256, 300,000-round PBKDF2 + HKDF)** mutual zero-knowledge verification inside DTLS with mandatory downgrade protection; Owners can mint live-revocable, path- and read-only-scoped **Ed25519 capability tokens** backed by atomic persistence.
-- **2-Tier Sandbox Isolation, W3C Fetch Anti-CSRF Gate & Transferable Stream Bridge**: Signaling requires explicit startup origins (`-portal-origin` + `-sandbox-origin`, or `-dev` on loopback), offering **Tier 1 cross-site wildcard isolation** (distinct eTLD+1 deriving `sbx-<24hex>` origins) and **Tier 2 restricted isolation** (fixed single cross-site host or `-allow-same-site-sandbox` same-site wildcard, both displaying a persistent Tier 2 warning banner). Portal CSP locks `style-src 'self'` and `connect-src 'self'` with startup pre-rendered content-hashed assets and ETags; SW bridges streams via native Transferable `ReadableStream`, serves external `/__p2p_gw__/boot.js` while preserving upstream CSP directives, unconditionally blocks `destination=document` escapes, enforces per-tab `clientToTab` quotas, and pairs `CookieMirror` with `ProxyCookieJar` to isolate `HttpOnly` cookies.
-- **Pure Pipe Proxy and Fail-Closed `O_NOFOLLOW` Static Adapter**: HTTP and WebSocket share a strict single-target `DestinationPolicy` (exact target origin only, optional `-upstream-host` virtual-host header override, WS 302 redirect blocking, and post-resolve capability enforcement), unified `ProxyCookieJar` (`httpOnly` / `visible` quotas), 16 KiB streaming WebSocket proxying, and native streaming `gzip` (`DecompressionStream('gzip')`, zero third-party decompression dependencies); `-dir` and `-file` use stepwise `os.Root` read-only handlers with default Fail-Closed `O_NOFOLLOW` rejecting symlinks and dotfiles (optional `-follow-symlinks` strictly confined to root and capability prefix) and `CSP: sandbox` on all static files.
-- **Single Authoritative Go Signal & Build-Time Asset Embedding**: Content-hashed frontend bundles are embedded at build time via an explicit manifest under `-tags embedweb` (`make build`) into the single `signal` binary, supporting atomic Ed25519 node bindings (`-bound-keys-file`) and per-node registration secrets (`-node-secrets-file`, minimum 16 bytes).
+- **Zero client**: Visitors open a link in a standard browser such as Chrome, Edge, Safari, or Firefox, with no software, extension, or certificate to install (see [Browser Compatibility](docs/en/guide/browser-compatibility.md)).
+- **Direct P2P**: The browser and the intranet Agent establish an end-to-end encrypted channel; the signaling server only brokers the connection and never relays application data (see [Architecture](docs/en/guide/architecture.md)).
+- **Password stays off the server**: The access password is verified mutually inside the encrypted channel, so the signaling server never obtains it or any offline-crackable verifier (see [Security Model](docs/en/guide/security.md)).
+- **Controlled share links**: Owners can mint path-scoped, read-only, instantly revocable share tokens instead of sharing the master password (see [Security Model](docs/en/guide/security.md)).
+- **Application-agnostic**: Existing HTTP and WebSocket services are proxied as-is with no changes; browser access runs in an isolated sandbox so cookies are never mixed with other sites (see [Agent Configuration](docs/en/guide/agent-configuration.md)).
+- **Safe static file sharing**: Share a single file or directory with one command (`-file` / `-dir`); read-only by default, rejecting symlinks and dotfiles (see [File Server](docs/en/guide/file-server.md)).
+- **Single-binary deployment**: The signaling server embeds all frontend assets, so one executable or one container image is enough to run it (see [Deployment](docs/en/guide/deployment.md)).
 
 ---
 
@@ -128,7 +130,7 @@ sequenceDiagram
 - [Agent and Signal Server Configuration](docs/en/guide/agent-configuration.md)
 - [Production Deployment and 2-Tier Sandbox](docs/en/guide/deployment.md)
 - [Read-Only Static File and Directory Adapter](docs/en/guide/file-server.md)
-- [V7 Architecture Decision Record (RFC)](docs/en/rfcs/v7.0-architecture.md)
+- [V7 Architecture Decision Record (RFC, historical)](docs/en/rfcs/v7.0-architecture.md)
 - [Contributor Guide (`CONTRIBUTING.md`)](CONTRIBUTING.md)
 - [Testing Strategy & Machine Gate (`scripts/gate.sh`)](docs/en/TESTING_CHECKLIST.md)
 

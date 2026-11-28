@@ -1,5 +1,7 @@
 # 本地反代协作与典型适配模式
 
+> 适合：被代理应用依赖虚拟主机、多源或特殊头，需要配合 Nginx / Caddy 的 Agent 管理员。
+
 每个 Agent 严格锁定单一 `-target` 精确源（Pure Pipe 透明管道，详见 [核心原则](../CONSTITUTION.md) 与 [设计边界与架构权衡](../DESIGN_TRADEOFFS.md)）。当目标应用需要多源 API 聚合、硬编码链接改写、路径前缀剥离或自定义上游头注入时，标准做法是在 `-target` 之后部署一层本机通用反向代理（Nginx 或 Caddy），由其承接应用侧改写逻辑。
 
 > [!NOTE]

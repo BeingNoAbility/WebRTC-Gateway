@@ -1,5 +1,7 @@
 # 系统架构与核心设计 (Architecture & Design)
 
+> 适合：想理解组件分工、数据流与沙箱隔离设计的评估者与贡献者；只想部署的读者可先跳过。
+
 WebRTC Gateway 由三大解耦组件构成：
 1. **Browser Client（模块化浏览器运行时）**：包含独立 Portal（内容哈希 `/__p2p_gw__/portal.<hash>.js` 与 `portal.<hash>.css`）、一次性引导桥接页（`/__p2p_gw__/bridge.html` 与 `/__p2p_gw__/assets/bridge.<hash>.js`）、模块化 Service Worker（`/__p2p_gw__/sw.js`）、外置启动脚本（`/__p2p_gw__/boot.js`）、纯兼容层模块化 DOM 与内存 `CookieMirror` 补丁（`/__p2p_gw__/assets/patch.<hash>.js`）以及 TypeScript P2PMux V8；
 2. **Signaling Server（单一权威 Go 信令）**：单二进制 `cmd/signal`（`-tags embedweb` 于启动期预渲染内容哈希前端资产与 SHA-256 ETag），仅撮合结构化 `SessionDescriptor` Offer/Answer 与 ICE 候选，绝不中继或解码业务数据；

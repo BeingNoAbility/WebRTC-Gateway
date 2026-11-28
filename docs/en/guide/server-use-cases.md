@@ -1,5 +1,7 @@
 # Server Use Cases & Deployment Recipes
 
+> Audience: operators deploying the signaling and portal service under different topologies (local, reverse proxy, Docker, and others).
+
 This guide provides complete deployment templates and security boundaries for the single authoritative Go signaling and Portal server (`cmd/signal`) across common operational topologies. See [Production Deployment](./deployment) for domain planning and [Agent & Server Configuration](./agent-configuration) for the full parameter table.
 
 ---

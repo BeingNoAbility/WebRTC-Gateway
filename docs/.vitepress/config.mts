@@ -59,6 +59,7 @@ export default withMermaid(
               collapsed: false,
               items: [
                 { text: '文档概览', link: '/guide/' },
+                { text: '五分钟上手', link: '/guide/quickstart' },
                 { text: 'Agent 典型用例', link: '/guide/agent-use-cases' },
                 { text: '本地反代协作模式', link: '/guide/reverse-proxy-recipes' },
                 { text: '服务端部署用例', link: '/guide/server-use-cases' },
@@ -142,7 +143,8 @@ export default withMermaid(
               text: 'User Guide',
               collapsed: false,
               items: [
-                { text: 'Overview & Quickstart', link: '/en/guide/' },
+                { text: 'Overview', link: '/en/guide/' },
+                { text: 'Quickstart', link: '/en/guide/quickstart' },
                 { text: 'Agent Use Cases', link: '/en/guide/agent-use-cases' },
                 { text: 'Local Reverse-Proxy Recipes', link: '/en/guide/reverse-proxy-recipes' },
                 { text: 'Server Use Cases', link: '/en/guide/server-use-cases' },

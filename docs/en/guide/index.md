@@ -17,6 +17,7 @@ Welcome to the **WebRTC Gateway** documentation. WebRTC Gateway enables stock br
 
 | Guide | Summary | Audience |
 | :--- | :--- | :--- |
+| **[Quickstart (5 Minutes)](./quickstart)** | Run locally, share a file or directory, and pick a production tier by your domains and certificates. | First-time users |
 | **[Agent Use Cases](./agent-use-cases)** | Ready-to-use recipes for NAS/web apps, self-signed HTTPS consoles, subpath & local reverse-proxy virtual hosts (`-upstream-host`), static hosting, share links, TURN/proxy, and ops. | Intranet Users / Operators |
 | **[Local Reverse-Proxy Recipes](./reverse-proxy-recipes)** | Virtual-host targeting, multi-origin fan-in, Nginx `sub_filter` / Caddy prefix stripping, forwarding/auth header injection, and trust-boundary guidelines. | Advanced Self-Hosters / Operators |
 | **[Server Use Cases](./server-use-cases)** | Deployment recipes for local `-dev`, direct hot-reload TLS, Nginx/Caddy proxies, Tier 1 cross-site wildcard, Tier 2 restricted isolation, and hardened Docker. | DevOps / Self-Hosters |
@@ -32,6 +33,8 @@ Welcome to the **WebRTC Gateway** documentation. WebRTC Gateway enables stock br
 ---
 
 ## Quickstart
+
+For a step-by-step tutorial and tier selection, see [Quickstart (5 Minutes)](./quickstart).
 
 ::: code-group
 

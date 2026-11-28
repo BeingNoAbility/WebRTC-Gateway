@@ -1,5 +1,7 @@
 # 故障排查与常见问题 (Troubleshooting & FAQ)
 
+> 适合：连接失败、认证被拒或页面异常时按症状查找原因的使用者与运维者。
+
 部署配置见 [生产部署指南](./deployment)，参数全集见 [Agent 与服务端配置](./agent-configuration)，密码学与隔离模型见 [安全机制](./security)。
 
 ---

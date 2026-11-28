@@ -1,5 +1,7 @@
 # Agent and Signal Server Configuration Reference
 
+> Audience: operators of the Agent and signaling server who need to look up a flag, environment variable, or YAML field. New users should start with the [Quickstart](./quickstart).
+
 WebRTC Gateway uses a unified configuration loader (`pkg/config`):
 - **Precedence**: CLI flags > Environment variables / `*_FILE` secret files > Explicit config file;
 - **No CWD Auto-Loading**: Config files are loaded only when `-config <path>` or `CONFIG_FILE` is explicitly specified, with strict `KnownFields(true)` validation rejecting typos or unknown keys;
@@ -43,6 +45,7 @@ See complete templates in [`configs/agent.example.yaml`](https://github.com/Bein
 | `-mint-link` | — | — | empty | Mint an offline Ed25519 capability share link (e.g. `2h`, `7d`) and exit |
 | `-mint-path` / `-mint-readonly` / `-mint-max-conns` | — | — | empty / `false` / `0` | Path prefix, read-only, and concurrency limits for `-mint-link` |
 | `-revoke-cap` | — | — | empty | Revoke a capability token by JTI in the persistent state file and exit (cross-process lock safe) |
+| `-version` / `-v` | — | — | `false` | Print version and exit |
 | `-health` / `-health-url` | — | — | `false` / empty | Run container health probe and exit |
 
 ---
@@ -70,4 +73,5 @@ See complete templates in [`configs/agent.example.yaml`](https://github.com/Bein
 | `-max-ip-conns` / `-max-ip-msgs` | `MAX_IP_CONNS` / `MAX_IP_MSGS` | `max_ip_conns` / `max_ip_msgs` | `64` / `120` | Per-IP (IPv6 aggregated by `/64`) concurrent WS limit and 10 s message budget |
 | `-static` | `STATIC_DIR` | `static_dir` | empty | External web directory overriding build-time embedded `web.DistFS` |
 | `-metrics-addr` | `METRICS_ADDR` | `metrics_addr` | empty | Prometheus `/metrics` listen address |
+| `-version` / `-v` | — | — | `false` | Print version and exit |
 | `-health` / `-health-url` | — | — | `false` / empty | Probe `/healthz` and exit |

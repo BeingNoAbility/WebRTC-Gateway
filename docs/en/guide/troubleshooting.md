@@ -1,5 +1,7 @@
 # Troubleshooting and FAQ
 
+> Audience: users and operators looking up causes by symptom when connections fail, authentication is rejected, or pages misbehave.
+
 See [Production Deployment](./deployment) for DNS/proxy setup, [Agent & Server Configuration](./agent-configuration) for all flags, and [Security & Cryptography](./security) for trust boundaries.
 
 ---
