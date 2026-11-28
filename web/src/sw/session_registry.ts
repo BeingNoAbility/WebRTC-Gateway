@@ -19,6 +19,7 @@ export interface TabSession {
   port: MessagePort | null;
   cookieMirror: CookieMirror;
   rootClientId: string;
+  expectRootNavUntil: number;
   clientIds: Set<string>;
   wsByClient: Map<string, Set<string>>;
   attachedAt: number;
@@ -38,6 +39,7 @@ export interface EnterNavCheck {
 }
 
 const ENTER_NONCE_TTL_MS = 30_000;
+const EXPECT_ROOT_NAV_TTL_MS = 3_000;
 const MAX_ENTER_NONCES = 64;
 const CLIENT_PRUNE_INTERVAL_MS = 30_000;
 const ORPHAN_SESSION_GRACE_MS = 10_000;
@@ -117,6 +119,7 @@ export class SessionRegistry {
   private pingSeq = 0;
   private lastClientPruneAt = 0;
   private pruneInFlight: Promise<void> | null = null;
+  private engineSupportsReplacesClientId = false;
   private readonly allowedPortalOrigins: Set<string>;
   private readonly onBridgeCookieDeltas?: (session: TabSession, deltas: CookieDelta[]) => void;
 
@@ -188,6 +191,7 @@ export class SessionRegistry {
       port,
       cookieMirror,
       rootClientId,
+      expectRootNavUntil: existing?.expectRootNavUntil ?? 0,
       clientIds,
       wsByClient,
       attachedAt: Date.now(),
@@ -401,21 +405,89 @@ export class SessionRegistry {
   }
 
   /**
+   * Records a short-lived (3s), single-use root-frame navigation expectation from an already-bound
+   * `appFrame` client (`beforeunload`). Ignored once the browser engine is confirmed to support
+   * W3C `FetchEvent.replacesClientId` (Chromium).
+   */
+  markExpectedRootNav(clientId: string, now = Date.now()): boolean {
+    if (this.engineSupportsReplacesClientId || !clientId) return false;
+    const mapped = this.clientToTab.get(clientId);
+    if (!mapped) return false;
+    const s = this.sessions.get(mapped);
+    if (!s) return false;
+    if (s.rootClientId && s.rootClientId !== clientId) return false;
+    s.expectRootNavUntil = now + EXPECT_ROOT_NAV_TTL_MS;
+    return true;
+  }
+
+  /**
+   * Immediately disarms any pending root-nav expectation when `appFrame` settles (`pageshow`,
+   * including BFCache restore) and restores `rootClientId` if a bound top-level frame returned
+   * from BFCache.
+   */
+  clearExpectedRootNav(clientId: string): void {
+    if (!clientId) return;
+    const mapped = this.clientToTab.get(clientId);
+    if (!mapped) return;
+    const s = this.sessions.get(mapped);
+    if (!s) return;
+    s.expectRootNavUntil = 0;
+    s.rootClientId = clientId;
+  }
+
+  /**
+   * Consumes a pending single-use root navigation expectation ONLY on engines lacking W3C
+   * `replacesClientId` and ONLY when unambiguously matched by exactly one active session.
+   */
+  consumeExpectedRootNav(now = Date.now()): TabSession | null {
+    if (this.engineSupportsReplacesClientId) return null;
+    let matched: TabSession | null = null;
+    for (const s of this.sessions.values()) {
+      if (s.expectRootNavUntil > now) {
+        if (matched) return null; // Ambiguous across multiple tabs -> Fail-Closed.
+        matched = s;
+      }
+    }
+    if (!matched) return null;
+    matched.expectRootNavUntil = 0;
+    return matched;
+  }
+
+  /**
    * Resolves a session ONLY via explicit `clientId`, pre-bound `resultingClientId`
    * (from `/__p2p_gw__/enter`), or W3C `replacesClientId` (iframe Back/Forward/Reload).
    */
   getBoundSession(
     clientId: string,
     resultingClientId: string,
-    replacesClientId = ''
+    replacesClientId = '',
+    isIframeNavigate = false,
+    now = Date.now()
   ): TabSession | null {
+    if (replacesClientId !== '') {
+      this.engineSupportsReplacesClientId = true;
+    }
     if (clientId) {
       const mapped = this.clientToTab.get(clientId);
       if (mapped) {
         const s = this.sessions.get(mapped);
         if (s) {
+          const hadPendingRootNav = s.expectRootNavUntil > now;
+          if (isIframeNavigate || replacesClientId !== '') {
+            s.expectRootNavUntil = 0;
+          }
           if (resultingClientId) {
-            const inheritsRoot = replacesClientId !== '' && replacesClientId === s.rootClientId;
+            let inheritsRoot = false;
+            if (replacesClientId !== '') {
+              inheritsRoot = replacesClientId === s.rootClientId;
+            } else if (
+              isIframeNavigate &&
+              !this.engineSupportsReplacesClientId &&
+              hadPendingRootNav &&
+              (clientId === s.rootClientId || !s.rootClientId)
+            ) {
+              inheritsRoot = true;
+            }
             this.bindClient(resultingClientId, mapped, inheritsRoot);
           }
           return s;
@@ -426,7 +498,10 @@ export class SessionRegistry {
       const mapped = this.clientToTab.get(resultingClientId);
       if (mapped) {
         const s = this.sessions.get(mapped);
-        if (s) return s;
+        if (s) {
+          if (isIframeNavigate) s.expectRootNavUntil = 0;
+          return s;
+        }
       }
     }
     if (replacesClientId) {
@@ -434,6 +509,7 @@ export class SessionRegistry {
       if (mapped) {
         const s = this.sessions.get(mapped);
         if (s) {
+          s.expectRootNavUntil = 0;
           if (resultingClientId) {
             this.bindClient(resultingClientId, mapped, replacesClientId === s.rootClientId);
           }

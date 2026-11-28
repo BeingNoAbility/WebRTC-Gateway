@@ -1728,3 +1728,352 @@ test('PeerSession V7 regressions: PEER_OFFLINE teardown, timer cancellation, GOA
     globalThis.location = origLoc;
   }
 });
+
+test('Audit Regressions (P1-2, P1-5, P2-2, P2-4, P2-5, P2-6, P2-9): Cross-Browser Nav, Gzip ETag, Cookie Parity, Multi-CSP, Nested SW Eviction, Worker Hashbang & Pinned TOFU', async () => {
+  const swOrigin = 'https://sbx-1.sandbox.example';
+  const portalOrigin = 'https://portal.example';
+
+  // 1. P1-2: Firefox & Safari (`replacesClientId === ''`) link click + reload/Back/Forward + CSRF immunity!
+  const reg = new sessionRegMod.SessionRegistry(new Set([portalOrigin]));
+  const ch1 = new MessageChannel();
+  const ch2 = new MessageChannel();
+  try {
+    reg.attachPort(
+      'tab-1',
+      portalOrigin,
+      { nodeId: 'demo', backendOrigin: 'http://app.local', isStaticMode: false, sameSiteMode: false },
+      ch1.port1
+    );
+    reg.registerEnterNonce('nonce-ff-safari-1234', 'tab-1', '/home');
+    const enterRes = reg.handleEnterNavigation(
+      new URL(`${swOrigin}/__p2p_gw__/enter?tab=tab-1&nonce=nonce-ff-safari-1234&next=/home`),
+      'c-root-1',
+      '',
+      { method: 'GET', mode: 'navigate', destination: 'iframe' }
+    );
+    assert.equal(enterRes.status, 302);
+    assert.equal(reg.getSessionByTabId('tab-1').rootClientId, 'c-root-1');
+
+    // Unbound client or child iframe MUST NOT be allowed to arm expected root nav!
+    reg.bindClient('c-child-iframe', 'tab-1', false);
+    assert.equal(reg.markExpectedRootNav('c-unknown'), false);
+    assert.equal(reg.markExpectedRootNav('c-child-iframe'), false);
+
+    // Without P2P_EXPECT_NAV, external unbound GET iframe navigation STILL returns 403 (CSRF intact!).
+    assert.equal(
+      fetchMod.authorizeFetchRequest(reg, {
+        clientId: '',
+        resultingClientId: 'c-csrf',
+        replacesClientId: '',
+        mode: 'navigate',
+        destination: 'iframe',
+        method: 'GET',
+        referrer: '',
+        swOrigin,
+      }).allowed,
+      false
+    );
+
+    // Bound root appFrame fires beforeunload -> P2P_EXPECT_NAV -> link click without replacesClientId transfers rootClientId!
+    assert.equal(reg.markExpectedRootNav('c-root-1'), true);
+    const clickNav = fetchMod.authorizeFetchRequest(reg, {
+      clientId: 'c-root-1',
+      resultingClientId: 'c-root-2',
+      replacesClientId: '',
+      mode: 'navigate',
+      destination: 'iframe',
+      method: 'GET',
+      referrer: `${swOrigin}/home`,
+      swOrigin,
+    });
+    assert.equal(clickNav.allowed, true);
+    assert.equal(reg.getSessionByTabId('tab-1').rootClientId, 'c-root-2', 'rootClientId must transfer on Firefox/Safari link click');
+
+    // Reload / Back / Forward in Firefox/Safari: clientId='', replacesClientId='' succeeds ONCE and re-binds rootClientId!
+    // First prove a cross-site / same-site attacker iframe CANNOT race-steal an armed P2P_EXPECT_NAV token!
+    assert.equal(reg.markExpectedRootNav('c-root-2'), true);
+    assert.equal(
+      fetchMod.authorizeFetchRequest(reg, {
+        clientId: '',
+        resultingClientId: 'c-csrf-race',
+        replacesClientId: '',
+        mode: 'navigate',
+        destination: 'iframe',
+        method: 'GET',
+        referrer: '',
+        secFetchSite: 'cross-site',
+        swOrigin,
+      }).allowed,
+      false,
+      'cross-site iframe MUST NOT steal armed P2P_EXPECT_NAV token'
+    );
+    const reloadNav = fetchMod.authorizeFetchRequest(reg, {
+      clientId: '',
+      resultingClientId: 'c-root-3',
+      replacesClientId: '',
+      mode: 'navigate',
+      destination: 'iframe',
+      method: 'GET',
+      referrer: '',
+      secFetchSite: 'none',
+      swOrigin,
+    });
+    assert.equal(reloadNav.allowed, true);
+    assert.equal(reloadNav.sameOriginClient, true);
+    assert.equal(reg.getSessionByTabId('tab-1').rootClientId, 'c-root-3');
+
+    // Replay of consumed single-use expectRootNav MUST fail closed (403)!
+    assert.equal(
+      fetchMod.authorizeFetchRequest(reg, {
+        clientId: '',
+        resultingClientId: 'c-replay',
+        replacesClientId: '',
+        mode: 'navigate',
+        destination: 'iframe',
+        method: 'GET',
+        referrer: '',
+        swOrigin,
+      }).allowed,
+      false
+    );
+
+    // Multi-tab ambiguity (2 tabs armed simultaneously) MUST fail closed (403)!
+    reg.attachPort(
+      'tab-2',
+      portalOrigin,
+      { nodeId: 'demo', backendOrigin: 'http://app.local', isStaticMode: false, sameSiteMode: false },
+      ch2.port1
+    );
+    reg.bindClient('c-tab2-root', 'tab-2', true);
+    assert.equal(reg.markExpectedRootNav('c-root-3'), true);
+    assert.equal(reg.markExpectedRootNav('c-tab2-root'), true);
+    assert.equal(
+      fetchMod.authorizeFetchRequest(reg, {
+        clientId: '',
+        resultingClientId: 'c-ambig',
+        replacesClientId: '',
+        mode: 'navigate',
+        destination: 'iframe',
+        method: 'GET',
+        referrer: '',
+        swOrigin,
+      }).allowed,
+      false
+    );
+
+    // P2P_NAV_SETTLED (`pageshow` / BFCache restore) must disarm pending expectation & restore rootClientId!
+    reg.clearExpectedRootNav('c-root-3');
+    reg.clearExpectedRootNav('c-tab2-root');
+    assert.equal(reg.consumeExpectedRootNav(), null, 'clearExpectedRootNav must disarm pending tokens');
+
+    // Once Chromium reports a non-empty replacesClientId, P2P_EXPECT_NAV fallback is permanently disabled!
+    const chromNav = fetchMod.authorizeFetchRequest(reg, {
+      clientId: 'c-root-3',
+      resultingClientId: 'c-root-4',
+      replacesClientId: 'c-root-3',
+      mode: 'navigate',
+      destination: 'iframe',
+      method: 'GET',
+      referrer: `${swOrigin}/home`,
+      swOrigin,
+    });
+    assert.equal(chromNav.allowed, true);
+    assert.equal(reg.markExpectedRootNav('c-root-4'), false, 'Chromium must ignore P2P_EXPECT_NAV once replacesClientId is observed');
+
+    // 2. P1-5: Transparent gzipped non-HTML/non-Worker asset MUST preserve ETag!
+    ch1.port2.onmessage = (ev) => {
+      if (ev.data?.type === 'TUNNEL_FETCH_REQUEST') {
+        const reqPort = ev.ports[0];
+        reqPort.postMessage({ type: 'REQ_ACK', reqId: ev.data.reqId });
+        const gz = new Blob(['console.log("cached");'.repeat(64)])
+          .stream()
+          .pipeThrough(new CompressionStream('gzip'));
+        reqPort.postMessage(
+          {
+            type: 'RESP_START',
+            status: 200,
+            respFlags: tlvMod.RespFlag.DECOMPRESS_GZIP,
+            headers: [
+              { name: 'content-type', value: 'application/javascript' },
+              { name: 'etag', value: '"v1-preserved-etag"' },
+            ],
+            cookieDeltas: [],
+            hasBody: true,
+            bodyStream: gz,
+          },
+          [gz]
+        );
+        reqPort.close();
+      }
+    };
+    const gzResp = await fetchMod.handleFetchEvent(
+      { location: { origin: swOrigin }, clients: { get: async () => undefined } },
+      reg,
+      {
+        clientId: 'c-root-3',
+        resultingClientId: '',
+        replacesClientId: '',
+        request: new Request(`${swOrigin}/bundle.js`, { method: 'GET' }),
+        waitUntil() {},
+      }
+    );
+    assert.equal(gzResp.status, 200);
+    assert.equal(gzResp.headers.get('etag'), '"v1-preserved-etag"', 'P1-5: ETag must be preserved on transparent gzip');
+    assert.ok((await gzResp.text()).includes('console.log("cached")'));
+  } finally {
+    ch1.port1.close();
+    ch1.port2.close();
+    ch2.port1.close();
+    ch2.port2.close();
+  }
+
+  // 3. P2-2: Cookie prefix parity with Go ProxyCookieJar (__Host- & __Secure- rejected even on secure context).
+  assert.equal(
+    patchMod.parseDocumentCookieAssignment('__Host-x=1; Secure; Path=/', { pathname: '/', isSecureContext: true }),
+    null
+  );
+  assert.equal(
+    patchMod.parseDocumentCookieAssignment('__Secure-x=1; Secure', { pathname: '/', isSecureContext: true }),
+    null
+  );
+
+  // 4. P2-4: Multi-header CSP with distinct nonces shares Policy 1's nonce into Policy 2!
+  const multiCsp = fetchMod.buildSafeResponseHeaders(
+    [
+      { name: 'content-security-policy', value: "default-src 'self'; script-src 'nonce-AAA111'" },
+      { name: 'content-security-policy', value: "default-src 'self'; script-src 'nonce-BBB222'" },
+    ],
+    { stripContentLength: true, swOrigin, backendOrigin: 'http://app.local' }
+  );
+  assert.equal(multiCsp.scriptNonce, 'AAA111');
+  const combinedCsp = multiCsp.headers.get('content-security-policy') || '';
+  assert.ok(combinedCsp.includes("'nonce-BBB222' 'nonce-AAA111'"), `Policy 2 must permit shared gateway nonce: ${combinedCsp}`);
+
+  // 5. P2-5: TunnelBridge accepts P2P_SW_EVICTED from nested child iframe on sandboxOrigin,
+  //    while keeping P2P_ROUTE_SYNC / P2P_TITLE_SYNC strictly restricted to appFrame.contentWindow!
+  let evictedCount = 0;
+  let routeSynced = '';
+  const bridge = new portalBridgeMod.TunnelBridge({
+    onSwEvicted: () => evictedCount++,
+    onRouteSync: (p) => { routeSynced = p; },
+  });
+  const fakeAppWin = {};
+  const fakeNestedChildWin = {};
+  bridge.setContext(
+    null,
+    swOrigin,
+    { nodeId: 'demo', backendOrigin: 'http://app.local', isStaticMode: false, sameSiteMode: false },
+    { contentWindow: fakeAppWin }
+  );
+  bridge.handleWindowMessage({ isTrusted: true, origin: swOrigin, source: fakeNestedChildWin, data: { type: 'P2P_SW_EVICTED' } });
+  assert.equal(evictedCount, 1, 'P2-5: nested child iframe on sandboxOrigin must trigger onSwEvicted');
+  bridge.handleWindowMessage({ isTrusted: true, origin: 'https://evil.example', source: fakeNestedChildWin, data: { type: 'P2P_SW_EVICTED' } });
+  assert.equal(evictedCount, 1, 'foreign origin P2P_SW_EVICTED must be ignored');
+  bridge.handleWindowMessage({ isTrusted: true, origin: swOrigin, source: fakeNestedChildWin, data: { type: 'P2P_ROUTE_SYNC', path: '/hijack' } });
+  assert.equal(routeSynced, '', 'nested child iframe MUST NOT spoof P2P_ROUTE_SYNC');
+
+  // 6. P2-6: Worker script with ES2023 `#!` hashbang preserves hashbang on line 1!
+  const workerWithHashbang = htmlMod.injectWorkerBootstrap(
+    '#!/usr/bin/env worker\n"use strict";\npostMessage("ok");',
+    swOrigin,
+    { backendOrigin: 'http://app.local' }
+  );
+  assert.ok(workerWithHashbang.startsWith('#!/usr/bin/env worker\n"use strict";\n'), 'hashbang + use strict must stay before preamble');
+
+  // 7. P2-9: Verified first visit with pinned `?pk=<good>` commits TOFU so subsequent bare `#node` blocks rogue keys!
+  identityMod.clearMemoryTofuStoreForTests();
+  const pinnedHash = 'GOOD_PINNED_PK_HASH_22';
+  let pinnedAuthedInfo = null;
+  const authCli = new authClientMod.AuthClient(
+    'pinned-node',
+    portalOrigin,
+    false,
+    pinnedHash,
+    '',
+    {
+      onStatus() {},
+      onLog() {},
+      onAuthRequired() {},
+      onAuthFailed() {},
+      onFatalSecurityError(msg) { throw new Error(msg); },
+      onAuthenticated(info) { pinnedAuthedInfo = info; },
+    }
+  );
+  const mockCtrlMux = { sendControlFrame() {} };
+  const gen = authCli.beginChannel({
+    mux: mockCtrlMux,
+    offerDesc: { fp: 'a'.repeat(64), ice_ufrag: 'u1', ice_pwd: 'p'.repeat(24), setup: 'actpass', mid: '0', sctp_port: 5000, max_msg_size: 262144, sdp_ver: 2 },
+    answerDesc: { fp: 'b'.repeat(64), ice_ufrag: 'u2', ice_pwd: 'q'.repeat(24), setup: 'active', mid: '0', sctp_port: 5000, max_msg_size: 262144, sdp_ver: 2 },
+    visitorNonce: 'vnonce',
+    agentPkB64: cryptoMod.base64UrlEncode(new Uint8Array(32).fill(7)),
+    verifiedPkHash: pinnedHash,
+    verifiedKeyStatus: 'pinned_ok',
+  });
+  const te = new TextEncoder();
+  await authCli.handleControlFrame(gen, {
+    type: frameMod.FrameType.AUTH_CHALLENGE,
+    flags: 0,
+    payload: te.encode(JSON.stringify({ agent_nonce: 'anonce', auth_methods: ['public'] })),
+  });
+  await authCli.handleControlFrame(gen, {
+    type: frameMod.FrameType.AUTH_RESULT,
+    flags: 0,
+    payload: te.encode(
+      JSON.stringify({
+        ok: true,
+        role: 'public',
+        meta: { nodeId: 'pinned-node', backendOrigin: 'http://app.local', isStaticMode: false, cookieSecureContext: false },
+      })
+    ),
+  });
+  assert.ok(pinnedAuthedInfo, 'pinned visit must authenticate cleanly');
+  assert.equal(pinnedAuthedInfo.meta.cookieSecureContext, false, 'cookieSecureContext must propagate through BackendMeta');
+
+  // Verify TOFU was actually committed by attempting a bare `#pinned-node` auth with a DIFFERENT key
+  // in the same module instance: commitTofuKey MUST detect the conflict and fire onFatalSecurityError!
+  const conflictErrors = [];
+  const bareRogueAuth = new authClientMod.AuthClient(
+    'pinned-node',
+    portalOrigin,
+    false,
+    '',
+    '',
+    {
+      onStatus() {},
+      onLog() {},
+      onAuthRequired() {},
+      onAuthFailed() {},
+      onFatalSecurityError(msg) { conflictErrors.push(msg); },
+      onAuthenticated() { throw new Error('rogue key must NOT authenticate after pinned TOFU commit'); },
+    }
+  );
+  const gen2 = bareRogueAuth.beginChannel({
+    mux: mockCtrlMux,
+    offerDesc: { fp: 'a'.repeat(64), ice_ufrag: 'u1', ice_pwd: 'p'.repeat(24), setup: 'actpass', mid: '0', sctp_port: 5000, max_msg_size: 262144, sdp_ver: 2 },
+    answerDesc: { fp: 'b'.repeat(64), ice_ufrag: 'u2', ice_pwd: 'q'.repeat(24), setup: 'active', mid: '0', sctp_port: 5000, max_msg_size: 262144, sdp_ver: 2 },
+    visitorNonce: 'vnonce2',
+    agentPkB64: cryptoMod.base64UrlEncode(new Uint8Array(32).fill(9)),
+    verifiedPkHash: 'EVIL_ROGUE_PK_HASH_22_',
+    verifiedKeyStatus: 'tofu_new',
+  });
+  await bareRogueAuth.handleControlFrame(gen2, {
+    type: frameMod.FrameType.AUTH_CHALLENGE,
+    flags: 0,
+    payload: te.encode(JSON.stringify({ agent_nonce: 'anonce2', auth_methods: ['public'] })),
+  });
+  await bareRogueAuth.handleControlFrame(gen2, {
+    type: frameMod.FrameType.AUTH_RESULT,
+    flags: 0,
+    payload: te.encode(
+      JSON.stringify({
+        ok: true,
+        role: 'public',
+        meta: { nodeId: 'pinned-node', backendOrigin: 'http://app.local', isStaticMode: false },
+      })
+    ),
+  });
+  assert.ok(
+    conflictErrors.some((e) => /TOFU key conflict/i.test(e)),
+    `P2-9: subsequent bare #node visit with rogue key must fail with TOFU conflict, got: ${JSON.stringify(conflictErrors)}`
+  );
+});

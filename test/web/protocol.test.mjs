@@ -411,3 +411,76 @@ test('RFC 9383 Appendix C.1 official vector & V7 SPAKE2+ KDF cross-language pari
   assert.equal(bytesToHex(creds.w0Bytes), kdf.w0_hex, 'KDF w0 mismatch between TS and Go');
   assert.equal(bytesToHex(creds.w1Bytes), kdf.w1_hex, 'KDF w1 mismatch between TS and Go');
 });
+
+test('PoolMux V8 TS Audit Regressions (P1-7, P2-7): WSStream concurrent sendMessage serialization & MAX_WS_MESSAGE_CHUNKS cap', async () => {
+  const muxMod = await loadTsBundle('web/src/protocol/mux.ts');
+  const frameMod = await loadTsBundle('web/src/protocol/frame.ts');
+  const tlvMod = await loadTsBundle('web/src/protocol/tlv.ts');
+
+  const sentFrames = [];
+  let lowCb = null;
+  const dc = {
+    readyState: 'open',
+    bufferedAmount: 0,
+    bufferedAmountLowThreshold: 0,
+    binaryType: 'arraybuffer',
+    onmessage: null,
+    onopen: null,
+    onclose: null,
+    onerror: null,
+    set onbufferedamountlow(fn) { lowCb = fn; },
+    get onbufferedamountlow() { return lowCb; },
+    send(data) {
+      const f = frameMod.decodeFrame(new Uint8Array(data));
+      sentFrames.push({ type: f.type, flags: f.flags, len: f.payload.byteLength });
+      // Trigger SCTP backpressure right after 1st WS chunk so concurrent callers race across await!
+      if (sentFrames.length === 2) {
+        this.bufferedAmount = 2 * 1024 * 1024;
+        setTimeout(() => {
+          this.bufferedAmount = 0;
+          lowCb?.();
+        }, 10);
+      }
+    },
+    close() { this.readyState = 'closed'; },
+  };
+  const ctrl = { ...dc, send() {}, close() {} };
+
+  const mux = new muxMod.PoolMux(1, {});
+  mux.attachControlDC(ctrl);
+  mux.attachLaneDC(0, dc);
+  mux.setMaxMessageSize(4096); // chunkSize = 4088
+
+  const wsReq = tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.WS, method: 'GET', target: '/ws', headers: [] });
+  const ws = await mux.openWSStream(wsReq);
+
+  // 1. P1-7: Concurrent multi-chunk TEXT + BINARY sends MUST NOT interleave opcodes!
+  await Promise.all([
+    ws.sendMessage('A'.repeat(9000)),
+    ws.sendMessage(new Uint8Array(9000).fill(0x42)),
+  ]);
+  const wsFrames = sentFrames.filter(
+    (f) => f.type === frameMod.FrameType.WS_TEXT || f.type === frameMod.FrameType.WS_BINARY
+  );
+  assert.ok(wsFrames.length >= 6);
+  let activeOp = 0;
+  for (const f of wsFrames) {
+    if (activeOp !== 0) {
+      assert.equal(f.type, activeOp, `P1-7 regression: interleaved WS opcodes ${JSON.stringify(wsFrames)}`);
+    }
+    activeOp = f.flags & frameMod.FrameFlag.MSG_FIN ? 0 : f.type;
+  }
+
+  // 2. P2-7: Inbound WS message exceeding MAX_WS_MESSAGE_CHUNKS (16384) must RESET with FRAME_SIZE_ERROR!
+  const resp101 = tlvMod.encodeResponseHeaders({ status: 101, headers: [] });
+  dc.onmessage({ data: frameMod.encodeFrame(ws.streamId, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, resp101).buffer });
+  const oneByte = new Uint8Array([0x01]);
+  const chunkRaw = frameMod.encodeFrame(ws.streamId, frameMod.FrameType.WS_BINARY, frameMod.FrameFlag.NONE, oneByte).buffer;
+  for (let i = 0; i <= frameMod.MAX_WS_MESSAGE_CHUNKS; i++) {
+    if (ws.isClosed) break;
+    dc.onmessage({ data: chunkRaw });
+  }
+  assert.equal(ws.isClosed, true, 'P2-7: exceeding MAX_WS_MESSAGE_CHUNKS must reset WSStream');
+  assert.equal(mux.sessionMemUsed, 0, 'P2-7: reset WSStream must release all session memory');
+  mux.close();
+});

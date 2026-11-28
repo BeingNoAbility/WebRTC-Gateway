@@ -180,8 +180,10 @@ func (wp *WSProxy) HandleStream(
 	}
 	conn.SetReadLimit(MaxWSFramePayloadBytes)
 
-	// Mark long-lived only after 101 Switching Protocols succeeds so failed upgrades never leak slots.
+	// Mark long-lived and WebSocket only after 101 Switching Protocols succeeds so failed upgrades never leak slots
+	// and Stream.Close() never emits illegal HTTP TypeData(FlagFin) frames on this WebSocket stream.
 	stream.SetLongLived(true)
+	stream.SetWebSocket()
 
 	var respFields []protocol.HeaderField
 	var wsDeltas []CookieDelta
@@ -193,11 +195,12 @@ func (wp *WSProxy) HandleStream(
 	if sp := conn.Subprotocol(); sp != "" {
 		respFields = append(respFields, protocol.HeaderField{Name: "sec-websocket-protocol", Value: sp})
 	}
-	respTLV, err := protocol.EncodeResponseHeaders(&protocol.ResponseHeaders{
-		Status:       http.StatusSwitchingProtocols,
-		Headers:      respFields,
-		CookieDeltas: cookieDeltasToEntries(wsDeltas),
-	})
+	respTLV, err := encodeBoundedResponseHeaders(
+		http.StatusSwitchingProtocols,
+		0,
+		respFields,
+		dedupCookieEntries(cookieDeltasToEntries(wsDeltas)),
+	)
 	if err != nil || stream.WriteHeaders(respTLV, false) != nil {
 		_ = conn.CloseNow()
 		stream.Reset(protocol.ErrCodeInternalError)
@@ -209,8 +212,10 @@ func (wp *WSProxy) HandleStream(
 
 	var closeOnce sync.Once
 	var wsCloseSentOnce sync.Once
+	var wsCloseSent atomic.Bool
 	sendWSClose := func(code uint16, reason string) {
 		wsCloseSentOnce.Do(func() {
+			wsCloseSent.Store(true)
 			_ = stream.WriteWSClose(code, reason)
 		})
 	}
@@ -218,9 +223,10 @@ func (wp *WSProxy) HandleStream(
 	closeBackend := func(code websocket.StatusCode, reason string) bool {
 		closeOnce.Do(func() {
 			reason = sanitizeUTF8CloseReason(reason, 120)
-			// Cancel pumpCtx so Goroutine A releases coder/websocket's internal readMu, then attempt
+			// Cancel pumpCtx FIRST so Goroutine A releases coder/websocket's internal readMu, then attempt
 			// a strictly bounded 1s RFC 6455 Close handshake. If the backend stalls, force-close the
 			// underlying net.Conn directly (bypassing coder/websocket's casClosing CloseNow stall, H-10b).
+			pumpCancel()
 			done := make(chan error, 1)
 			go func() {
 				done <- conn.Close(code, reason)
@@ -236,11 +242,9 @@ func (wp *WSProxy) HandleStream(
 					_ = conn.CloseNow()
 				}
 			case <-timer.C:
-				pumpCancel()
 				rawCapture.forceClose()
 				_ = conn.CloseNow()
 			}
-			pumpCancel()
 		})
 		return backendClosedClean.Load()
 	}
@@ -458,6 +462,9 @@ func (wp *WSProxy) HandleStream(
 
 	wg.Wait()
 	closeBackend(websocket.StatusNormalClosure, "")
+	if !wsCloseSent.Load() && stream.Context().Err() == nil {
+		stream.Reset(protocol.ErrCodeInternalError)
+	}
 	_ = stream.Close()
 }
 

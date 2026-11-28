@@ -312,8 +312,9 @@ export class AuthClient {
         }
 
         // Commit TOFU key ONLY AFTER Ed25519 signature + DTLS cert + strict channel auth succeed!
-        // Fail-Closed if IndexedDB commit fails or detects a concurrent conflicting key.
-        if (!this.pinnedPkHash && ctx.verifiedPkHash) {
+        // Also record TOFU on first verified `?pk=` pinned visit so subsequent bare `#node` visits
+        // are protected against MITM (idempotent if already matched, Fail-Closed on conflict).
+        if (ctx.verifiedPkHash) {
           try {
             await commitTofuKey(this.portalOrigin, this.nodeId, ctx.verifiedPkHash);
           } catch (err) {
@@ -338,6 +339,10 @@ export class AuthClient {
           backendOrigin: typeof rawMeta.backendOrigin === 'string' ? rawMeta.backendOrigin : '',
           isStaticMode: Boolean(rawMeta.isStaticMode),
           sameSiteMode: this.sameSiteMode,
+          cookieSecureContext:
+            typeof rawMeta.cookieSecureContext === 'boolean'
+              ? rawMeta.cookieSecureContext
+              : undefined,
           pinnedPk: this.pinnedPkHash || undefined,
           initialCookies,
         };

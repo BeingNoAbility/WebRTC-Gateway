@@ -26,6 +26,7 @@ import {
   MAX_POOL_SIZE,
   MAX_TOTAL_HEADERS_SIZE,
   MAX_WS_MESSAGE_BYTES,
+  MAX_WS_MESSAGE_CHUNKS,
   MIN_CHUNK_SIZE,
   MIN_NEGOTIATED_MAX_MSG_SIZE,
   decodeFrame,
@@ -247,6 +248,7 @@ abstract class BaseStream implements ManagedStream {
         const timer = setTimeout(() => {
           const idx = this.winWaiters.indexOf(entry);
           if (idx >= 0) this.winWaiters.splice(idx, 1);
+          this.reset(ErrorCode.FLOW_CONTROL_ERROR);
           reject(new Error('P2P stream send window timeout'));
         }, rem);
         this.winWaiters.push(entry);
@@ -539,12 +541,34 @@ export class WSStream extends BaseStream {
   private asmChunks: Uint8Array[] = [];
   private asmBytes = 0;
   private asmMemCost = 0;
+  private asmChunkCount = 0;
 
-  private pendingMsgs: Array<{ msg: WSDeliveredMessage; memCost: number }> = [];
+  private pendingMsgs: Array<{
+    msg: WSDeliveredMessage;
+    memCost: number;
+    deferredCreditBytes: number;
+    deferredCreditChunks: number;
+  }> = [];
   private pendingClose: { code: number; reason: string; wasClean: boolean } | null = null;
   private remoteCloseReceived = false;
   private consumedBytes = 0;
   private consumedChunks = 0;
+  private writeChain: Promise<void> = Promise.resolve();
+
+  private recordConsumed(bytes: number, chunks: number): void {
+    if (bytes <= 0 && chunks <= 0) return;
+    this.consumedBytes += bytes;
+    this.consumedChunks += chunks;
+    if (
+      this.consumedBytes >= CREDIT_THRESHOLD_BYTES ||
+      this.consumedChunks >= CREDIT_THRESHOLD_CHUNKS
+    ) {
+      const delta = this.consumedBytes;
+      this.consumedBytes = 0;
+      this.consumedChunks = 0;
+      if (delta > 0) this.sendCredit(delta);
+    }
+  }
 
   async openWithHeaders(headersRaw: Uint8Array): Promise<void> {
     await this.sendRawHeaders(headersRaw, false);
@@ -556,6 +580,9 @@ export class WSStream extends BaseStream {
     while (this.pendingMsgs.length > 0 && !this.terminated) {
       const item = this.pendingMsgs.shift()!;
       this.mux.releaseSessionBytes(item.memCost);
+      if (!this.remoteCloseReceived) {
+        this.recordConsumed(item.deferredCreditBytes, item.deferredCreditChunks);
+      }
       cb(item.msg);
     }
     if (this.pendingClose && this.pendingMsgs.length === 0 && !this.terminated) {
@@ -578,13 +605,23 @@ export class WSStream extends BaseStream {
     }
   }
 
-  async sendMessage(data: string | Uint8Array): Promise<void> {
-    if (this.terminated || this.localFin) throw new Error('WebSocket stream closed');
+  sendMessage(data: string | Uint8Array): Promise<void> {
+    if (this.terminated || this.localFin) {
+      return Promise.reject(new Error('WebSocket stream closed'));
+    }
     const isBinary = data instanceof Uint8Array;
     const raw = isBinary ? data : utf8Enc.encode(data);
     if (raw.byteLength > MAX_WS_MESSAGE_BYTES) {
-      throw new RangeError('WebSocket message exceeds 16 MiB');
+      return Promise.reject(new RangeError('WebSocket message exceeds 16 MiB'));
     }
+    // Serialize multi-chunk message sends internally so concurrent callers can never interleave frames.
+    const run = this.writeChain.then(() => this.sendMessageSerialized(isBinary, raw));
+    this.writeChain = run.catch(() => {});
+    return run;
+  }
+
+  private async sendMessageSerialized(isBinary: boolean, raw: Uint8Array): Promise<void> {
+    if (this.terminated || this.localFin) throw new Error('WebSocket stream closed');
     const op = isBinary ? FrameType.WS_BINARY : FrameType.WS_TEXT;
     if (raw.byteLength === 0) {
       await this.mux.waitLaneWritable(this.lane);
@@ -649,6 +686,10 @@ export class WSStream extends BaseStream {
       this.reset(ErrorCode.PROTOCOL_ERROR);
       return;
     }
+    if (this.asmChunkCount + 1 > MAX_WS_MESSAGE_CHUNKS) {
+      this.reset(ErrorCode.FRAME_SIZE_ERROR);
+      return;
+    }
     const plen = payload.byteLength;
     if (this.asmBytes + plen > MAX_WS_MESSAGE_BYTES) {
       // H-5c: Unconditionally send 1009 and clean up regardless of localFin!
@@ -664,6 +705,7 @@ export class WSStream extends BaseStream {
       return;
     }
     this.asmOp = op;
+    this.asmChunkCount++;
     if (plen > 0) {
       const copy = new Uint8Array(plen);
       copy.set(payload);
@@ -672,27 +714,25 @@ export class WSStream extends BaseStream {
     }
     this.asmMemCost += memCost;
 
-    // Replenish pure payload-byte CREDIT smoothly during streaming large messages.
-    if (plen > 0) {
-      this.consumedBytes += plen;
-      this.consumedChunks++;
-      if (this.consumedBytes >= CREDIT_THRESHOLD_BYTES || this.consumedChunks >= CREDIT_THRESHOLD_CHUNKS) {
-        const delta = this.consumedBytes;
-        this.consumedBytes = 0;
-        this.consumedChunks = 0;
-        this.sendCredit(delta);
-      }
+    // Replenish pure payload-byte CREDIT immediately only when an active consumer is attached
+    // (or during the first streaming message before any message queues in pendingMsgs).
+    const immediateCredit = this.msgCb !== null || this.pendingMsgs.length === 0;
+    if (plen > 0 && immediateCredit) {
+      this.recordConsumed(plen, 1);
     }
 
     if (!fin) return;
 
     const assembled = concatChunks(this.asmChunks, this.asmBytes);
     const totalMemCost = this.asmMemCost;
+    const totalPayloadBytes = this.asmBytes;
+    const totalChunkCount = this.asmChunkCount;
     const isBinary = this.asmOp === FrameType.WS_BINARY;
     this.asmOp = 0;
     this.asmChunks = [];
     this.asmBytes = 0;
     this.asmMemCost = 0;
+    this.asmChunkCount = 0;
 
     let msg: WSDeliveredMessage;
     if (isBinary) {
@@ -711,7 +751,12 @@ export class WSStream extends BaseStream {
       this.mux.releaseSessionBytes(totalMemCost);
       this.msgCb(msg);
     } else {
-      this.pendingMsgs.push({ msg, memCost: totalMemCost });
+      this.pendingMsgs.push({
+        msg,
+        memCost: totalMemCost,
+        deferredCreditBytes: immediateCredit ? 0 : totalPayloadBytes,
+        deferredCreditChunks: immediateCredit ? 0 : totalChunkCount,
+      });
     }
   }
 
@@ -736,6 +781,7 @@ export class WSStream extends BaseStream {
       this.asmChunks = [];
       this.asmBytes = 0;
       this.asmMemCost = 0;
+      this.asmChunkCount = 0;
     }
     this.maybeDetach();
 
@@ -760,6 +806,7 @@ export class WSStream extends BaseStream {
     this.asmChunks = [];
     this.asmBytes = 0;
     this.asmMemCost = 0;
+    this.asmChunkCount = 0;
     for (const item of this.pendingMsgs) {
       freed += item.memCost;
     }
@@ -1133,6 +1180,9 @@ export class PoolMux {
     const lane = this.pickLane();
     await this.waitLaneWritable(lane);
     if (this.closed) throw new Error('PoolMux is closed');
+    if (this.activeStreams >= MAX_CONCURRENT_STREAMS) {
+      throw new Error('max concurrent P2P streams reached');
+    }
     const streamId = this.allocateStreamId();
     const st = new PoolStream(this, lane, streamId);
     lane.streams.set(streamId, st);
@@ -1154,6 +1204,9 @@ export class PoolMux {
     const lane = this.pickLane();
     await this.waitLaneWritable(lane);
     if (this.closed) throw new Error('PoolMux is closed');
+    if (this.activeStreams >= MAX_CONCURRENT_STREAMS) {
+      throw new Error('max concurrent P2P streams reached');
+    }
     const streamId = this.allocateStreamId();
     const st = new WSStream(this, lane, streamId);
     lane.streams.set(streamId, st);

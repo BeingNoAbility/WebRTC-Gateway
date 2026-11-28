@@ -240,20 +240,26 @@ func TestSignalV7_IPv6PrefixRateLimitAndLockoutPreservation(t *testing.T) {
 }
 
 func TestAuthLimiterFailClosedWhenSaturated(t *testing.T) {
-	lim := NewIPRateLimiter(64, 120)
-	// Saturate all maxAuthFailedIPs slots with actively locked-out /24-distinct IPv4s.
-	for i := 0; i < maxAuthFailedIPs; i++ {
-		ip := fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xff, (i>>8)&0xff, i&0xff)
+	// Default AuthLockoutTable (AllowEvictLockedOnFull=false, used by Agent SPAKE2+ password auth)
+	// MUST fail closed globally when every slot holds an unexpired lockout.
+	tab := NewAuthLockoutTable(AuthLockoutConfig{
+		MaxFailures:     authLockoutThreshold,
+		LockoutDuration: authLockoutDuration,
+		MaxPendingKeys:  64,
+		MaxLockedKeys:   64,
+	})
+	now := time.Now()
+	for i := 0; i < 64; i++ {
+		ip := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
 		for f := 0; f < authLockoutThreshold; f++ {
-			lim.RecordFailedAuth(ip)
+			tab.RecordFailure(ip, now)
 		}
 	}
-	// A brand-new unseen IP must fail closed when every slot holds an unexpired lockout.
-	if !lim.IsAuthLocked("198.51.100.250") {
-		t.Fatal("Signaling IPRateLimiter failed open when saturated with active lockouts")
+	if allowed, _ := tab.Allow("198.51.100.250", now); allowed {
+		t.Fatal("default AuthLockoutTable failed open when saturated with active lockouts")
 	}
-	if !lim.RecordFailedAuth("198.51.100.251") {
-		t.Fatal("RecordFailedAuth must return true (locked) when saturated")
+	if !tab.RecordFailure("198.51.100.251", now) {
+		t.Fatal("RecordFailure must return true (locked) when saturated in fail-closed mode")
 	}
 }
 

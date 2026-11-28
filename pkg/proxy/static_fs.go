@@ -458,14 +458,8 @@ func (h *StaticFSHandler) serveDirListing(
 			}
 			isDir := false
 			typ := de.Type()
-			// Fast O(1) Lstat via pinned dirRoot for DT_UNKNOWN (FUSE/NFS/XFS) instead of re-traversing from root (H-12).
-			if typ == 0 && dirRoot != nil {
-				if li, lerr := dirRoot.Lstat(name); lerr == nil {
-					typ = li.Mode().Type()
-				} else {
-					continue
-				}
-			}
+			// Note: in Go io/fs.FileMode, 0 denotes a regular file (NOT DT_UNKNOWN); os.ReadDir
+			// already falls back to lstatat internally for DT_UNKNOWN / os.Root entries.
 			if typ&os.ModeSymlink != 0 {
 				if !h.followSymlinks || symlinksResolved >= maxDirListingSymlinks {
 					continue

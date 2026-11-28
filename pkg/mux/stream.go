@@ -36,18 +36,21 @@ type Stream struct {
 	cancel context.CancelFunc
 
 	longLived  atomic.Bool
+	isWS       atomic.Bool
 	lastActive atomic.Int64 // monotonic offset in nanos from createdAt
 	createdAt  time.Time
 
 	// Header assembly state (protected by hdrMu).
 	hdrMu        sync.Mutex
 	hdrBuf       []byte
+	hdrMemCost   int64
 	hdrChunks    int
 	hdrComplete  bool
 	hasReqBody   bool
 	hdrReadyCh   chan struct{}
 	hdrReadyOnce sync.Once
 	inWSActiveOp uint8 // non-zero while inside a multi-chunk WS message (prevents interleaving)
+	inWSChunks   int   // chunks accumulated in the current streaming WS message (<= MaxWSMessageChunks)
 
 	// Inbound data/WS queue (protected by inMu).
 	inMu                sync.Mutex
@@ -123,10 +126,25 @@ func (s *Stream) signalWindow() {
 	}
 }
 
+func (s *Stream) SetWebSocket() { s.isWS.Store(true) }
+
 func (s *Stream) HeadersRaw() []byte {
 	s.hdrMu.Lock()
 	defer s.hdrMu.Unlock()
 	return s.hdrBuf
+}
+
+// TakeHeadersRaw returns the assembled header block and immediately releases its buffer and memory budget
+// so long-lived streams (WebSocket / SSE) do not pin up to 64 KiB for their entire lifetime.
+func (s *Stream) TakeHeadersRaw() []byte {
+	s.hdrMu.Lock()
+	raw := s.hdrBuf
+	cost := s.hdrMemCost
+	s.hdrBuf = nil
+	s.hdrMemCost = 0
+	s.hdrMu.Unlock()
+	s.releaseBudget(cost)
+	return raw
 }
 
 func (s *Stream) HasRequestBody() bool {
@@ -139,10 +157,7 @@ func (s *Stream) HasRequestBody() bool {
 func (s *Stream) ReadResponseHeaders(ctx context.Context) ([]byte, error) {
 	select {
 	case <-s.hdrReadyCh:
-		s.hdrMu.Lock()
-		raw := s.hdrBuf
-		s.hdrMu.Unlock()
-		return raw, nil
+		return s.TakeHeadersRaw(), nil
 	case <-s.ctx.Done():
 		s.inMu.Lock()
 		err := s.inErr
@@ -169,6 +184,21 @@ func (s *Stream) onInboundHeaders(flags uint8, payload []byte) {
 		s.hdrMu.Unlock()
 		s.Reset(protocol.ErrCodeFrameSizeError)
 		return
+	}
+	memCost := int64(len(payload))
+	if memCost > 0 {
+		if !s.mux.sessionBudget.TryReserve(memCost) {
+			s.hdrMu.Unlock()
+			s.Reset(protocol.ErrCodeFlowControlError)
+			return
+		}
+		if s.mux.globalBudget != nil && !s.mux.globalBudget.TryReserve(memCost) {
+			s.mux.sessionBudget.Release(memCost)
+			s.hdrMu.Unlock()
+			s.Reset(protocol.ErrCodeFlowControlError)
+			return
+		}
+		s.hdrMemCost += memCost
 	}
 	s.hdrBuf = append(s.hdrBuf, payload...)
 	if (flags & protocol.FlagMore) != 0 {
@@ -264,6 +294,7 @@ func (s *Stream) onInboundData(payload []byte, fin bool) {
 }
 
 func (s *Stream) onInboundWSChunk(op uint8, fin bool, payload []byte) {
+	s.isWS.Store(true)
 	s.hdrMu.Lock()
 	if !s.hdrComplete {
 		s.hdrMu.Unlock()
@@ -276,8 +307,15 @@ func (s *Stream) onInboundWSChunk(op uint8, fin bool, payload []byte) {
 		s.Reset(protocol.ErrCodeProtocolError)
 		return
 	}
+	s.inWSChunks++
+	if s.inWSChunks > protocol.MaxWSMessageChunks {
+		s.hdrMu.Unlock()
+		s.Reset(protocol.ErrCodeFrameSizeError)
+		return
+	}
 	if fin {
 		s.inWSActiveOp = 0
+		s.inWSChunks = 0
 	} else {
 		s.inWSActiveOp = op
 	}
@@ -287,9 +325,11 @@ func (s *Stream) onInboundWSChunk(op uint8, fin bool, payload []byte) {
 }
 
 func (s *Stream) onInboundWSClose(payload []byte) {
+	s.isWS.Store(true)
 	s.hdrMu.Lock()
 	ready := s.hdrComplete
 	s.inWSActiveOp = 0
+	s.inWSChunks = 0
 	s.hdrMu.Unlock()
 	if !ready {
 		s.Reset(protocol.ErrCodeProtocolError)
@@ -359,6 +399,9 @@ func (s *Stream) Read(p []byte) (int, error) {
 		if len(s.inPartial) > 0 {
 			n := copy(p, s.inPartial)
 			s.inPartial = s.inPartial[n:]
+			if len(s.inPartial) == 0 {
+				s.inPartial = nil
+			}
 			s.inMu.Unlock()
 			s.touch()
 			return n, nil
@@ -497,7 +540,7 @@ func (s *Stream) waitSCTPBackpressure(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return ErrSCTPWriteTimout
+			return ErrSCTPWriteTimeout
 		}
 	}
 }
@@ -531,7 +574,7 @@ func (s *Stream) acquireSendWindow(ctx context.Context, want int) (int, error) {
 			deadline.Stop()
 			return 0, ctx.Err()
 		case <-deadline.C:
-			return 0, ErrSCTPWriteTimout
+			return 0, ErrSCTPWriteTimeout
 		}
 	}
 }
@@ -613,6 +656,7 @@ func (s *Stream) WriteWSChunk(ctx context.Context, op uint8, fin bool, payload [
 	if op != protocol.TypeWSText && op != protocol.TypeWSBinary {
 		return protocol.ErrInvalidFrameType
 	}
+	s.isWS.Store(true)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if s.writeClosed || s.localFin.Load() || s.ctx.Err() != nil {
@@ -659,6 +703,7 @@ func (s *Stream) WriteWSChunk(ctx context.Context, op uint8, fin bool, payload [
 
 // WriteWSClose sends an RFC 6455 WS_CLOSE sub-frame on this stream.
 func (s *Stream) WriteWSClose(code uint16, reason string) error {
+	s.isWS.Store(true)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if s.writeClosed || s.localFin.Load() || s.ctx.Err() != nil {
@@ -687,11 +732,24 @@ func (s *Stream) CloseWrite() error {
 	return err
 }
 
-// Close finishes the stream cleanly: sends HTTP FIN if not yet sent, purges unread inbound buffers,
-// cancels stream context, and detaches from the lane.
+// Close finishes the stream cleanly: for HTTP streams sends FIN if not yet sent,
+// purges unread inbound buffers, cancels stream context, and detaches from the lane.
+// WebSocket streams NEVER emit HTTP TypeData(FlagFin), and already-closed/WS streams
+// cancel s.ctx BEFORE locking writeMu so Close() never stalls behind a blocked writer.
 func (s *Stream) Close() error {
+	if s.isWS.Load() || s.localFin.Load() || s.ctx.Err() != nil {
+		s.cancel()
+		s.purgeInbound(ErrStreamClosed)
+		s.detach()
+		s.writeMu.Lock()
+		s.localFin.Store(true)
+		s.writeClosed = true
+		s.writeMu.Unlock()
+		return nil
+	}
+
 	s.writeMu.Lock()
-	needFin := !s.writeClosed && !s.localFin.Load() && !s.resetSent && s.ctx.Err() == nil
+	needFin := !s.writeClosed && !s.localFin.Load() && !s.resetSent && !s.isWS.Load() && s.ctx.Err() == nil
 	s.localFin.Store(true)
 	s.writeClosed = true
 	if needFin {
@@ -739,6 +797,13 @@ func (s *Stream) abortLocal(err error) {
 }
 
 func (s *Stream) purgeInbound(err error) {
+	s.hdrMu.Lock()
+	hdrCost := s.hdrMemCost
+	s.hdrBuf = nil
+	s.hdrMemCost = 0
+	s.hdrMu.Unlock()
+	s.releaseBudget(hdrCost)
+
 	s.inMu.Lock()
 	if s.inErr == nil {
 		s.inErr = err

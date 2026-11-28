@@ -142,6 +142,7 @@ func (a *Agent) completeOffer(msg signaling.OfferRelayDTO, offerSDP string, sess
 		MaxGlobalStreams:    a.cfg.MaxGlobalStream,
 		GlobalBudget:        a.globalMem,
 		GlobalActiveStreams: &a.activeStreams,
+		RequireAuth:         true,
 		OnControlFrame: func(f *protocol.Frame) {
 			a.handleControlFrame(sess, f)
 		},

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"io/fs"
+	"log"
 	"mime"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 var (
 	manifestPathRegex      = regexp.MustCompile(`^/__p2p_gw__/(?:assets/)?[A-Za-z0-9._-]+$`)
 	manifestSubAssetPathRe = regexp.MustCompile(`^/__p2p_gw__/assets/[A-Za-z0-9._-]+$`)
+	hashedAssetFilenameRe  = regexp.MustCompile(`\.[0-9a-fA-F]{8,}\.[A-Za-z0-9]+$`)
 )
 
 type assetManifest struct {
@@ -160,6 +162,9 @@ func (s *SignalServer) loadAndPreRenderAssets() error {
 			s.assets.swJS = s.renderSWJS("")
 		}
 	}
+	if s.opts.StaticDir != "" && s.assets.rawIndexHTML == "" {
+		log.Printf("[Signal] WARNING: static dir %q does not contain index.html; Portal UI will return 404", s.opts.StaticDir)
+	}
 	return nil
 }
 
@@ -276,9 +281,10 @@ func (s *SignalServer) renderSWJS(portOverride string) *preRenderedAsset {
 }
 
 func assetCacheControl(urlPath string) string {
-	// Content-hashed filenames (e.g. /__p2p_gw__/portal.ABC12345.js) are safely immutable.
+	// Only content-hashed filenames (e.g. /__p2p_gw__/portal.0123456789.js) are safely immutable;
+	// unhashed multi-dot names such as portal.min.js or app.v1.js must remain revalidated.
 	base := filepath.Base(urlPath)
-	if strings.Count(base, ".") >= 2 {
+	if hashedAssetFilenameRe.MatchString(base) {
 		return "public, max-age=31536000, immutable"
 	}
 	return "no-cache"

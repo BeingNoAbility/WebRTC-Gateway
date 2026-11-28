@@ -21,27 +21,32 @@ type authLockedEntry struct {
 
 // AuthLockoutConfig configures an O(1) lockout-preserving authentication failure limiter.
 type AuthLockoutConfig struct {
-	MaxFailures       int           // Failures per key before lockout (default 10)
-	LockoutDuration   time.Duration // Lockout & per-key failure window (default 5m)
-	MaxPendingKeys    int           // Max tracked non-locked keys in LRU (default 4096)
-	MaxLockedKeys     int           // Max active locked keys in FIFO (default 8192)
-	GlobalMaxFailures int           // Optional global failures per GlobalWindow across all IPs (0 disables)
-	GlobalWindow      time.Duration // Sliding window for GlobalMaxFailures (default 1m)
+	MaxFailures            int           // Failures per key before lockout (default 10)
+	LockoutDuration        time.Duration // Lockout & per-key failure window (default 5m)
+	MaxPendingKeys         int           // Max tracked non-locked keys in LRU (default 4096)
+	MaxLockedKeys          int           // Max active locked keys in FIFO (default 8192)
+	GlobalMaxFailures      int           // Optional global failures per GlobalWindow across all IPs (0 disables)
+	GlobalWindow           time.Duration // Sliding window for GlobalMaxFailures (default 1m)
+	AllowEvictLockedOnFull bool          // If true (high-entropy machine secrets >= 128b), evict oldest locked key when full instead of global fail-closed DoS
 }
 
 // AuthLockoutTable provides strictly O(1) amortized brute-force protection shared by
 // SignalingServer and Agent:
 //   - Separate `pending` LRU and `locked` monotonic FIFO (constant lockoutDuration guarantees
 //     FIFO front is always the earliest-expiring lockout -> O(1) expiry pruning, zero O(N) scans).
-//   - Actively locked entries are NEVER evicted by new keys; saturation fails closed.
+//   - Actively locked entries are NEVER evicted by unlocked pending keys.
+//   - When AllowEvictLockedOnFull is false (default, required for low-entropy passwords), saturation
+//     of `locked` fails closed globally. When true (high-entropy >= 128-bit machine secrets), unseen
+//     IPs remain allowed and newly locked keys evict only the oldest FIFO locked entry.
 //   - Optional O(1) global failure sliding ring blocks distributed / IPv6 /48 / 9-attempts-per-IP
 //     LRU eviction bypass attacks.
 type AuthLockoutTable struct {
-	mu              sync.Mutex
-	maxFailures     int
-	lockoutDuration time.Duration
-	maxPending      int
-	maxLocked       int
+	mu               sync.Mutex
+	maxFailures      int
+	lockoutDuration  time.Duration
+	maxPending       int
+	maxLocked        int
+	allowEvictLocked bool
 
 	pending    map[string]*authPendingEntry
 	pendingLRU *list.List
@@ -75,16 +80,17 @@ func NewAuthLockoutTable(cfg AuthLockoutConfig) *AuthLockoutTable {
 		ring = make([]time.Time, cfg.GlobalMaxFailures)
 	}
 	return &AuthLockoutTable{
-		maxFailures:     cfg.MaxFailures,
-		lockoutDuration: cfg.LockoutDuration,
-		maxPending:      cfg.MaxPendingKeys,
-		maxLocked:       cfg.MaxLockedKeys,
-		pending:         make(map[string]*authPendingEntry),
-		pendingLRU:      list.New(),
-		locked:          make(map[string]*authLockedEntry),
-		lockedFIFO:      list.New(),
-		globalRing:      ring,
-		globalWindow:    cfg.GlobalWindow,
+		maxFailures:      cfg.MaxFailures,
+		lockoutDuration:  cfg.LockoutDuration,
+		maxPending:       cfg.MaxPendingKeys,
+		maxLocked:        cfg.MaxLockedKeys,
+		allowEvictLocked: cfg.AllowEvictLockedOnFull,
+		pending:          make(map[string]*authPendingEntry),
+		pendingLRU:       list.New(),
+		locked:           make(map[string]*authLockedEntry),
+		lockedFIFO:       list.New(),
+		globalRing:       ring,
+		globalWindow:     cfg.GlobalWindow,
 	}
 }
 
@@ -114,7 +120,7 @@ func (t *AuthLockoutTable) Allow(rawIP string, now time.Time) (bool, time.Durati
 	if e, ok := t.locked[key]; ok {
 		return false, e.lockedUntil.Sub(now)
 	}
-	if len(t.locked) >= t.maxLocked {
+	if !t.allowEvictLocked && len(t.locked) >= t.maxLocked {
 		earliest := t.lockedFIFO.Front().Value.(*authLockedEntry).lockedUntil
 		return false, earliest.Sub(now)
 	}
@@ -148,7 +154,7 @@ func (t *AuthLockoutTable) RecordFailure(rawIP string, now time.Time) bool {
 		t.globalRing[t.globalHead] = now
 		t.globalHead = (t.globalHead + 1) % len(t.globalRing)
 	}
-	if len(t.locked) >= t.maxLocked {
+	if !t.allowEvictLocked && len(t.locked) >= t.maxLocked {
 		return true // Fail-Closed immediately when locked table is saturated.
 	}
 
@@ -184,7 +190,14 @@ func (t *AuthLockoutTable) RecordFailure(rawIP string, now time.Time) bool {
 	delete(t.pending, key)
 
 	if len(t.locked) >= t.maxLocked {
-		return true // Fail-Closed without evicting active lockouts.
+		if !t.allowEvictLocked {
+			return true // Fail-Closed without evicting active lockouts.
+		}
+		if front := t.lockedFIFO.Front(); front != nil {
+			victim := front.Value.(*authLockedEntry)
+			t.lockedFIFO.Remove(front)
+			delete(t.locked, victim.key)
+		}
 	}
 	le := &authLockedEntry{
 		key:         key,

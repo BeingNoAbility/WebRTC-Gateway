@@ -579,6 +579,118 @@ func TestRegression_AuthLockoutGlobalRingStops9AttemptEvictionBypass(t *testing.
 	}
 }
 
+func TestRegression_P0_PerNodeFakeNodeIDAndSaturationDoNotDoSLegitAgent(t *testing.T) {
+	srv, err := NewSignalServer(ServerOptions{
+		PortalOrigin:  "https://portal.example",
+		SandboxOrigin: "https://*.sbx.example",
+		NodeSecrets: map[string]string{
+			"legit-node": "super-secret-legit-token-1234567890",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSignalServer: %v", err)
+	}
+	defer srv.Shutdown()
+	handler := srv.Handler()
+
+	sendAgentReq := func(nodeID, ip, auth string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/ws/agent/"+nodeID, nil)
+		req.Host = "portal.example"
+		req.RemoteAddr = ip + ":54321"
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Sec-WebSocket-Version", "13")
+		req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// 1. Unknown/fake nodeIDs from one IP MUST share a single pure-IP lockout bucket (zero slot amplification).
+	for i := 0; i < authLockoutThreshold; i++ {
+		rr := sendAgentReq(fmt.Sprintf("nonexistent-%d", i), "203.0.113.10", "Bearer wrong")
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("fake node attempt %d: got %d, want 401", i, rr.Code)
+		}
+	}
+	if rr := sendAgentReq("nonexistent-another", "203.0.113.10", "Bearer wrong"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected attacker IP to be locked across all fake nodeIDs, got %d", rr.Code)
+	}
+
+	// 2. Even if distributed attackers saturate all maxAuthFailedIPs lockout slots, a clean-IP legitimate
+	//    Agent with a valid >= 128-bit Bearer secret MUST NOT be globally locked out (429).
+	for i := 0; i < maxAuthFailedIPs+16; i++ {
+		ip := fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xff, (i>>8)&0xff, i&0xff)
+		for f := 0; f < authLockoutThreshold; f++ {
+			srv.Limiter.RecordFailedAuthScoped(ip, "")
+		}
+	}
+	rrLegit := sendAgentReq("legit-node", "198.51.100.99", "Bearer super-secret-legit-token-1234567890")
+	// httptest.ResponseRecorder does not implement http.Hijacker so websocket.Accept returns 500/426,
+	// proving it passed BOTH auth lockout AND AllowAgentUpgrade without 401 or 429!
+	if rrLegit.Code == http.StatusTooManyRequests || rrLegit.Code == http.StatusUnauthorized {
+		t.Fatalf("P0-1 regression: legitimate agent blocked under lockout saturation: HTTP %d (%s)", rrLegit.Code, rrLegit.Body.String())
+	}
+}
+
+func TestRegression_P1_ClientUpgradeFloodNeverStarvesAgents(t *testing.T) {
+	srv, err := NewSignalServer(ServerOptions{
+		PortalOrigin:  "https://portal.example",
+		SandboxOrigin: "https://*.sbx.example",
+		SignalSecret:  "cluster-secret-1234567890",
+	})
+	if err != nil {
+		t.Fatalf("NewSignalServer: %v", err)
+	}
+	defer srv.Shutdown()
+	handler := srv.Handler()
+
+	// Case A: Same NAT IP exhausts client upgrade bucket.
+	for i := 0; i < DefaultMaxIPUpgrades+5; i++ {
+		_ = srv.Limiter.AllowUpgrade("198.51.100.5")
+	}
+	if srv.Limiter.AllowUpgrade("198.51.100.5") {
+		t.Fatal("client upgrade bucket should be exhausted")
+	}
+	// Case B: Distributed flood saturates all maxTrackedIPs client upgrade buckets.
+	for i := 0; i < maxTrackedIPs; i++ {
+		ip := fmt.Sprintf("2001:db8:beef:%x::1", i)
+		_ = srv.Limiter.AllowUpgrade(ip)
+		_ = srv.Limiter.AllowUpgrade(ip)
+	}
+
+	// Legitimate Agent behind the SAME NAT IP and from a clean IP must still pass upgrade limiter!
+	for _, ip := range []string{"198.51.100.5", "203.0.113.77"} {
+		req := httptest.NewRequest(http.MethodGet, "/ws/agent/mynode", nil)
+		req.Host = "portal.example"
+		req.RemoteAddr = ip + ":50000"
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Sec-WebSocket-Version", "13")
+		req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		req.Header.Set("Authorization", "Bearer cluster-secret-1234567890")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code == http.StatusTooManyRequests || rr.Code == http.StatusUnauthorized {
+			t.Fatalf("P1-1 regression: legitimate agent (%s) starved by client upgrade flood: HTTP %d", ip, rr.Code)
+		}
+	}
+}
+
+func TestRegression_P2_AssetCacheControlRequiresContentHash(t *testing.T) {
+	if got := assetCacheControl("/__p2p_gw__/portal.0123456789.js"); !strings.Contains(got, "immutable") {
+		t.Fatalf("expected hashed asset immutable, got %q", got)
+	}
+	for _, unhashed := range []string{"/__p2p_gw__/portal.min.js", "/__p2p_gw__/app.v1.2.js", "/__p2p_gw__/portal.js"} {
+		if got := assetCacheControl(unhashed); strings.Contains(got, "immutable") {
+			t.Fatalf("unhashed asset %q must not be cached immutable, got %q", unhashed, got)
+		}
+	}
+}
+
 func FuzzCanonicalizeHTTPPathAndHost(f *testing.F) {
 	f.Add("/%2577s/agent/nas", "portal.example.com")
 	f.Add("/__p2p_gw__/assets/bridge.js", "sbx-abc123.sandbox.example.net")

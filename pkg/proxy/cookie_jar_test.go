@@ -277,3 +277,19 @@ func TestCookieJarSecurityRegressions(t *testing.T) {
 	}
 	mgr.Release(r1)
 }
+
+func TestRegression_P2_OversizedClientMutationPreservesExistingCookie(t *testing.T) {
+	u, _ := url.Parse("http://app.local/")
+	jar := NewProxyCookieJar()
+	jar.SaveResponseCookies(u, []string{"session_state=valid; Path=/"})
+
+	// 4090-byte value passes isValidClientCookieValue (<= 4096) but entry.byteSize() exceeds 4096
+	// once name + domain + path are included. The rejected write MUST NOT wipe the existing cookie!
+	jar.ApplyClientMutations(u, []ClientCookieMutation{
+		{Op: "set", Name: "session_state", Value: strings.Repeat("x", 4090), Path: "/"},
+	})
+	hdr := jar.BuildCookieHeaderWithContext(u, CookieRequestContext{Method: "GET", SameOriginClient: true})
+	if !strings.Contains(hdr, "session_state=valid") {
+		t.Fatalf("P2-1 regression: rejected oversized mutation wiped existing valid cookie: %q", hdr)
+	}
+}

@@ -126,13 +126,13 @@ Close:
   Frame     : [StreamID][Type=WS_CLOSE]         [Flags=0x00]           [u16 code][reason <= 123B]
 ```
 
-接收端每收到分片即在 `16 MiB` 硬上限与单消息 `16384` 片上限内按纯载荷字节回补 `CREDIT`（兼容 `4088` 字节最小分片下的完整 `16 MiB` 消息组装），确保 > `2 MiB` 的单条大消息平滑流式转发；收到 `WS_CLOSE` 前必须完整交付队列中已入队的待读消息；超过 `16 MiB` 时立即返回关闭码 `1009`。
+接收端每收到分片即在 `16 MiB` 硬上限与单消息 `16384` 片上限内按纯载荷字节回补 `CREDIT`（兼容 `4088` 字节最小分片下的完整 `16 MiB` 消息组装），确保 > `512 KiB` 的单条大消息平滑流式转发；收到 `WS_CLOSE` 前必须完整交付队列中已入队的待读消息；超过 `16 MiB` 时立即返回关闭码 `1009`。
 
 ---
 
 ## 五、 流控、内存预算与生命周期
 
-- **纯载荷字节信用流控、SCTP 水位与微包防死锁**：每条流初始发送窗口 `2 MiB`，发送窗口等待超时 `30 s`（超时立即 `Reset`）；单条 DataChannel 写缓冲遵循高水位 `512 KiB` / 低水位 `128 KiB` 背压控制；消费方在同一通道发送纯载荷字节 `CREDIT`（绝不把内部 64B 结构开销混入线协议信用，且在累计达到 `128 KiB` 或 `256` 个分片时即触发补窗，避免海量 13B SSE 微包触发窗口耗尽或误重置），浏览器 `PoolStream.ackConsumed` 严格钳制补窗不超过实际已投递未确认载荷字节数。
-- **三层入站内存预算、64B 帧开销记账、等长分配与无条件归还**：本地入站内存记账与线协议 `CREDIT` 严格解耦——Go 与 TS 端对入站数据与 WS 分片执行等长分配拷贝（`cap == len`），本地按 `len(payload) + 64` 计入每流 `4 MiB`、每访客会话 `32 MiB`、Go 跨会话全局 `256 MiB` 三层入站上限（防止微包堆放大攻击）；流 `Close()` / `Reset()` 时无条件清扫未读入站缓冲并归还预算。
+- **纯载荷字节信用流控、SCTP 水位与微包防死锁**：每条流初始发送窗口 `512 KiB`，发送窗口等待超时 `30 s`（超时立即 `Reset`）；单条 DataChannel 写缓冲遵循高水位 `512 KiB` / 低水位 `128 KiB` 背压控制；消费方在同一通道发送纯载荷字节 `CREDIT`（绝不把内部 64B 结构开销混入线协议信用，且在累计达到 `128 KiB` 或 `256` 个分片时即触发补窗，避免海量 13B SSE 微包触发窗口耗尽或误重置），浏览器 `PoolStream.ackConsumed` 严格钳制补窗不超过实际已投递未确认载荷字节数。
+- **三层入站内存预算、64B 帧开销记账、等长分配与无条件归还**：本地入站内存记账与线协议 `CREDIT` 严格解耦——Go 与 TS 端对入站数据与 WS 分片执行等长分配拷贝（`cap == len`），本地按 `len(payload) + 64` 计入每流 `2 MiB`、每访客会话 `32 MiB`、Go 跨会话全局 `256 MiB` 三层入站上限（防止微包堆放大攻击）；流 `Close()` / `Reset()` 时无条件清扫未读入站缓冲并归还预算。
 - **确定性并发限额与无锁重置**：每会话限制并发活跃 HTTP/WS 流总数（全局流上限默认 `512`，WS 上限 `64`）；HTTP 代理与浏览器均依据响应/请求 `HEADERS` 是否携带 `FlagFin` 判断是否存在消息体（`HasRequestBody()` / `hasResponseBody`），避免响应头与体在同微任务到达时误判空体；`Reset()` 立即无锁唤醒阻塞读写协程并确保不向已重置流再触发正常结束回调。
 - **跨语言黄金测试向量**：Go 端 [`TestV8GoldenVectors`](https://github.com/BeingNoAbility/WebRTC-Gateway/blob/main/pkg/protocol/protocol_test.go) 与 TS 端 `test/web/protocol.test.mjs` 共享 `test/fixtures/protocol_v8_golden_vectors.json`（含 UTF-8 多字节字符、BOM 保留、V8 TLV、以及 RFC 9383 Appendix C.1 官方向量与 SPAKE2+ KDF 跨语言校验），保证两端编解码与密码学派生逐字节一致。

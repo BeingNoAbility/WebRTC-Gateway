@@ -36,14 +36,17 @@ func (s *SignalServer) verifyAgentUpgradeSecret(nodeID, authHdr string) (require
 
 func (s *SignalServer) handleAgentWS(w http.ResponseWriter, r *http.Request, nodeID, clientIP string) {
 	// HTTP Upgrade stage secret verification (rejects before spawning WS goroutines).
-	// When per-node secrets are active, scope failure tracking by (clientIP, nodeID) so
-	// authenticating with one node's secret can never reset brute-force lockouts on another node.
+	// When per-node secrets are active, scope failure tracking by (clientIP, nodeID) ONLY for
+	// configured nodeIDs so unknown/fake nodeIDs bucket under pure clientIP and cannot amplify
+	// lockout slots, while authenticating with one node still cannot reset another node's lockout.
 	secretVerified := false
 	needsAuth := s.opts.SignalSecret != "" || len(s.nodeSecrets) > 0
 	if needsAuth {
 		authScope := ""
 		if len(s.nodeSecrets) > 0 {
-			authScope = nodeID
+			if _, exists := s.nodeSecrets[nodeID]; exists {
+				authScope = nodeID
+			}
 		}
 		unlock := s.Limiter.LockAuthScope(clientIP, authScope)
 		if s.Limiter.IsAuthLockedScoped(clientIP, authScope) {
@@ -61,6 +64,13 @@ func (s *SignalServer) handleAgentWS(w http.ResponseWriter, r *http.Request, nod
 		s.Limiter.ResetFailedAuthScoped(clientIP, authScope)
 		unlock()
 		secretVerified = true
+	}
+
+	// Rate-limit Agent upgrades in an isolated bucket AFTER secret verification so unauthenticated
+	// client floods or invalid-secret probes can never starve legitimate Agents.
+	if !s.Limiter.AllowAgentUpgrade(clientIP) {
+		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+		return
 	}
 
 	if !s.Limiter.AcquireAgentConn(clientIP) {

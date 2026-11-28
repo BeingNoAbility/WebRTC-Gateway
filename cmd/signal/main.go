@@ -126,7 +126,8 @@ func main() {
 
 	if *healthFlag {
 		tlsOn := tlsAuto || (tlsCert != "" && tlsKey != "")
-		if err := signaling.RunHealthCheck(addr, tlsOn, *healthURLFlag); err != nil {
+		resolvedHealthURL := config.ResolveString(*healthURLFlag, explicit["health-url"], "HEALTH_URL", "", "")
+		if err := signaling.RunHealthCheck(addr, tlsOn, resolvedHealthURL); err != nil {
 			fmt.Fprintf(os.Stderr, "health check failed: %v\n", err)
 			os.Exit(1)
 		}

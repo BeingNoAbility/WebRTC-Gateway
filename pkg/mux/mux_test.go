@@ -243,8 +243,8 @@ func TestV8Mux_SCTPBackpressureTimeoutAndInstantReset_H4(t *testing.T) {
 	start := time.Now()
 	_, err := cli.OpenStream(reqTLV, true)
 	elapsed := time.Since(start)
-	if !errors.Is(err, ErrSCTPWriteTimout) {
-		t.Fatalf("expected ErrSCTPWriteTimout, got %v", err)
+	if !errors.Is(err, ErrSCTPWriteTimeout) {
+		t.Fatalf("expected ErrSCTPWriteTimeout, got %v", err)
 	}
 	if elapsed > time.Second {
 		t.Fatalf("SCTP write timeout took too long: %v", elapsed)
@@ -444,3 +444,172 @@ func TestV8Mux_MultiplexedHTTPAndWSOverSharedLanes(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+func TestRegression_P1_SetMaxMessageSizeMonotonicOnly(t *testing.T) {
+	m := New(Config{PoolSize: 1})
+	defer m.Close()
+
+	m.SetMaxMessageSize(4096)
+	if got := m.ChunkSize(); got != 4096-protocol.HeaderSize {
+		t.Fatalf("expected chunkSize=%d, got %d", 4096-protocol.HeaderSize, got)
+	}
+	// Higher local SCTP capability or peer SETTINGS must NEVER raise chunkSize back up!
+	m.SetMaxMessageSize(262144)
+	if got := m.ChunkSize(); got != 4096-protocol.HeaderSize {
+		t.Fatalf("P1-3 regression: SetMaxMessageSize raised chunkSize from %d to %d", 4096-protocol.HeaderSize, got)
+	}
+}
+
+func TestRegression_P1_WSStreamCloseNeverEmitsTypeDataFin(t *testing.T) {
+	var sentMu sync.Mutex
+	var sent [][]byte
+	dc := &captureDC{onSend: func(b []byte) {
+		sentMu.Lock()
+		sent = append(sent, append([]byte(nil), b...))
+		sentMu.Unlock()
+	}}
+	m := New(Config{PoolSize: 1})
+	defer m.Close()
+	m.AttachLaneDC(0, dc)
+
+	s := newStream(m, m.lanes[0], 1, false)
+	s.SetWebSocket()
+	m.lanes[0].mu.Lock()
+	m.lanes[0].streams[1] = s
+	m.lanes[0].mu.Unlock()
+
+	_ = s.Close()
+	sentMu.Lock()
+	defer sentMu.Unlock()
+	for _, raw := range sent {
+		f, err := protocol.Decode(raw)
+		if err == nil && f.Type == protocol.TypeData {
+			t.Fatalf("P1-4 regression: WebSocket Stream.Close() emitted illegal TypeData frame (flags=%d)", f.Flags)
+		}
+	}
+}
+
+func TestRegression_P2_RequireAuthHeaderBudgetReleaseAndWSChunkCap(t *testing.T) {
+	// 1. Defense-in-depth: RequireAuth rejects pre-auth data-lane frames.
+	var protoErr atomic.Bool
+	mAuth := New(Config{
+		PoolSize:    1,
+		RequireAuth: true,
+		OnProtocolError: func(error) {
+			protoErr.Store(true)
+		},
+	})
+	defer mAuth.Close()
+	reqTLV, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
+		Kind: protocol.StreamKindHTTP, Method: "GET", Target: "/",
+	})
+	hdrFrame, err := (&protocol.Frame{
+		StreamID: 1,
+		Type:     protocol.TypeHeaders,
+		Flags:    protocol.FlagFin,
+		Payload:  reqTLV,
+	}).Encode()
+	if err != nil {
+		t.Fatalf("Encode hdrFrame: %v", err)
+	}
+	mAuth.HandleLaneMessage(0, hdrFrame)
+	if !protoErr.Load() {
+		t.Fatal("RequireAuth mux must reject lane frames prior to SetAuthenticated(true)")
+	}
+
+	// 2. TakeHeadersRaw releases header buffer & session memory budget immediately.
+	m := New(Config{PoolSize: 1})
+	defer m.Close()
+	bigReq, err := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
+		Kind:   protocol.StreamKindWS,
+		Method: "GET",
+		Target: "/ws",
+		Headers: []protocol.HeaderField{
+			{Name: "x-big-1", Value: strings.Repeat("a", 2048)},
+			{Name: "x-big-2", Value: strings.Repeat("b", 2048)},
+			{Name: "x-big-3", Value: strings.Repeat("c", 2048)},
+			{Name: "x-big-4", Value: strings.Repeat("d", 2048)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("EncodeRequestHeaders: %v", err)
+	}
+	rawBigHdr, err := (&protocol.Frame{
+		StreamID: 1,
+		Type:     protocol.TypeHeaders,
+		Flags:    protocol.FlagNone,
+		Payload:  bigReq,
+	}).Encode()
+	if err != nil {
+		t.Fatalf("Encode rawBigHdr: %v", err)
+	}
+	m.HandleLaneMessage(0, rawBigHdr)
+	if used := m.SessionMemUsed(); used < 8192 {
+		t.Fatalf("expected hdrBuf memory accounted in sessionBudget, got %d", used)
+	}
+	st, err := m.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotHdr := st.TakeHeadersRaw()
+	if len(gotHdr) != len(bigReq) {
+		t.Fatalf("TakeHeadersRaw length mismatch: got %d want %d", len(gotHdr), len(bigReq))
+	}
+	if m.SessionMemUsed() != 0 {
+		t.Fatalf("expected sessionBudget released after TakeHeadersRaw, got %d", m.SessionMemUsed())
+	}
+	if st.HeadersRaw() != nil {
+		t.Fatal("expected s.hdrBuf cleared to nil after TakeHeadersRaw")
+	}
+
+	// 3. Single streaming WS message exceeding MaxWSMessageChunks (16384) must reset stream!
+	var resetSent atomic.Bool
+	m.AttachLaneDC(0, &captureDC{onSend: func(b []byte) {
+		if f, err := protocol.Decode(b); err == nil && f.Type == protocol.TypeReset {
+			resetSent.Store(true)
+		}
+	}})
+	st.SetWebSocket()
+	// Feed MaxWSMessageChunks + 1 tiny 1-byte chunks (reading concurrently so recvInFlightPayload stays low).
+	doneRead := make(chan struct{})
+	go func() {
+		defer close(doneRead)
+		for {
+			if _, rerr := st.ReadWSChunk(context.Background()); rerr != nil {
+				return
+			}
+		}
+	}()
+	wsChunkFrame, err := (&protocol.Frame{
+		StreamID: 1,
+		Type:     protocol.TypeWSBinary,
+		Flags:    protocol.FlagNone,
+		Payload:  []byte{0x01},
+	}).Encode()
+	if err != nil {
+		t.Fatalf("Encode wsChunkFrame: %v", err)
+	}
+	for i := 0; i <= protocol.MaxWSMessageChunks; i++ {
+		if st.Context().Err() != nil {
+			break
+		}
+		m.HandleLaneMessage(0, wsChunkFrame)
+	}
+	<-doneRead
+	if !resetSent.Load() {
+		t.Fatal("expected stream RESET when WS message exceeds MaxWSMessageChunks")
+	}
+}
+
+type captureDC struct {
+	onSend func([]byte)
+}
+
+func (c *captureDC) Send(b []byte) error {
+	if c.onSend != nil {
+		c.onSend(b)
+	}
+	return nil
+}
+func (c *captureDC) BufferedAmount() uint64 { return 0 }
+func (c *captureDC) Close() error           { return nil }

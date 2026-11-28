@@ -78,10 +78,12 @@ type IPRateLimiter struct {
 	agentGlobalConns  int
 	agentConns        map[string]int
 
-	msgBuckets  map[string]*tokenBucket
-	msgLRU      *list.List
-	upgrBuckets map[string]*tokenBucket
-	upgrLRU     *list.List
+	msgBuckets       map[string]*tokenBucket
+	msgLRU           *list.List
+	upgrBuckets      map[string]*tokenBucket
+	upgrLRU          *list.List
+	agentUpgrBuckets map[string]*tokenBucket
+	agentUpgrLRU     *list.List
 
 	authLockout *AuthLockoutTable
 	authStripes [authStripeCount]sync.Mutex
@@ -107,22 +109,32 @@ func NewIPRateLimiter(maxIPConns, maxMsgsPer10s int) *IPRateLimiter {
 		msgLRU:               list.New(),
 		upgrBuckets:          make(map[string]*tokenBucket),
 		upgrLRU:              list.New(),
+		agentUpgrBuckets:     make(map[string]*tokenBucket),
+		agentUpgrLRU:         list.New(),
 		authLockout: NewAuthLockoutTable(AuthLockoutConfig{
 			MaxFailures:     authLockoutThreshold,
 			LockoutDuration: authLockoutDuration,
 			MaxPendingKeys:  maxAuthFailedIPs,
 			MaxLockedKeys:   maxAuthFailedIPs,
 			// Machine secrets (>= 128 bits) are immune to online brute-force under per-IP
-			// lockout; disabling the global kill-switch prevents distributed DoS against all Agents.
-			GlobalMaxFailures: 0,
+			// lockout; disable global kill-switches so distributed floods cannot DoS all Agents.
+			GlobalMaxFailures:      0,
+			AllowEvictLockedOnFull: true,
 		}),
 	}
 }
 
 func (l *IPRateLimiter) Rejections() uint64 { return l.rejections.Load() }
 
+// AllowUpgrade rate-limits visitor client WebSocket upgrades per IP (isolated from Agent upgrades).
 func (l *IPRateLimiter) AllowUpgrade(ip string) bool {
 	return l.allowBucket(RateLimitKey(ip), l.upgrBuckets, l.upgrLRU, l.maxUpgrPer60s, l.maxUpgrPer60s/60.0)
+}
+
+// AllowAgentUpgrade rate-limits Agent WebSocket upgrades in a dedicated pool so unauthenticated
+// visitor floods (same NAT or distributed) can never starve legitimate Agents.
+func (l *IPRateLimiter) AllowAgentUpgrade(ip string) bool {
+	return l.allowBucket(RateLimitKey(ip), l.agentUpgrBuckets, l.agentUpgrLRU, l.maxUpgrPer60s, l.maxUpgrPer60s/60.0)
 }
 
 func (l *IPRateLimiter) AllowMessage(ip string) bool {

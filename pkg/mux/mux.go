@@ -27,11 +27,11 @@ const (
 )
 
 var (
-	ErrMuxClosed       = errors.New("mux: closed")
-	ErrStreamReset     = errors.New("mux: stream reset")
-	ErrStreamClosed    = errors.New("mux: stream closed")
-	ErrInvalidLane     = errors.New("mux: invalid data lane")
-	ErrSCTPWriteTimout = errors.New("mux: sctp backpressure write timeout")
+	ErrMuxClosed        = errors.New("mux: closed")
+	ErrStreamReset      = errors.New("mux: stream reset")
+	ErrStreamClosed     = errors.New("mux: stream closed")
+	ErrInvalidLane      = errors.New("mux: invalid data lane")
+	ErrSCTPWriteTimeout = errors.New("mux: sctp backpressure write timeout")
 )
 
 // DataChannel is the minimal SCTP DataChannel abstraction (satisfied by *webrtc.DataChannel).
@@ -57,6 +57,7 @@ type Config struct {
 	GlobalActiveStreams *atomic.Int64
 	StreamIdleTimeout   time.Duration
 	SCTPWriteTimeout    time.Duration
+	RequireAuth         bool // Defense-in-depth: reject data-lane frames before SetAuthenticated(true)
 	OnControlFrame      func(f *protocol.Frame)
 	OnGoAway            func(code protocol.ErrorCode)
 	OnProtocolError     func(err error)
@@ -196,7 +197,8 @@ func (m *Mux) Done() <-chan struct{}    { return m.closedCh }
 func (m *Mux) SessionMemUsed() int64    { return m.sessionBudget.Used() }
 func (m *Mux) ActiveStreamCount() int   { return int(m.activeStreams.Load()) }
 
-// SetMaxMessageSize updates the maximum wire frame payload size from negotiated SCTP MMS.
+// SetMaxMessageSize monotonically narrows the maximum wire frame payload size from negotiated
+// SCTP MMS or peer SETTINGS (never increases chunkSize above an already-narrowed limit).
 func (m *Mux) SetMaxMessageSize(mms int) {
 	if mms < protocol.MinNegotiatedMaxMsgSize {
 		mms = protocol.MinNegotiatedMaxMsgSize
@@ -208,7 +210,16 @@ func (m *Mux) SetMaxMessageSize(mms int) {
 	if cs < protocol.MinChunkSize {
 		cs = protocol.MinChunkSize
 	}
-	m.chunkSize.Store(int32(cs)) // #nosec G115 -- clamped to [MinChunkSize, DefaultChunkSize]
+	next := int32(cs) // #nosec G115 -- clamped to [MinChunkSize, DefaultChunkSize]
+	for {
+		cur := m.chunkSize.Load()
+		if next >= cur {
+			return
+		}
+		if m.chunkSize.CompareAndSwap(cur, next) {
+			return
+		}
+	}
 }
 
 func (m *Mux) ChunkSize() int {
@@ -407,6 +418,10 @@ func (m *Mux) HandleControlMessage(raw []byte) {
 // HandleLaneMessage dispatches an inbound frame on ordered data lane laneIdx.
 func (m *Mux) HandleLaneMessage(laneIdx int, raw []byte) {
 	if m.closed.Load() || laneIdx < 0 || laneIdx >= len(m.lanes) {
+		return
+	}
+	if m.cfg.RequireAuth && !m.authenticated.Load() {
+		m.reportProtocolError(errors.New("mux: data-lane frame before authentication"))
 		return
 	}
 	f, err := protocol.Decode(raw)

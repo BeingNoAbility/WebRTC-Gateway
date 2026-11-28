@@ -5,6 +5,7 @@ export interface RuntimePatchConfig {
   nodeId: string;
   portalOrigin: string;
   backendOrigin: string;
+  cookieSecureContext?: boolean;
   pinnedPk?: string;
   initCookies: CookieDelta[];
 }
