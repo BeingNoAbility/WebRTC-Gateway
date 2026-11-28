@@ -9,12 +9,11 @@
 
 const MAX_EXPANSION_RATIO = 1024;
 const RATIO_CHECK_MIN_OUTPUT = 16 * 1024 * 1024; // 16 MiB
-const MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024; // 512 MiB
 
 export interface BombGuardOptions {
   maxRatio?: number;
   minOutputForRatio?: number;
-  maxOutputBytes?: number;
+  maxOutputBytes?: number; // optional explicit cap (default Infinity: rely on expansion ratio so >512 MiB streaming downloads succeed)
 }
 
 export function pipeThroughBoundedDecompression(
@@ -32,7 +31,7 @@ export function pipeThroughBoundedDecompression(
 
   const maxRatio = opts.maxRatio ?? MAX_EXPANSION_RATIO;
   const minOut = opts.minOutputForRatio ?? RATIO_CHECK_MIN_OUTPUT;
-  const maxOut = opts.maxOutputBytes ?? MAX_DECOMPRESSED_BYTES;
+  const maxOut = opts.maxOutputBytes ?? Number.POSITIVE_INFINITY;
 
   let totalIn = 0;
   let totalOut = 0;

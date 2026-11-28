@@ -12,7 +12,7 @@
 
 import { FetchCtxFlag } from '../protocol/tlv';
 import { isBackendMeta, isClientCookieMutation, isRecord } from '../shared/ipc';
-import { syncCookieDeltasToClients } from './cookie_sync';
+import { broadcastClientCookieDeltas, syncCookieDeltasToClients } from './cookie_sync';
 import {
   GATEWAY_BOOT_SCRIPT_PATH,
   GATEWAY_ENTER_PATH,
@@ -216,13 +216,7 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
             queueForUpstream: true,
           });
           if (deltas.length > 0) {
-            const others = Array.from(session.clientIds).filter((id) => id !== clientId);
-            await syncCookieDeltasToClients(sw, '', others, deltas);
-            try {
-              session.port?.postMessage({ type: 'BRIDGE_CLIENT_COOKIE_DELTAS', deltas });
-            } catch {
-              // ignore
-            }
+            await broadcastClientCookieDeltas(sw, session, clientId, deltas);
           }
         }
         if (ackPort) {

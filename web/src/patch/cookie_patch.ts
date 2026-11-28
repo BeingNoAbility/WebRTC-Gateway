@@ -52,13 +52,15 @@ export function parseDocumentCookieAssignment(
 
   const name = first.slice(0, eq).trim();
   const value = first.slice(eq + 1).trim();
-  if (!name || /[\s\r\n\0;=]/.test(name)) return null;
+  // Match Go ProxyCookieJar.isValidCookieName (RFC 9110 tchar, <= 255 bytes).
+  if (!name || name.length > 255 || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) return null;
   // Align strictly with Go ProxyCookieJar.ApplyClientMutations: JS cannot forge __Host-/__Secure-
   // cookies because ClientCookieMutation does not carry a Secure flag on the wire.
   const lowerName = name.toLowerCase();
   if (lowerName.startsWith('__host-') || lowerName.startsWith('__secure-')) {
     return null;
   }
+  if (textEncoder.encode(value).byteLength > 4096) return null;
   for (let i = 0; i < value.length; i++) {
     const c = value.charCodeAt(i);
     if (c < 0x20 || c === 0x7f || c === 0x3b) return null;

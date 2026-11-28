@@ -8,10 +8,10 @@ WebRTC Gateway 基于标准 Web 规范（WebRTC DataChannel、Service Worker、F
 
 | 浏览器系列 | 内核引擎 | 支持等级 | 验证方式 | 备注说明 |
 | :--- | :--- | :---: | :--- | :--- |
-| **Google Chrome** | Chromium / Blink | **Tier 1** | CI 自动化 CDP E2E | Linux CI 持续运行基于内嵌 `web.DistFS` 的跨站 OOPIF 端到端测试（Chrome 87+ 支持 Transferable `ReadableStream`） |
-| **Microsoft Edge** | Chromium / Blink | **Tier 1** | 与 Chrome 共用 CDP 套件 | 本地可通过 `EDGE_BIN` 或 `BROWSER_BIN` 指定二进制运行 |
-| **Brave / Vivaldi / Opera** | Chromium / Blink | Tier 2 | 社区验证 | 部分隐私扩展若禁用 WebRTC 本地候选，可能需配合 TURN 中继 |
-| **Mozilla Firefox** | Gecko | Tier 2 | 社区验证 | 需 Firefox 113+（WebCrypto `Ed25519`、Transferable `ReadableStream`）；SW 对 `FetchEvent.request.body === undefined` 自动回退 `arrayBuffer()` 读取请求体 |
+| **Google Chrome** | Chromium / Blink | **Tier 1** | CI 自动化 CDP E2E | Linux CI 持续运行基于内嵌 `web.DistFS` 的跨站 OOPIF 端到端测试（需 Chrome 137+ 原生支持 WebCrypto `Ed25519`；Transferable `ReadableStream` 自 Chrome 87+ 支持） |
+| **Microsoft Edge** | Chromium / Blink | **Tier 1** | 与 Chrome 共用 CDP 套件 | 需 Edge 137+（WebCrypto `Ed25519`）；本地可通过 `EDGE_BIN` 或 `BROWSER_BIN` 指定二进制运行 |
+| **Brave / Vivaldi / Opera** | Chromium / Blink | Tier 2 | 社区验证 | 需基于 Chromium 137+；部分隐私扩展若禁用 WebRTC 本地候选，可能需配合 TURN 中继 |
+| **Mozilla Firefox** | Gecko | Tier 2 | 社区验证 | 需 Firefox 129+（WebCrypto `Ed25519`、Transferable `ReadableStream`）；SW 对 `FetchEvent.request.body === undefined` 自动回退 `arrayBuffer()` 读取请求体 |
 | **Apple Safari (macOS / iOS)** | WebKit | Tier 2 | 社区验证 | 需 Safari 17+（WebCrypto `Ed25519`、Transferable `ReadableStream`）；受 iOS 后台冻结与 `getRemoteCertificates()` 差异约束，见下文 |
 | **Android Chromium 浏览器** | Chromium / Blink | Tier 2 | 社区验证 | Chrome Android、Edge Mobile 等现代版本 |
 
@@ -27,7 +27,7 @@ WebRTC Gateway 基于标准 Web 规范（WebRTC DataChannel、Service Worker、F
 - **系统表现**：移动端浏览器切入后台或锁屏后可能终止空闲的 Service Worker 进程，或触发 WebRTC 连接降级。
 - **网关恢复流程**：
   1. 引导用 `/__p2p_gw__/bridge.html` 仅在挂载 `appFrame` 前短暂存在，端口移交完成即从 DOM 移除（零时间重叠）；
-  2. 沙箱内发起新请求时，若 Service Worker 发现 `bridgePort` 缺失或在 **1500 ms** 内未收到 Portal 的 `REQ_ACK` 响应（经 **3000 ms** `BRIDGE_PING` 探活确认端口失效），立即按标签页淘汰失效端口（保留 `cookieMirror` 与 `clientIds`）并向所属 `appFrame` 广播 `P2P_SW_EVICTED`；
+  2. 沙箱内发起新请求时，若 Service Worker 发现 `bridgePort` 缺失或在 **3000 ms** 内未收到 Portal 的 `REQ_ACK` 响应（经 **3000 ms** `BRIDGE_PING` 探活确认端口失效），立即按标签页淘汰失效端口（保留 `cookieMirror` 与 `clientIds`）并向所属 `appFrame` 广播 `P2P_SW_EVICTED`；
   3. 注入在 `appFrame` 内的 `patch.js` 收到 `P2P_SW_EVICTED` 后经 `window.parent.postMessage` 通知 Portal，由 Portal 重新短暂挂载 `bridge.html` 向 Service Worker 移交新的 `MessagePort`（不调用 `location.reload()` 或依赖 `sessionStorage` 刷新守卫，从结构上避免 Safari ITP / Firefox ETP 刷新死循环）；
   4. 若 WebRTC 传输断开，Portal 通过统一静默重连新建 `RTCPeerConnection` 并复用当前 Tab 内存派生的 SPAKE2+ 验证器 `(w0, w1)` 静默完成重认证，期间保持 `appFrame` 挂载不销毁且不重弹密码框。
 

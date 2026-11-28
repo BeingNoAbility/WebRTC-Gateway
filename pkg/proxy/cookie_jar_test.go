@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -93,10 +94,10 @@ func TestCookieJarSplitPoolInjectionAndEvictionBlocked(t *testing.T) {
 		t.Fatalf("expected 2 non-HttpOnly deltas, got %+v", deltas)
 	}
 
-	// 2. Semicolon / space / CTL value injection via ApplyClientMutations must be rejected.
+	// 2. Semicolon / CTL value injection via ApplyClientMutations must be rejected.
 	jar.ApplyClientMutations(httpsURL, []ClientCookieMutation{
 		{Op: "set", Name: "evil", Value: "1; sid=attacker; __Host-x=1", Path: "/app/page"},
-		{Op: "set", Name: "evil_sp", Value: "bad value", Path: "/"},
+		{Op: "set", Name: "evil_del", Value: "bad\x7fvalue", Path: "/"},
 		{Op: "set", Name: "evil_ctl", Value: "bad\r\nval", Path: "/"},
 		{Op: "set", Name: "evil_path", Value: "ok", Path: "/;sid=hack"},
 	})
@@ -291,5 +292,82 @@ func TestRegression_P2_OversizedClientMutationPreservesExistingCookie(t *testing
 	hdr := jar.BuildCookieHeaderWithContext(u, CookieRequestContext{Method: "GET", SameOriginClient: true})
 	if !strings.Contains(hdr, "session_state=valid") {
 		t.Fatalf("P2-1 regression: rejected oversized mutation wiped existing valid cookie: %q", hdr)
+	}
+}
+
+func TestRegression_P0_1_CookieJarExportConcurrentRaceFree(t *testing.T) {
+	u, _ := url.Parse("https://app.example/dashboard")
+	jar := NewProxyCookieJar()
+	jar.SaveResponseCookies(u, []string{
+		"a=1; Path=/",
+		"b=2; Path=/",
+		"c=3; Path=/",
+	})
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = jar.ExportNonHttpOnlySnapshot(u)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = jar.BuildCookieHeaderWithContext(u, CookieRequestContext{SameOriginClient: true, Method: "GET"})
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				jar.ApplyClientMutations(u, []ClientCookieMutation{
+					{Op: "set", Name: "prefs", Value: "en,zh", Path: "/"},
+				})
+			}
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
+func TestRegression_P1_4_BrowserAlignedCookieValuesAndAttributePreservation(t *testing.T) {
+	u, _ := url.Parse("https://app.example/")
+	jar := NewProxyCookieJar()
+
+	// 1. Server sets a non-HttpOnly Secure; SameSite=None cookie (e.g. XSRF-TOKEN).
+	jar.SaveResponseCookies(u, []string{"xsrf=v1; Path=/; Secure; SameSite=None"})
+
+	// 2. JS updates xsrf and writes real-world comma/space/JSON cookies.
+	jar.ApplyClientMutations(u, []ClientCookieMutation{
+		{Op: "set", Name: "xsrf", Value: "v2", Path: "/"},
+		{Op: "set", Name: "prefs", Value: "en,zh", Path: "/"},
+		{Op: "set", Name: "ui", Value: `{"theme":"dark","tz":"UTC +8"}`, Path: "/"},
+	})
+
+	sameSiteHdr := jar.BuildCookieHeaderWithContext(u, CookieRequestContext{SameOriginClient: true, Method: "GET"})
+	if !strings.Contains(sameSiteHdr, "prefs=en,zh") || !strings.Contains(sameSiteHdr, `ui={"theme":"dark","tz":"UTC +8"}`) {
+		t.Fatalf("P1-4 regression: browser-valid comma/space/JSON cookies were dropped: %q", sameSiteHdr)
+	}
+	// Cross-site request MUST still carry xsrf=v2 (Secure; SameSite=None inherited, not downgraded to Lax!).
+	crossSiteHdr := jar.BuildCookieHeaderWithContext(u, CookieRequestContext{SameOriginClient: false, Method: "GET"})
+	if crossSiteHdr != "xsrf=v2" {
+		t.Fatalf("P1-4 regression: JS update downgraded Secure; SameSite=None cookie: crossSite=%q", crossSiteHdr)
 	}
 }

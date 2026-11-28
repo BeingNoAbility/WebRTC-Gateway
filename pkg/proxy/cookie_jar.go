@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/net/publicsuffix"
 )
@@ -56,12 +57,11 @@ type ClientCookieMutation struct {
 	Expires int64  `json:"expires,omitempty"` // unix ms (0 = session cookie)
 }
 
-// CookieRequestContext carries FetchCtx-derived SameSite/navigation context.
+// CookieRequestContext carries FetchCtx-derived SameSite context.
 // Zero value is Fail-Closed (`SameOriginClient == false` => treated as cross-site).
 type CookieRequestContext struct {
 	Method           string
 	SameOriginClient bool
-	IsTopLevelNav    bool
 }
 
 type storedCookie struct {
@@ -86,7 +86,7 @@ func (c *storedCookie) byteSize() int {
 }
 
 func (c *storedCookie) wireValue() string {
-	if c.quoted || strings.ContainsAny(c.value, " ,") {
+	if c.quoted {
 		return `"` + c.value + `"`
 	}
 	return c.value
@@ -185,9 +185,6 @@ func (j *ProxyCookieJar) evictOldestLocked(fromServer bool, needCount, needBytes
 		var victimTS time.Time
 		found := false
 		for _, tbl := range []map[cookieKey]*storedCookie{j.visible, j.httpOnly} {
-			if !fromServer && tbl == nil {
-				continue
-			}
 			for k, c := range tbl {
 				if c.fromServer != fromServer || k == protect {
 					continue
@@ -293,23 +290,16 @@ func isValidCookieName(s string) bool {
 	return true
 }
 
-func isValidCookieOctet(c byte) bool {
-	return c == 0x21 ||
-		(c >= 0x23 && c <= 0x2B) ||
-		(c >= 0x2D && c <= 0x3A) ||
-		(c >= 0x3C && c <= 0x5B) ||
-		(c >= 0x5D && c <= 0x7E)
-}
-
+// isValidClientCookieValue enforces browser-aligned document.cookie hygiene (matching TS
+// parseDocumentCookieAssignment and Go TLV header validation): allows printable ASCII, spaces,
+// commas, JSON punctuation, and valid UTF-8 while strictly rejecting CTLs (< 0x20, 0x7F) and ';'.
 func isValidClientCookieValue(v string) bool {
-	if len(v) > 4096 {
+	if len(v) > 4096 || !utf8.ValidString(v) {
 		return false
 	}
-	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
-		v = v[1 : len(v)-1]
-	}
 	for i := 0; i < len(v); i++ {
-		if !isValidCookieOctet(v[i]) {
+		c := v[i]
+		if c < 0x20 || c == 0x7f || c == ';' {
 			return false
 		}
 	}
@@ -617,18 +607,28 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 			}
 
 			// RFC 6265bis §5.7: non-secure origin cannot overwrite an existing Secure cookie.
-			if !isSecureOrigin {
-				blockedBySecure := false
-				for _, existing := range j.visible {
-					if existing.secure && existing.name == name && existing.path == cPath &&
-						cookieDomainMatches(reqHost, existing.domain, existing.hostOnly) {
-						blockedBySecure = true
-						break
+			// On a secure origin, inherit existing Secure / SameSite attributes when JS updates an
+			// existing visible cookie on (name, path) so e.g. Secure; SameSite=None XSRF tokens are
+			// never silently downgraded to Secure=false; SameSite=Lax.
+			inheritedSecure := false
+			inheritedSameSite := http.SameSiteLaxMode
+			for _, existing := range j.visible {
+				if existing.name == name && existing.path == cPath &&
+					cookieDomainMatches(reqHost, existing.domain, existing.hostOnly) {
+					if existing.secure {
+						if !isSecureOrigin {
+							inheritedSecure = true // marker to reject below
+							break
+						}
+						inheritedSecure = true
+					}
+					if existing.sameSite != http.SameSiteDefaultMode {
+						inheritedSameSite = existing.sameSite
 					}
 				}
-				if blockedBySecure {
-					continue
-				}
+			}
+			if !isSecureOrigin && inheritedSecure {
+				continue
 			}
 
 			val := m.Value
@@ -646,9 +646,9 @@ func (j *ProxyCookieJar) ApplyClientMutations(targetURL *url.URL, muts []ClientC
 				domain:       reqHost,
 				hostOnly:     true,
 				path:         cPath,
-				secure:       false,
+				secure:       inheritedSecure,
 				httpOnly:     false,
-				sameSite:     http.SameSiteLaxMode,
+				sameSite:     inheritedSameSite,
 				fromServer:   false,
 				expires:      expires,
 				hasExpiry:    hasExpiry,
@@ -679,8 +679,17 @@ func (j *ProxyCookieJar) ExportNonHttpOnlySnapshot(targetURL *url.URL) []CookieD
 	isSecure := isSecureCookieOrigin(targetURL)
 	now := time.Now()
 
+	type snapshotItem struct {
+		fromServer   bool
+		lastAccessed time.Time
+		name         string
+		wireVal      string
+		path         string
+		expiresMs    int64
+	}
+
 	j.mu.RLock()
-	matched := make([]*storedCookie, 0, len(j.visible))
+	matched := make([]snapshotItem, 0, len(j.visible))
 	for _, c := range j.visible {
 		if c.hasExpiry && !c.expires.After(now) {
 			continue
@@ -691,7 +700,18 @@ func (j *ProxyCookieJar) ExportNonHttpOnlySnapshot(targetURL *url.URL) []CookieD
 		if !cookieDomainMatches(reqHost, c.domain, c.hostOnly) {
 			continue
 		}
-		matched = append(matched, c)
+		var expMs int64
+		if c.hasExpiry {
+			expMs = c.expires.UnixMilli()
+		}
+		matched = append(matched, snapshotItem{
+			fromServer:   c.fromServer,
+			lastAccessed: c.lastAccessed,
+			name:         c.name,
+			wireVal:      c.wireValue(),
+			path:         c.path,
+			expiresMs:    expMs,
+		})
 	}
 	j.mu.RUnlock()
 
@@ -710,16 +730,12 @@ func (j *ProxyCookieJar) ExportNonHttpOnlySnapshot(targetURL *url.URL) []CookieD
 
 	out := make([]CookieDelta, 0, len(matched))
 	for _, c := range matched {
-		var expMs int64
-		if c.hasExpiry {
-			expMs = c.expires.UnixMilli()
-		}
 		out = append(out, CookieDelta{
 			Op:      "set",
 			Name:    c.name,
-			Value:   c.wireValue(),
+			Value:   c.wireVal,
 			Path:    c.path,
-			Expires: expMs,
+			Expires: c.expiresMs,
 		})
 	}
 	return out
@@ -740,7 +756,6 @@ func (j *ProxyCookieJar) BuildCookieHeaderWithContext(reqURL *url.URL, ctx Cooki
 	}
 	isSecure := isSecureCookieOrigin(reqURL)
 	isCrossSite := !ctx.SameOriginClient
-	isSafeMethod := isSafeHTTPMethod(ctx.Method)
 	now := time.Now()
 
 	matches := func(c *storedCookie) bool {
@@ -758,12 +773,8 @@ func (j *ProxyCookieJar) BuildCookieHeaderWithContext(reqURL *url.URL, ctx Cooki
 		}
 		if isCrossSite {
 			switch c.sameSite {
-			case http.SameSiteStrictMode:
+			case http.SameSiteStrictMode, http.SameSiteLaxMode, http.SameSiteDefaultMode:
 				return false
-			case http.SameSiteLaxMode, http.SameSiteDefaultMode:
-				if !(ctx.IsTopLevelNav && isSafeMethod) {
-					return false
-				}
 			case http.SameSiteNoneMode:
 				if !c.secure || !isSecure {
 					return false
@@ -861,15 +872,6 @@ func (j *ProxyCookieJar) BuildCookieHeaderWithContext(reqURL *url.URL, ctx Cooki
 		b.WriteString(c.wireValue())
 	}
 	return b.String()
-}
-
-func isSafeHTTPMethod(m string) bool {
-	switch strings.ToUpper(m) {
-	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
-		return true
-	default:
-		return false
-	}
 }
 
 func validateCookieDomain(reqHost, rawDomain string) (dom string, hostOnly bool, ok bool) {

@@ -572,7 +572,6 @@ func (p *DestinationPolicy) SanitizeRequestHeaders(
 
 	cookieURL := p.CookieURL(dest.URL)
 	sameOriginClient := (fetchCtx & protocol.FetchCtxSameOriginClient) != 0
-	isTopLevelNav := (fetchCtx & protocol.FetchCtxTopLevelNav) != 0
 	credentialsOmit := (fetchCtx & protocol.FetchCtxCredentialsOmit) != 0
 
 	out := make(http.Header)
@@ -628,7 +627,6 @@ func (p *DestinationPolicy) SanitizeRequestHeaders(
 		ctx := CookieRequestContext{
 			Method:           method,
 			SameOriginClient: sameOriginClient,
-			IsTopLevelNav:    isTopLevelNav,
 		}
 		if cookieVal := jar.BuildCookieHeaderWithContext(cookieURL, ctx); cookieVal != "" {
 			out.Set("Cookie", cookieVal)

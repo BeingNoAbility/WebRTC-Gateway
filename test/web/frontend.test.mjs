@@ -1238,7 +1238,7 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
     assert.ok(await reg.isLiveNestedAppClient(mockSwScope, 'nested-app'));
     assert.ok(await reg.isLiveNestedAppClient(mockSwScope, 'app-worker'));
 
-    // 6. P0-2 / P1-23 collectRequestHeaders: TOP_LEVEL_NAV set ONLY for destination==='document' (NEVER iframe),
+    // 6. P0-2 / P1-23 / P3-2 collectRequestHeaders: removed legacy TOP_LEVEL_NAV bit (0x02) is NEVER set,
     //    and credentials==='omit' sets CREDENTIALS_OMIT and suppresses mutations!
     const iframeNavReq = {
       mode: 'navigate',
@@ -1249,9 +1249,9 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
     };
     const iframeCtx = fetchMod.collectRequestHeaders(iframeNavReq, swOrigin, [], true);
     assert.equal(
-      (iframeCtx.fetchCtx & tlvMod.FetchCtxFlag.TOP_LEVEL_NAV) !== 0,
+      (iframeCtx.fetchCtx & 0x02) !== 0,
       false,
-      'iframe navigation must NEVER set TOP_LEVEL_NAV'
+      'removed bit 0x02 must NEVER be set'
     );
     const docNavReq = {
       mode: 'navigate',
@@ -1261,7 +1261,7 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
       headers: new Headers(),
     };
     const docCtx = fetchMod.collectRequestHeaders(docNavReq, swOrigin, [], true);
-    assert.equal((docCtx.fetchCtx & tlvMod.FetchCtxFlag.TOP_LEVEL_NAV) !== 0, true);
+    assert.equal((docCtx.fetchCtx & 0x02) !== 0, false, 'removed bit 0x02 must NEVER be set even on document');
 
     const omitReq = {
       mode: 'cors',
@@ -2075,5 +2075,298 @@ test('Audit Regressions (P1-2, P1-5, P2-2, P2-4, P2-5, P2-6, P2-9): Cross-Browse
   assert.ok(
     conflictErrors.some((e) => /TOFU key conflict/i.test(e)),
     `P2-9: subsequent bare #node visit with rogue key must fail with TOFU conflict, got: ${JSON.stringify(conflictErrors)}`
+  );
+});
+
+test('Chief-Architect Audit Regressions: WSStream credit deadlock (P0-4), close ordering (P2-2), SW eviction reload (P1-5), multi-tab -dir (P1-6), CSP default-src none (P2-1), Cookie broadcast (P1-4), Ed25519 NotSupportedError (P2-3), CAP_RESP.revoked (P3-1)', async () => {
+  const [cookiePatchMod, fetchPatchMod] = await Promise.all([
+    loadTsModule('web/src/patch/cookie_patch.ts'),
+    loadTsModule('web/src/patch/fetch_xhr_patch.ts'),
+  ]);
+
+  const makeFakeDC = (onSend) => ({
+    readyState: 'open',
+    bufferedAmount: 0,
+    bufferedAmountLowThreshold: 0,
+    onbufferedamountlow: null,
+    onmessage: null,
+    onopen: null,
+    onclose: null,
+    onerror: null,
+    send(data) {
+      onSend(data instanceof Uint8Array ? data : new Uint8Array(data));
+    },
+    close() {
+      this.readyState = 'closed';
+    },
+  });
+
+  // 1. P0-4: WSStream MUST flush deferred credit for in-progress asmChunks when onMessage() attaches.
+  {
+    const sentFrames = [];
+    const laneDC = makeFakeDC((raw) => sentFrames.push(frameMod.decodeFrame(raw)));
+    const mux = new muxMod.PoolMux(1);
+    mux.attachControlDC(makeFakeDC(() => {}));
+    mux.attachLaneDC(0, laneDC);
+
+    const wsReq = tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.WS, method: 'GET', target: '/ws', headers: [] });
+    const wsStream = await mux.openWSStream(wsReq);
+    const resp101 = tlvMod.encodeResponseHeaders({ status: 101, headers: [] });
+    laneDC.onmessage({ data: frameMod.encodeFrame(wsStream.streamId, frameMod.FrameType.HEADERS, 0, resp101) });
+    await wsStream.waitResponseHeaders();
+
+    // Msg 1 arrives while msgCb === null, then 512 KiB partial Msg 2 arrives before onMessage() is attached.
+    laneDC.onmessage({
+      data: frameMod.encodeFrame(
+        wsStream.streamId,
+        frameMod.FrameType.WS_TEXT,
+        frameMod.FrameFlag.MSG_FIN,
+        new TextEncoder().encode('msg1')
+      ),
+    });
+    const chunk16k = new Uint8Array(16384).fill(0x41);
+    for (let i = 0; i < 32; i++) {
+      laneDC.onmessage({
+        data: frameMod.encodeFrame(wsStream.streamId, frameMod.FrameType.WS_BINARY, 0, chunk16k),
+      });
+    }
+    sentFrames.length = 0;
+    const delivered = [];
+    wsStream.onMessage((ev) => delivered.push(ev));
+    const credited = sentFrames
+      .filter((f) => f.type === frameMod.FrameType.CREDIT)
+      .reduce((acc, f) => acc + frameMod.decodeCreditPayload(f.payload), 0);
+    assert.equal(delivered.length, 1);
+    // 4 bytes from msg1 (below threshold earlier) + 512 KiB deferred from partial msg2 = 524292 exact!
+    assert.equal(credited, 512 * 1024 + 4, 'P0-4: onMessage() must flush exact deferred asmChunks credit immediately');
+    mux.close();
+  }
+
+  // 2. P2-2: WSStream.close() MUST serialize after in-flight multi-chunk sendMessage().
+  {
+    const sentFrames = [];
+    const laneDC = makeFakeDC((raw) => sentFrames.push(frameMod.decodeFrame(raw)));
+    const mux = new muxMod.PoolMux(1);
+    mux.attachControlDC(makeFakeDC(() => {}));
+    mux.attachLaneDC(0, laneDC);
+
+    const wsReq = tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.WS, method: 'GET', target: '/ws', headers: [] });
+    const wsStream = await mux.openWSStream(wsReq);
+    sentFrames.length = 0;
+
+    laneDC.bufferedAmount = 1024 * 1024;
+    const sendPromise = wsStream.sendMessage(new Uint8Array(64 * 1024).fill(0x55));
+    wsStream.close(1000, 'bye');
+    laneDC.bufferedAmount = 0;
+    if (laneDC.onbufferedamountlow) laneDC.onbufferedamountlow();
+    await sendPromise;
+    await new Promise((r) => setTimeout(r, 0));
+
+    const types = sentFrames.map((f) => f.type);
+    const binIdx = types.indexOf(frameMod.FrameType.WS_BINARY);
+    const closeIdx = types.indexOf(frameMod.FrameType.WS_CLOSE);
+    assert.ok(binIdx >= 0, 'P2-2: in-flight WS_BINARY chunks must be transmitted before WS_CLOSE');
+    assert.ok(closeIdx > binIdx, `P2-2: WS_CLOSE must follow WS_BINARY (got ${JSON.stringify(types)})`);
+    mux.close();
+  }
+
+  // 3. P2-1: rewriteUpstreamCsp("default-src 'none'") MUST NOT relax default-src to 'self'.
+  {
+    const res = fetchMod.rewriteUpstreamCsp("default-src 'none'", {
+      swOrigin: 'https://sbx-1.sandbox.example',
+    });
+    assert.equal(
+      res.policy,
+      "default-src 'none'; script-src-elem 'self'",
+      'P2-1: default-src none must stay none while synthesizing minimal script-src-elem self'
+    );
+  }
+
+  // 4. P1-6: Multi-tab same-node static `-dir` mode succeeds; mixed nodes or non-static fail closed.
+  {
+    const reg = new sessionRegMod.SessionRegistry(new Set(['https://portal.example']));
+    const mkPort = () => ({ postMessage() {}, close() {}, onmessage: null });
+    reg.attachPort('tab-1', 'https://portal.example', { nodeId: 'docs', backendOrigin: 'http://static.invalid', isStaticMode: true }, mkPort());
+    reg.attachPort('tab-2', 'https://portal.example', { nodeId: 'docs', backendOrigin: 'http://static.invalid', isStaticMode: true }, mkPort());
+    const authSameNode = fetchMod.authorizeFetchRequest(reg, {
+      clientId: '',
+      resultingClientId: 'r-1',
+      replacesClientId: '',
+      mode: 'navigate',
+      destination: 'iframe',
+      method: 'GET',
+      referrer: '',
+      secFetchSite: 'same-origin',
+      swOrigin: 'https://sbx.example',
+    });
+    assert.equal(authSameNode.allowed, true, 'P1-6: multi-tab same static node must allow opaque-origin navigation');
+
+    // Adding a DIFFERENT static node must fail closed!
+    reg.attachPort('tab-3', 'https://portal.example', { nodeId: 'other-docs', backendOrigin: 'http://static.invalid', isStaticMode: true }, mkPort());
+    const authMixedNode = fetchMod.authorizeFetchRequest(reg, {
+      clientId: '',
+      resultingClientId: 'r-2',
+      replacesClientId: '',
+      mode: 'navigate',
+      destination: 'iframe',
+      method: 'GET',
+      referrer: '',
+      secFetchSite: 'same-origin',
+      swOrigin: 'https://sbx.example',
+    });
+    assert.equal(authMixedNode.allowed, false, 'P1-6: mixed static nodes sharing origin must still fail closed');
+  }
+
+  // 5. P1-5: SW-evicted iframe reload with clientId === '' recovers via 503 SW_EVICTED (while cross-site stays 403).
+  {
+    const reg = new sessionRegMod.SessionRegistry(new Set(['https://portal.example']));
+    const makeNavReq = (secFetchSite = 'same-origin') => {
+      const req = new Request('https://sbx-1.sandbox.example/dashboard', {
+        method: 'GET',
+        headers: secFetchSite ? { 'sec-fetch-site': secFetchSite } : {},
+      });
+      Object.defineProperty(req, 'mode', { value: 'navigate' });
+      Object.defineProperty(req, 'destination', { value: 'iframe' });
+      return req;
+    };
+    const posted = [];
+    const nestedClient = {
+      id: 'old-iframe-client-1',
+      type: 'window',
+      frameType: 'nested',
+      url: 'https://sbx-1.sandbox.example/dashboard',
+      postMessage(m) { posted.push(m); },
+    };
+    const fakeSw = {
+      location: { origin: 'https://sbx-1.sandbox.example' },
+      clients: {
+        async get(id) { return id === nestedClient.id ? nestedClient : undefined; },
+        async matchAll() { return [nestedClient]; },
+      },
+    };
+    const respReplaces = await fetchMod.handleFetchEvent(fakeSw, reg, {
+      request: makeNavReq('same-origin'),
+      clientId: '',
+      resultingClientId: 'new-client-2',
+      replacesClientId: 'old-iframe-client-1',
+      waitUntil() {},
+    });
+    assert.equal(respReplaces.status, 503, 'P1-5: SW-evicted iframe reload must return 503 recovery instead of 403');
+    assert.equal(respReplaces.headers.get('x-p2p-sw-evicted'), '1');
+
+    // Cross-site embedder with empty replacesClientId must STILL get 403!
+    const respCrossSite = await fetchMod.handleFetchEvent(fakeSw, reg, {
+      request: makeNavReq('cross-site'),
+      clientId: '',
+      resultingClientId: 'evil-client-3',
+      replacesClientId: '',
+      waitUntil() {},
+    });
+    assert.equal(respCrossSite.status, 403, 'P1-5: cross-site iframe must stay 403');
+  }
+
+  // 6. P1-4: Cookie patch name/value parity + unified Portal/sibling broadcast helper.
+  {
+    assert.equal(cookiePatchMod.parseDocumentCookieAssignment('bad name=1')?.name ?? null, null);
+    assert.equal(cookiePatchMod.parseDocumentCookieAssignment('prefs=en,zh; Path=/')?.value, 'en,zh');
+    assert.equal(cookiePatchMod.parseDocumentCookieAssignment('ok=' + 'a'.repeat(4097)), null);
+
+    const portalMsgs = [];
+    const siblingMsgs = [];
+    const fakeSw = {
+      clients: {
+        async get(id) {
+          if (id === 'sib-1') {
+            return { id, url: 'https://sbx.example/sub', postMessage(m) { siblingMsgs.push(m); } };
+          }
+          return undefined;
+        },
+      },
+    };
+    await cookieSyncMod.broadcastClientCookieDeltas(
+      fakeSw,
+      {
+        clientIds: new Set(['origin-1', 'sib-1']),
+        port: { postMessage(m) { portalMsgs.push(m); } },
+      },
+      'origin-1',
+      [{ op: 'set', name: 'xsrf', value: 'tok1', path: '/' }]
+    );
+    assert.equal(portalMsgs.length, 1);
+    assert.equal(portalMsgs[0].type, 'BRIDGE_CLIENT_COOKIE_DELTAS');
+    assert.equal(siblingMsgs.length, 1);
+    assert.equal(siblingMsgs[0].type, 'P2P_COOKIE_MIRROR_UPDATE');
+  }
+
+  // 7. P2-3: WebCrypto Ed25519 NotSupportedError throws UnsupportedCryptoError (not silent false).
+  {
+    const origImport = crypto.subtle.importKey;
+    try {
+      crypto.subtle.importKey = async () => {
+        const err = new Error('Algorithm: Unrecognized name');
+        err.name = 'NotSupportedError';
+        throw err;
+      };
+      await assert.rejects(
+        () => cryptoMod.verifyEd25519(new Uint8Array(32), new Uint8Array([1]), new Uint8Array(64)),
+        (err) => err instanceof cryptoMod.UnsupportedCryptoError && /Chrome 137\+/i.test(err.message)
+      );
+    } finally {
+      crypto.subtle.importKey = origImport;
+    }
+  }
+
+  // 8. P3-1: AuthClient CAP_RESP preserves boolean `revoked` field.
+  {
+    let sentReqId = '';
+    const te = new TextEncoder();
+    const mockMux = {
+      sendControlFrame(_type, payload) {
+        sentReqId = JSON.parse(new TextDecoder().decode(payload)).req_id;
+      },
+      setMaxMessageSize() {},
+    };
+    const ac = new authClientMod.AuthClient('n1', 'https://portal.example', false, '', '', {
+      onStatus() {},
+      onLog() {},
+      onAuthRequired() {},
+      onAuthFailed() {},
+      onFatalSecurityError(m) { throw new Error(m); },
+      onAuthenticated() {},
+    });
+    const gen = ac.beginChannel({
+      mux: mockMux,
+      offerDesc: { fp: 'a'.repeat(64), ice_ufrag: 'u1', ice_pwd: 'p'.repeat(24), setup: 'actpass', mid: '0', sctp_port: 5000, max_msg_size: 262144, sdp_ver: 2 },
+      answerDesc: { fp: 'b'.repeat(64), ice_ufrag: 'u2', ice_pwd: 'q'.repeat(24), setup: 'active', mid: '0', sctp_port: 5000, max_msg_size: 262144, sdp_ver: 2 },
+      visitorNonce: 'vn',
+      agentPkB64: cryptoMod.base64UrlEncode(new Uint8Array(32).fill(1)),
+      verifiedPkHash: 'HASH_12345678901234567',
+      verifiedKeyStatus: 'tofu_match',
+    });
+    await ac.handleControlFrame(gen, {
+      type: frameMod.FrameType.AUTH_CHALLENGE,
+      flags: 0,
+      payload: te.encode(JSON.stringify({ agent_nonce: 'an', auth_methods: ['public'] })),
+    });
+    await ac.handleControlFrame(gen, {
+      type: frameMod.FrameType.AUTH_RESULT,
+      flags: 0,
+      payload: te.encode(JSON.stringify({ ok: true, role: 'public', meta: { nodeId: 'n1', backendOrigin: 'http://app.local', isStaticMode: false } })),
+    });
+    const capPromise = ac.requestCapabilityOp({ action: 'revoke', jti: 'jti-123' });
+    await ac.handleControlFrame(gen, {
+      type: frameMod.FrameType.CAP_RESP,
+      flags: 0,
+      payload: te.encode(JSON.stringify({ req_id: sentReqId, ok: true, jti: 'jti-123', revoked: false })),
+    });
+    const capRes = await capPromise;
+    assert.equal(capRes.ok, true);
+    assert.equal(capRes.revoked, false, 'P3-1: CAP_RESP must preserve boolean revoked field');
+  }
+
+  // 9. P2-4: isSameCanonicalRequestUrl confirms Request passthrough helper stays sound.
+  assert.equal(
+    fetchPatchMod.isSameCanonicalRequestUrl('/api/x', 'https://sbx.example/api/x', 'https://sbx.example/app/'),
+    true
   );
 });

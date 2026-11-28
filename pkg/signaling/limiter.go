@@ -20,6 +20,7 @@ const (
 	DefaultMaxGlobalClientConn = 4096
 	DefaultMaxGlobalAgentConn  = 1024
 	maxTrackedIPs              = 16384
+	maxEvictProbe              = 32
 	maxAuthFailedIPs           = 8192
 	authLockoutThreshold       = 10
 	authLockoutDuration        = 5 * time.Minute
@@ -155,24 +156,35 @@ func (l *IPRateLimiter) allowBucket(
 	b, ok := m[key]
 	if !ok {
 		for len(m) >= maxTrackedIPs {
-			back := lru.Back()
-			if back == nil {
-				break
+			// Walk up to maxEvictProbe oldest entries from the LRU tail and evict the first
+			// bucket that is NOT actively rate-limited (refilled >= 1.0).
+			// - Prevents 1-probe-per-key IPv6 sprays (119/120 tokens remaining) from locking out
+			//   all unseen legitimate visitors globally.
+			// - Preserves Fail-Closed protection against evicting genuinely exhausted attackers
+			//   (refilled < 1.0) during true multi-IP burst saturation.
+			var evictElem *list.Element
+			var evictVictim *tokenBucket
+			probes := 0
+			for elem := lru.Back(); elem != nil && probes < maxEvictProbe; elem = elem.Prev() {
+				probes++
+				victim := elem.Value.(*tokenBucket)
+				elapsed := now.Sub(victim.lastRefill).Seconds()
+				refilled := victim.tokens
+				if elapsed > 0 {
+					refilled += elapsed * ratePerSec
+				}
+				if refilled >= 1.0 {
+					evictElem = elem
+					evictVictim = victim
+					break
+				}
 			}
-			victim := back.Value.(*tokenBucket)
-			elapsed := now.Sub(victim.lastRefill).Seconds()
-			refilled := victim.tokens
-			if elapsed > 0 {
-				refilled += elapsed * ratePerSec
-			}
-			// Fail-Closed on saturation: never evict an actively rate-limited bucket to hand
-			// fresh full bursts to a distributed IP flood. Only evict fully-refilled idle keys.
-			if refilled < burst {
+			if evictElem == nil {
 				l.rejections.Add(1)
 				return false
 			}
-			lru.Remove(back)
-			delete(m, victim.key)
+			lru.Remove(evictElem)
+			delete(m, evictVictim.key)
 		}
 		b = &tokenBucket{key: key, tokens: burst, lastRefill: now}
 		b.elem = lru.PushFront(b)

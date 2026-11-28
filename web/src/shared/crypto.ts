@@ -101,6 +101,13 @@ export async function hmacSha256Bytes(keyBytes: Uint8Array, msgBytes: Uint8Array
   return new Uint8Array(sig);
 }
 
+export class UnsupportedCryptoError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnsupportedCryptoError';
+  }
+}
+
 export async function verifyEd25519(
   rawPubKey32: Uint8Array,
   message: Uint8Array,
@@ -123,7 +130,14 @@ export async function verifyEd25519(
       rawSig64 as BufferSource,
       message as BufferSource
     );
-  } catch {
+  } catch (err) {
+    // Distinguish unsupported browser WebCrypto Ed25519 from an invalid cryptographic signature
+    // so legacy browsers get a clear upgrade notice instead of a false MITM red-screen warning.
+    if (err instanceof Error && err.name === 'NotSupportedError') {
+      throw new UnsupportedCryptoError(
+        'Browser does not support WebCrypto Ed25519 (requires Chrome 137+, Firefox 129+, or Safari 17+)'
+      );
+    }
     return false;
   }
 }

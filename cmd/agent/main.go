@@ -83,7 +83,7 @@ func main() {
 	fileInlineActive := fs.Bool("file-inline-active", false, "Allow inline script execution on static files (disables CSP: sandbox)")
 	followSymlinks := fs.Bool("follow-symlinks", false, "Allow following in-root symlinks in -dir/-file mode (default false: Fail-Closed O_NOFOLLOW)")
 	upstreamHost := fs.String("upstream-host", "", "Optional Host header override (RFC 9110 host[:port]) for virtual-host -target backends")
-	proxyURLRaw := fs.String("proxy", "", "Optional outbound HTTP/SOCKS proxy URL for -target")
+	proxyURLRaw := fs.String("proxy", "", "Optional outbound HTTP/SOCKS proxy URL for -target (use standard HTTPS_PROXY/HTTP_PROXY env vars for signaling egress)")
 	sni := fs.String("sni", "", "Optional TLS SNI override for HTTPS -target")
 	insecureTarget := fs.Bool("insecure-target", false, "Skip TLS verification for self-signed HTTPS -target ONLY")
 	iceMDNS := fs.Bool("ice-mdns", true, "Obfuscate local LAN/Docker/VPN host ICE candidates via mDNS (default true)")

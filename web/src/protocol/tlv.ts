@@ -18,17 +18,17 @@ export const MAX_REQUEST_COOKIE_MUTATIONS = 32;
 export const MAX_RESPONSE_COOKIE_DELTAS = 64;
 export const MAX_COOKIE_NAME_LEN = 255;
 
+// Bit 1 (0x02, legacy TOP_LEVEL_NAV) is removed and reserved because top-level sandbox
+// document navigation is unconditionally blocked at the Service Worker gate.
 export const FetchCtxFlag = {
   NONE: 0x00,
   SAME_ORIGIN_CLIENT: 1 << 0,
-  TOP_LEVEL_NAV: 1 << 1,
   CLIENT_DECOMPRESS_GZIP: 1 << 2,
   CREDENTIALS_OMIT: 1 << 3,
 } as const;
 
 export const FETCH_CTX_VALID_MASK =
   FetchCtxFlag.SAME_ORIGIN_CLIENT |
-  FetchCtxFlag.TOP_LEVEL_NAV |
   FetchCtxFlag.CLIENT_DECOMPRESS_GZIP |
   FetchCtxFlag.CREDENTIALS_OMIT;
 

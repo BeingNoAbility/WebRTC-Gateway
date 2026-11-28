@@ -124,18 +124,21 @@ const pill = new SmartPill(hudHostEl, {
     resetNodeSandboxSalt(activeNodeId);
     activeSandboxOrigin = '';
     liveCookieSnapshot.clear();
-    // Clear initialCookies on cached AuthSuccessInfo so remount does not re-inject stale cookies!
-    activeAuthInfo = {
-      ...activeAuthInfo,
-      meta: { ...activeAuthInfo.meta, initialCookies: [] },
-    };
+    if (appFrame) {
+      appFrame.remove();
+      appFrame = null;
+    }
     if (activeBridge) {
       activeBridge.detachWindowListener();
       activeBridge.destroy();
       activeBridge = null;
     }
-    pill.appendLog(`[Portal] Rotated 128-bit sandbox salt for node=${activeNodeId}; remounting`);
-    void mountSandboxAndApp(activeAuthInfo, false, true);
+    pill.appendLog(`[Portal] Rotated 128-bit sandbox salt for node=${activeNodeId}; reconnecting with fresh CookieJar`);
+    if (transport) {
+      void transport.resetCookieSessionAndReconnect();
+    } else {
+      void mountSandboxAndApp(activeAuthInfo, false, true);
+    }
   },
 });
 

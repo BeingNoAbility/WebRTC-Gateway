@@ -352,6 +352,16 @@ export class PeerSession {
     return this.authClient.requestCapabilityOp(payload);
   }
 
+  /**
+   * Clears the server-issued CookieResumeToken and silently reconnects so the Agent allocates
+   * a fresh empty ProxyCookieJar (wiping HttpOnly and visible cookies alongside sandbox reset).
+   */
+  async resetCookieSessionAndReconnect(): Promise<void> {
+    if (this.destroyed) return;
+    this.authClient.clearCookieResumeToken();
+    await this.connect();
+  }
+
   destroy(): void {
     this.destroyed = true;
     this.generation++;

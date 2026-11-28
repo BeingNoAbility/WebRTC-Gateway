@@ -36,8 +36,8 @@ type Stream struct {
 	cancel context.CancelFunc
 
 	longLived  atomic.Bool
-	isWS       atomic.Bool
-	lastActive atomic.Int64 // monotonic offset in nanos from createdAt
+	kind       atomic.Uint32 // immutable once frozen (protocol.StreamKindHTTP or protocol.StreamKindWS)
+	lastActive atomic.Int64  // monotonic offset in nanos from createdAt
 	createdAt  time.Time
 
 	// Header assembly state (protected by hdrMu).
@@ -58,6 +58,7 @@ type Stream struct {
 	inPartial           []byte // leftover bytes from partially-read HTTP DATA chunk
 	inNotify            chan struct{}
 	recvInFlightPayload int64
+	recvInFlightMem     int64
 	consumedBytes       int64
 	consumedChunks      int
 	remoteFin           bool
@@ -70,6 +71,7 @@ type Stream struct {
 
 	writeMu     sync.Mutex
 	localFin    atomic.Bool
+	writeFailed atomic.Bool
 	writeClosed bool
 	resetSent   bool
 
@@ -104,12 +106,32 @@ func (s *Stream) touch() {
 	s.lastActive.Store(int64(time.Since(s.createdAt)))
 }
 
-func (s *Stream) isIdleBefore(cutoff time.Time) bool {
+func (s *Stream) isWSMode() bool {
+	return s.kind.Load() == uint32(protocol.StreamKindWS)
+}
+
+func (s *Stream) isHTTPMode() bool {
+	return s.kind.Load() == uint32(protocol.StreamKindHTTP)
+}
+
+func (s *Stream) isHeadersComplete() bool {
+	s.hdrMu.Lock()
+	ready := s.hdrComplete
+	s.hdrMu.Unlock()
+	return ready
+}
+
+func (s *Stream) isStale(now time.Time, hdrTimeout, idleTimeout time.Duration) bool {
+	// Unfinished server-inbound HEADERS are bounded by an un-refreshable hard deadline
+	// so partial HEADERS frames can never pin stream slots via keepalive frames.
+	if !s.isClient && !s.isHeadersComplete() {
+		return now.Sub(s.createdAt) >= hdrTimeout
+	}
 	if s.longLived.Load() {
 		return false
 	}
 	last := s.createdAt.Add(time.Duration(s.lastActive.Load()))
-	return last.Before(cutoff)
+	return last.Before(now.Add(-idleTimeout))
 }
 
 func (s *Stream) signalInbound() {
@@ -125,8 +147,6 @@ func (s *Stream) signalWindow() {
 	default:
 	}
 }
-
-func (s *Stream) SetWebSocket() { s.isWS.Store(true) }
 
 func (s *Stream) HeadersRaw() []byte {
 	s.hdrMu.Lock()
@@ -205,6 +225,14 @@ func (s *Stream) onInboundHeaders(flags uint8, payload []byte) {
 		s.hdrMu.Unlock()
 		return
 	}
+	if !s.isClient {
+		if len(s.hdrBuf) == 0 || (s.hdrBuf[0] != protocol.StreamKindHTTP && s.hdrBuf[0] != protocol.StreamKindWS) {
+			s.hdrMu.Unlock()
+			s.Reset(protocol.ErrCodeProtocolError)
+			return
+		}
+		s.kind.Store(uint32(s.hdrBuf[0]))
+	}
 	s.hdrComplete = true
 	fin := (flags & protocol.FlagFin) != 0
 	s.hasReqBody = !fin
@@ -233,8 +261,10 @@ func (s *Stream) enqueueInbound(op uint8, fin bool, payload []byte, isHTTPFin bo
 		s.inMu.Unlock()
 		return
 	}
-	// Pure payload-byte flow control bound (generous 2 MiB hard safety cap).
-	if s.recvInFlightPayload+plen > MaxStreamInboundBytes {
+	// Per-stream bounded memory (payload + 64B chunk metadata) AND chunk count cap so
+	// zero-byte WS frames or 1-byte DATA frames on a single stream can never exhaust the
+	// 32 MiB session budget or 256 MiB global budget.
+	if s.recvInFlightMem+memCost > MaxStreamInboundBytes || len(s.inQueue) >= MaxStreamInboundChunks {
 		s.inMu.Unlock()
 		s.Reset(protocol.ErrCodeFlowControlError)
 		return
@@ -265,6 +295,7 @@ func (s *Stream) enqueueInbound(op uint8, fin bool, payload []byte, isHTTPFin bo
 			memCost: memCost,
 		})
 		s.recvInFlightPayload += plen
+		s.recvInFlightMem += memCost
 	} else {
 		// Pure 0-byte HTTP FIN marker: release budget immediately.
 		s.mux.sessionBudget.Release(memCost)
@@ -283,10 +314,7 @@ func (s *Stream) enqueueInbound(op uint8, fin bool, payload []byte, isHTTPFin bo
 }
 
 func (s *Stream) onInboundData(payload []byte, fin bool) {
-	s.hdrMu.Lock()
-	ready := s.hdrComplete
-	s.hdrMu.Unlock()
-	if !ready {
+	if !s.isHeadersComplete() || !s.isHTTPMode() {
 		s.Reset(protocol.ErrCodeProtocolError)
 		return
 	}
@@ -294,9 +322,8 @@ func (s *Stream) onInboundData(payload []byte, fin bool) {
 }
 
 func (s *Stream) onInboundWSChunk(op uint8, fin bool, payload []byte) {
-	s.isWS.Store(true)
 	s.hdrMu.Lock()
-	if !s.hdrComplete {
+	if !s.hdrComplete || !s.isWSMode() {
 		s.hdrMu.Unlock()
 		s.Reset(protocol.ErrCodeProtocolError)
 		return
@@ -325,9 +352,8 @@ func (s *Stream) onInboundWSChunk(op uint8, fin bool, payload []byte) {
 }
 
 func (s *Stream) onInboundWSClose(payload []byte) {
-	s.isWS.Store(true)
 	s.hdrMu.Lock()
-	ready := s.hdrComplete
+	ready := s.hdrComplete && s.isWSMode()
 	s.inWSActiveOp = 0
 	s.inWSChunks = 0
 	s.hdrMu.Unlock()
@@ -339,6 +365,12 @@ func (s *Stream) onInboundWSClose(payload []byte) {
 }
 
 func (s *Stream) onInboundCredit(delta uint32) {
+	// Server-accepted streams MUST finish HEADERS before accepting CREDIT; otherwise
+	// incomplete HEADERS frames could be kept alive indefinitely via CREDIT(1).
+	if !s.isClient && !s.isHeadersComplete() {
+		s.Reset(protocol.ErrCodeProtocolError)
+		return
+	}
 	s.touch()
 	s.winMu.Lock()
 	if s.sendWindow+int64(delta) > 0x7FFFFFFF {
@@ -415,6 +447,7 @@ func (s *Stream) Read(p []byte) (int, error) {
 			}
 			plen := int64(len(ch.payload))
 			s.recvInFlightPayload -= plen
+			s.recvInFlightMem -= ch.memCost
 			s.releaseBudget(ch.memCost)
 			s.consumedBytes += plen
 			s.consumedChunks++
@@ -471,6 +504,7 @@ func (s *Stream) ReadWSChunk(ctx context.Context) (WSChunk, error) {
 			}
 			plen := int64(len(ch.payload))
 			s.recvInFlightPayload -= plen
+			s.recvInFlightMem -= ch.memCost
 			s.releaseBudget(ch.memCost)
 			var creditDelta uint32
 			if ch.op == protocol.TypeWSText || ch.op == protocol.TypeWSBinary {
@@ -593,6 +627,7 @@ func (s *Stream) WriteHeaders(raw []byte, fin bool) error {
 	cs := s.mux.ChunkSize()
 	for off := 0; off < len(raw); off += cs {
 		if err := s.waitSCTPBackpressure(s.ctx); err != nil {
+			s.writeFailed.Store(true)
 			return err
 		}
 		end := off + cs
@@ -605,6 +640,7 @@ func (s *Stream) WriteHeaders(raw []byte, fin bool) error {
 			}
 		}
 		if err := s.lane.sendFrame(s.streamID, protocol.TypeHeaders, flags, raw[off:end]); err != nil {
+			s.writeFailed.Store(true)
 			return err
 		}
 	}
@@ -630,6 +666,7 @@ func (s *Stream) Write(p []byte) (int, error) {
 	written := 0
 	for written < len(p) {
 		if err := s.waitSCTPBackpressure(s.ctx); err != nil {
+			s.writeFailed.Store(true)
 			return written, err
 		}
 		cs := s.mux.ChunkSize()
@@ -639,9 +676,11 @@ func (s *Stream) Write(p []byte) (int, error) {
 		}
 		grant, err := s.acquireSendWindow(s.ctx, rem)
 		if err != nil {
+			s.writeFailed.Store(true)
 			return written, err
 		}
 		if err := s.lane.sendFrame(s.streamID, protocol.TypeData, protocol.FlagNone, p[written:written+grant]); err != nil {
+			s.writeFailed.Store(true)
 			return written, err
 		}
 		written += grant
@@ -653,10 +692,9 @@ func (s *Stream) Write(p []byte) (int, error) {
 // WriteWSChunk sends one streaming WebSocket sub-frame (TypeWSText or TypeWSBinary) with pure
 // payload-byte flow control and bounded SCTP backpressure.
 func (s *Stream) WriteWSChunk(ctx context.Context, op uint8, fin bool, payload []byte) error {
-	if op != protocol.TypeWSText && op != protocol.TypeWSBinary {
+	if (op != protocol.TypeWSText && op != protocol.TypeWSBinary) || !s.isWSMode() {
 		return protocol.ErrInvalidFrameType
 	}
-	s.isWS.Store(true)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if s.writeClosed || s.localFin.Load() || s.ctx.Err() != nil {
@@ -703,7 +741,9 @@ func (s *Stream) WriteWSChunk(ctx context.Context, op uint8, fin bool, payload [
 
 // WriteWSClose sends an RFC 6455 WS_CLOSE sub-frame on this stream.
 func (s *Stream) WriteWSClose(code uint16, reason string) error {
-	s.isWS.Store(true)
+	if !s.isWSMode() {
+		return protocol.ErrInvalidFrameType
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if s.writeClosed || s.localFin.Load() || s.ctx.Err() != nil {
@@ -725,19 +765,24 @@ func (s *Stream) CloseWrite() error {
 	}
 	s.localFin.Store(true)
 	if err := s.waitSCTPBackpressure(s.ctx); err != nil {
+		s.writeFailed.Store(true)
 		return err
 	}
 	err := s.lane.sendFrame(s.streamID, protocol.TypeData, protocol.FlagFin, nil)
+	if err != nil {
+		s.writeFailed.Store(true)
+	}
 	s.maybeDetachIfBothClosed()
 	return err
 }
 
-// Close finishes the stream cleanly: for HTTP streams sends FIN if not yet sent,
+// Close finishes the stream cleanly: for healthy sequential HTTP streams sends FIN if not yet sent,
 // purges unread inbound buffers, cancels stream context, and detaches from the lane.
-// WebSocket streams NEVER emit HTTP TypeData(FlagFin), and already-closed/WS streams
-// cancel s.ctx BEFORE locking writeMu so Close() never stalls behind a blocked writer.
+// WebSocket streams NEVER emit HTTP TypeData(FlagFin). If another goroutine currently holds writeMu
+// (e.g. blocked in Write() on SCTP backpressure/send window) or a prior write already failed, Close()
+// aborts immediately via Reset(ErrCodeCancel) instead of stalling for up to 2x SCTPWriteTimeout.
 func (s *Stream) Close() error {
-	if s.isWS.Load() || s.localFin.Load() || s.ctx.Err() != nil {
+	if s.isWSMode() || s.localFin.Load() || s.ctx.Err() != nil {
 		s.cancel()
 		s.purgeInbound(ErrStreamClosed)
 		s.detach()
@@ -748,8 +793,11 @@ func (s *Stream) Close() error {
 		return nil
 	}
 
-	s.writeMu.Lock()
-	needFin := !s.writeClosed && !s.localFin.Load() && !s.resetSent && !s.isWS.Load() && s.ctx.Err() == nil
+	if s.writeFailed.Load() || !s.writeMu.TryLock() {
+		s.Reset(protocol.ErrCodeCancel)
+		return nil
+	}
+	needFin := !s.writeClosed && !s.localFin.Load() && !s.resetSent && !s.isWSMode() && s.ctx.Err() == nil && !s.writeFailed.Load()
 	s.localFin.Store(true)
 	s.writeClosed = true
 	if needFin {
@@ -812,6 +860,7 @@ func (s *Stream) purgeInbound(err error) {
 	s.inQueue = nil
 	s.inPartial = nil
 	s.recvInFlightPayload = 0
+	s.recvInFlightMem = 0
 	s.consumedBytes = 0
 	s.consumedChunks = 0
 	s.inMu.Unlock()

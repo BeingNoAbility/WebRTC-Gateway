@@ -4,7 +4,13 @@
  */
 
 import { MIN_NEGOTIATED_MAX_MSG_SIZE } from '../protocol/frame';
-import { appendLenPrefixed, base64UrlDecode, sha256Hex, verifyEd25519 } from './crypto';
+import {
+  appendLenPrefixed,
+  base64UrlDecode,
+  sha256Hex,
+  UnsupportedCryptoError,
+  verifyEd25519,
+} from './crypto';
 
 export interface SessionDescriptor {
   fp: string; // 64 lowercase hex chars (SHA-256 DTLS fingerprint)
@@ -286,7 +292,10 @@ export async function verifyAnswerTranscript(
     }
     const transcript = encodeAnswerTranscript(nodeId, visitorNonce, offer, answer);
     return await verifyEd25519(pkBytes, transcript, sigBytes);
-  } catch {
+  } catch (err) {
+    if (err instanceof UnsupportedCryptoError) {
+      throw err;
+    }
     return false;
   }
 }

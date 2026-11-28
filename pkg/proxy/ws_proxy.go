@@ -180,10 +180,9 @@ func (wp *WSProxy) HandleStream(
 	}
 	conn.SetReadLimit(MaxWSFramePayloadBytes)
 
-	// Mark long-lived and WebSocket only after 101 Switching Protocols succeeds so failed upgrades never leak slots
-	// and Stream.Close() never emits illegal HTTP TypeData(FlagFin) frames on this WebSocket stream.
+	// Mark long-lived only after 101 Switching Protocols succeeds so failed upgrades never leak slots
+	// (Stream kind is already frozen as StreamKindWS by mux upon inbound HEADERS completion).
 	stream.SetLongLived(true)
-	stream.SetWebSocket()
 
 	var respFields []protocol.HeaderField
 	var wsDeltas []CookieDelta

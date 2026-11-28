@@ -8,10 +8,10 @@ WebRTC Gateway runs strictly on standard Web APIs (WebRTC DataChannel, Service W
 
 | Browser Family | Engine | Tier | Verification | Notes |
 | :--- | :--- | :---: | :--- | :--- |
-| **Google Chrome** | Chromium / Blink | **Tier 1** | Automated CI CDP E2E | Linux CI runs cross-site OOPIF E2E against the embedded `web.DistFS` binary (Chrome 87+ supports Transferable `ReadableStream`) |
-| **Microsoft Edge** | Chromium / Blink | **Tier 1** | Shared CDP E2E suite | Select locally via `EDGE_BIN` or `BROWSER_BIN` |
-| **Brave / Vivaldi / Opera** | Chromium / Blink | Tier 2 | Community verified | Aggressive WebRTC privacy blockers may require TURN relay |
-| **Mozilla Firefox** | Gecko | Tier 2 | Community verified | Requires Firefox 113+ (WebCrypto `Ed25519`, Transferable `ReadableStream`); SW falls back to `arrayBuffer()` when `FetchEvent.request.body === undefined` |
+| **Google Chrome** | Chromium / Blink | **Tier 1** | Automated CI CDP E2E | Linux CI runs cross-site OOPIF E2E against the embedded `web.DistFS` binary (requires Chrome 137+ for native WebCrypto `Ed25519`; Transferable `ReadableStream` since Chrome 87+) |
+| **Microsoft Edge** | Chromium / Blink | **Tier 1** | Shared CDP E2E suite | Requires Edge 137+ (WebCrypto `Ed25519`); select locally via `EDGE_BIN` or `BROWSER_BIN` |
+| **Brave / Vivaldi / Opera** | Chromium / Blink | Tier 2 | Community verified | Requires Chromium 137+ base; aggressive WebRTC privacy blockers may require TURN relay |
+| **Mozilla Firefox** | Gecko | Tier 2 | Community verified | Requires Firefox 129+ (WebCrypto `Ed25519`, Transferable `ReadableStream`); SW falls back to `arrayBuffer()` when `FetchEvent.request.body === undefined` |
 | **Apple Safari (macOS / iOS)** | WebKit | Tier 2 | Community verified | Requires Safari 17+ (WebCrypto `Ed25519`, Transferable `ReadableStream`); subject to iOS suspension and `getRemoteCertificates()` limits below |
 | **Android Chromium Browsers** | Chromium / Blink | Tier 2 | Community verified | Modern Chrome Android and Edge Mobile |
 
@@ -27,7 +27,7 @@ WebRTC Gateway runs strictly on standard Web APIs (WebRTC DataChannel, Service W
 - **Platform behavior**: Mobile browsers may terminate idle Service Workers or suspend sockets when backgrounded.
 - **Gateway recovery path**:
   1. Bootstrap `/__p2p_gw__/bridge.html` exists strictly before `appFrame` mounts and is removed immediately upon `P2P_BRIDGE_READY` (zero temporal overlap);
-  2. When a sandbox request finds no attached `bridgePort` or receives no `REQ_ACK` from Portal within **1500 ms** (confirmed dead via a **3000 ms** `BRIDGE_PING`), SW evicts that tab's stale port (preserving `cookieMirror` and `clientIds`) and broadcasts `P2P_SW_EVICTED` to the tab's nested `appFrame` clients;
+  2. When a sandbox request finds no attached `bridgePort` or receives no `REQ_ACK` from Portal within **3000 ms** (confirmed dead via a **3000 ms** `BRIDGE_PING`), SW evicts that tab's stale port (preserving `cookieMirror` and `clientIds`) and broadcasts `P2P_SW_EVICTED` to the tab's nested `appFrame` clients;
   3. `patch.js` inside `appFrame` relays `P2P_SW_EVICTED` to `window.parent` (Portal), and Portal spawns an ephemeral `bridge.html` to hand off a fresh `MessagePort` (never invoking `location.reload()` or `sessionStorage` reload guards, avoiding Safari ITP / Firefox ETP reload loops);
   4. If WebRTC disconnects, Portal runs unified silent reconnect over a fresh `RTCPeerConnection` reusing the tab's in-memory `(w0, w1)` SPAKE2+ verifier, keeping `appFrame` mounted without re-prompting for a password.
 

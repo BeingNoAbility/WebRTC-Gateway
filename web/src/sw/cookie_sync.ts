@@ -155,6 +155,28 @@ export async function syncCookieDeltasToClients(
   }
 }
 
+/**
+ * Unified single-path broadcast for JS-originated cookie mutations: propagates validated
+ * CookieDeltas to sibling clients in the same tab AND to Portal's `liveCookieSnapshot`
+ * (used by both `SW_COOKIE_MUTATE` and inline `X-P2P-Cookie-Mutations` fetch ACKs so the
+ * two tracks can never diverge or drop Portal snapshot updates).
+ */
+export async function broadcastClientCookieDeltas(
+  swScope: ServiceWorkerGlobalScope,
+  session: { clientIds: Set<string>; port: MessagePort | null },
+  originClientId: string,
+  deltas: CookieDelta[]
+): Promise<void> {
+  if (deltas.length === 0) return;
+  const others = Array.from(session.clientIds).filter((id) => id !== originClientId);
+  await syncCookieDeltasToClients(swScope, '', others, deltas);
+  try {
+    session.port?.postMessage({ type: 'BRIDGE_CLIENT_COOKIE_DELTAS', deltas });
+  } catch {
+    // ignore
+  }
+}
+
 function postDeltasWithAck(client: Client, deltas: CookieDelta[]): Promise<void> {
   return new Promise<void>((resolve) => {
     const ch = new MessageChannel();

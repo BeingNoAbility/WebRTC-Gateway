@@ -184,6 +184,10 @@
       "hex": "01800347455400012f00000000"
     },
     {
+      "name": "removed_top_level_nav_fetch_ctx_bit",
+      "hex": "01020347455400012f00000000"
+    },
+    {
       "name": "target_missing_leading_slash",
       "hex": "0100034745540003666f6f00000000"
     },
