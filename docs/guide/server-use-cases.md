@@ -17,36 +17,36 @@ flowchart TD
     F -- "前置 CDN 代理" --> I["用例 4：CDN 回源与 -client-ip-header"]
     F -- "单域名 + 通配符证书" --> J["用例 5：Tier 2 单根域同站通配符（仅互信应用）"]
     F -- "容器编排部署" --> K["用例 6：Docker Compose 加固部署"]
-    C --> M["可选：用例 7（Tier 1 无泛域双固定域与 -static 外置前端）"]
+    C --> M["可选：用例 7（Tier 2 固定单域跨站与 -static 外置前端）"]
 ```
 
 | 场景 | 服务端形态 | 关键参数 / 配置 | 适用对象 |
 | :--- | :--- | :--- | :--- |
-| **1. 本机研发与 CI 验证** | Go `signal` | `-addr 127.0.0.1:8888`、可选 `-tls-auto` | 本地联调、端到端测试、无需公网域名 |
-| **2. 标准双域 VPS 直出 TLS** | Go `signal` | `-portal-domain`、`-sandbox-domain`、`-bound-keys-file`、`-tls-cert` | 独立主机部署、零额外反代依赖 |
-| **3. 前置 Nginx / Caddy 反代** | Go `signal` + 反代 | `-trusted-proxies`、透传 `Host`/`XFF`/`XFP`/WS | 与现有 Web 站点复用 443 端口 |
+| **1. 本机研发与 CI 验证** | Go `signal` | `-addr 127.0.0.1:8888 -dev`、可选 `-tls-auto` | 本地联调、端到端测试、无需公网域名 |
+| **2. 标准双域 VPS 直出 TLS** | Go `signal` | `-portal-origin`、`-sandbox-origin`、`-bound-keys-file`、`-tls-cert` | 独立主机部署、零额外反代依赖 |
+| **3. 前置 Nginx / Caddy 反代** | Go `signal` + 反代 | `-trusted-proxies`、透传 `Host`/`XFF`/WS | 与现有 Web 站点复用 443 端口 |
 | **4. 前置 CDN / 边缘代理** | Go `signal` + CDN | `-trusted-proxies`、`-client-ip-header`、`-node-secrets-file` | 隐藏源站 IP 与多节点准入隔离 |
-| **5. Tier 2 单根域同站通配符** | Go `signal` | `-portal-domain`、`-sandbox-domain`、`-allow-same-site-sandbox` | 仅有单个根域且仅穿透互信自用服务 |
+| **5. Tier 2 单根域同站通配符** | Go `signal` | `-portal-origin`、`-sandbox-origin`、`-allow-same-site-sandbox` | 仅有单个根域且仅穿透互信自用服务 |
 | **6. 加固容器化部署** | Docker Compose | `read_only`、`cap_drop: [ALL]`、`signal_state` 持久化卷 | 云主机仅跑 `server`，内网独立跑 `agent` |
-| **7. Tier 1 无泛域双固定域与 `-static`** | Go `signal` | `-portal-domain`、`-sandbox-host`、`-static` | 无泛域证书的跨站部署或外置前端资产覆盖 |
+| **7. Tier 2 固定单域跨站与 `-static`** | Go `signal` | `-portal-origin`、固定 `-sandbox-origin`、`-static` | 无泛域证书的跨站部署或外置前端资产覆盖 |
 
 ---
 
 ## 用例 1：本机研发、联调与 CI 临时验证
 
-**结论**：监听回环地址（`127.0.0.1` 或 `::1`）时，服务端自动启用 RFC 6761 `*.localhost` 跨站沙箱模式，无需配置公网域名与 DNS 记录。
+**结论**：显式传入 `-dev` 且监听回环地址（`127.0.0.1` 或 `::1`）时，服务端启用 RFC 6761 `*.localhost` 跨站沙箱模式（按 IPv4/IPv6 地址族隔离），无需配置公网域名与 DNS 记录。
 
 ```bash
-# 1. 最简回环 HTTP 启动（保留 SIGNAL_SECRET 准入校验）
-SIGNAL_SECRET=dev-cluster-secret \
-./bin/signal -addr 127.0.0.1:8888
+# 1. 最简回环 HTTP 启动（保留 >=16 字节 SIGNAL_SECRET 准入校验）
+SIGNAL_SECRET=dev-cluster-secret-16b \
+./bin/signal -addr 127.0.0.1:8888 -dev
 
 # 2. 需要测试 HTTPS 安全上下文时，启用内存自签证书（仅签发 localhost / *.localhost / 127.0.0.1 / ::1）
-SIGNAL_SECRET=dev-cluster-secret \
-./bin/signal -addr 127.0.0.1:8888 -tls-auto
+SIGNAL_SECRET=dev-cluster-secret-16b \
+./bin/signal -addr 127.0.0.1:8888 -dev -tls-auto
 
 # 3. 仅限本机临时测试：显式关闭 Agent 集群密钥校验
-./bin/signal -addr 127.0.0.1:8888 -allow-anonymous-agents
+./bin/signal -addr 127.0.0.1:8888 -dev -allow-anonymous-agents
 ```
 
 > [!WARNING]
@@ -69,8 +69,8 @@ SIGNAL_SECRET=dev-cluster-secret \
 
 ```yaml
 addr: "0.0.0.0:443"
-portal_domain: "portal.example.com"
-sandbox_domain: "sandbox.example.net"
+portal_origin: "https://portal.example.com"
+sandbox_origin: "https://*.sandbox.example.net"
 tls_cert: "/etc/webrtc-gateway/certs/fullchain.pem"
 tls_key: "/etc/webrtc-gateway/certs/privkey.pem"
 bound_keys_file: "/var/lib/webrtc-gateway/bound-keys.json"
@@ -112,7 +112,7 @@ WantedBy=multi-user.target
 
 ## 用例 3：前置 Nginx / Caddy 反向代理部署
 
-**结论**：若服务器 443 端口已由 Nginx 或 Caddy 管理，令 `signal` 仅监听 `127.0.0.1:8888`，并在反代中透传原始 `Host`、`X-Forwarded-For`、`X-Forwarded-Proto` 与 WebSocket 升级头；若反代位于独立主机或容器网桥，必须在 `-trusted-proxies` 中声明反代真实 CIDR。
+**结论**：若服务器 443 端口已由 Nginx 或 Caddy 管理，令 `signal` 仅监听 `127.0.0.1:8888`，并在反代中透传原始 `Host`、`X-Forwarded-For` 与 WebSocket 升级头（对外协议与端口由启动期 `-portal-origin` 与 `-sandbox-origin` 权威声明，无需 `X-Forwarded-Proto` 运行时猜测）；若反代位于独立主机或容器网桥，必须在 `-trusted-proxies` 中声明反代真实 CIDR。
 
 ### 3.1 启动信令后端
 
@@ -120,8 +120,8 @@ WantedBy=multi-user.target
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ./bin/signal \
   -addr 127.0.0.1:8888 \
-  -portal-domain portal.example.com \
-  -sandbox-domain sandbox.example.net \
+  -portal-origin https://portal.example.com \
+  -sandbox-origin 'https://*.sandbox.example.net' \
   -bound-keys-file /var/lib/webrtc-gateway/bound-keys.json \
   -trusted-proxies "127.0.0.0/8,::1/128"
 ```
@@ -148,7 +148,6 @@ server {
         proxy_set_header Connection $connection_upgrade;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
     }
@@ -158,7 +157,6 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
@@ -181,7 +179,7 @@ portal.example.com, *.sandbox.example.net {
 
 ## 用例 4：前置 CDN / 边缘代理与多节点密钥隔离
 
-**结论**：希望借助任意 CDN / 边缘代理隐藏源站 IP 时，在自建 Go `signal` 上配合 `-trusted-proxies` 与单值头开关 `-client-ip-header`（如 `CF-Connecting-IP`、`Fastly-Client-IP`、`True-Client-IP`、`CloudFront-Viewer-Address` 或 `X-Real-IP`）；多节点共享同一信令实例时，结合 `-node-secrets-file` 为每个 `node_id` 分配独立准入密钥（已配置专属密钥的节点严格拒绝回退到全局 `SIGNAL_SECRET`）。
+**结论**：希望借助任意 CDN / 边缘代理隐藏源站 IP 时，在自建 Go `signal` 上配合 `-trusted-proxies` 与单值头开关 `-client-ip-header`（如 `CF-Connecting-IP`、`Fastly-Client-IP`、`True-Client-IP`、`CloudFront-Viewer-Address` 或 `X-Real-IP`）；多节点共享同一信令实例时，结合 `-node-secrets-file` 为每个 `node_id` 分配独立准入密钥（每条不少于 16 字节，已配置专属密钥的节点严格拒绝回退到全局 `SIGNAL_SECRET`）。
 
 ### 4.1 自建 Go 信令置于 CDN 代理之后
 
@@ -191,8 +189,8 @@ portal.example.com, *.sandbox.example.net {
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ./bin/signal \
   -addr 0.0.0.0:443 \
-  -portal-domain portal.example.com \
-  -sandbox-domain sandbox.example.net \
+  -portal-origin https://portal.example.com \
+  -sandbox-origin 'https://*.sandbox.example.net' \
   -bound-keys-file /var/lib/webrtc-gateway/bound-keys.json \
   -node-secrets-file /etc/webrtc-gateway/node-secrets.yaml \
   -tls-cert /etc/webrtc-gateway/certs/origin.pem \
@@ -219,14 +217,14 @@ pve-console: "replace-with-pve-only-secret"
 
 ## 用例 5：Tier 2 单根域同站通配符（仅限互信应用）
 
-**结论**：当暂时只有单个根域名且仅穿透个人互信内网服务时，可显式开启 `-allow-same-site-sandbox`（环境变量 `ALLOW_SAME_SITE_SANDBOX=true`），使用 `portal.example.com` 搭配 `*.sbx.example.com` 泛域证书（服务端自动下发 `Origin-Agent-Cluster: ?1`）。
+**结论**：当暂时只有单个根域名且仅穿透个人互信内网服务时，可显式开启 `-allow-same-site-sandbox`（环境变量 `ALLOW_SAME_SITE_SANDBOX=true`），使用 `https://portal.example.com` 搭配 `https://*.sbx.example.com` 泛域证书（服务端自动下发 `Origin-Agent-Cluster: ?1`）。
 
 ```bash
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ./bin/signal \
   -addr 0.0.0.0:443 \
-  -portal-domain portal.example.com \
-  -sandbox-domain sbx.example.com \
+  -portal-origin https://portal.example.com \
+  -sandbox-origin 'https://*.sbx.example.com' \
   -allow-same-site-sandbox \
   -bound-keys-file /var/lib/webrtc-gateway/bound-keys.json \
   -tls-cert /etc/webrtc-gateway/certs/wildcard-example.pem \
@@ -234,7 +232,7 @@ SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ```
 
 > [!CAUTION]
-> 该模式下 Portal 与沙箱子域共享同一 eTLD+1（同站），无法在浏览器站点级隔离跨节点 Storage；Portal 顶部会持续显示同站风险警示条。若托管多用户或含不可信第三方应用，必须迁移至不同 eTLD+1 的 `-sandbox-host`（Tier 1）或 `-sandbox-domain`（Tier 3）。
+> 该模式下 Portal 与沙箱子域共享同一 eTLD+1（同站），无法在浏览器站点级隔离跨节点 Storage；Portal 顶部会持续显示 Tier 2 受限隔离警示条。若托管多用户或含不可信第三方应用，必须迁移至不同 eTLD+1 的 Tier 1 跨站通配符 `-sandbox-origin 'https://*.sandbox.example.net'`。
 
 ---
 
@@ -246,8 +244,9 @@ SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 
 ```bash
 cat <<'EOF' > .env
-PORTAL_DOMAIN=portal.example.com
-SANDBOX_DOMAIN=sandbox.example.net
+PORTAL_ORIGIN=https://portal.example.com
+SANDBOX_ORIGIN=https://*.sandbox.example.net
+SIGNAL_URL=wss://portal.example.com/ws
 SIGNAL_SECRET=replace-with-random-cluster-secret
 ACCESS_SECRET=unused-on-server-only-host
 TRUSTED_PROXIES=127.0.0.0/8,::1/128
@@ -284,11 +283,11 @@ docker run -d \
 
 ---
 
-## 用例 7：Tier 1 无泛域双固定域与 `-static` 外置前端覆盖
+## 用例 7：Tier 2 固定单域跨站与 `-static` 外置前端覆盖
 
-**结论**：暂无泛域名证书时，使用 `-sandbox-host`（Tier 1 双固定域，仅需两张普通 HTTP-01 单域证书）即可获得跨站隔离；如需在不重编 Go 二进制的情况下替换前端资产，使用 `-static` 指定外部构建目录。
+**结论**：暂无泛域名证书且仅部署单节点或互信应用时，使用固定单域 `-sandbox-origin https://app.example.net`（仅需两张普通 HTTP-01 单域证书，Portal 持续显示 Tier 2 警示条）即可实现 Portal 与应用跨站；如需在不重编 Go 二进制的情况下替换前端资产，使用 `-static` 指定外部构建目录。
 
-### 7.1 Tier 1 跨站双固定域（零通配符证书）
+### 7.1 Tier 2 固定单域跨站（零通配符证书）
 
 准备两个不同根域的固定主机名（如 `portal.example.com` 与 `app.example.net`），通过普通 ACME HTTP-01 证书即可运行：
 
@@ -296,8 +295,8 @@ docker run -d \
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ./bin/signal \
   -addr 0.0.0.0:443 \
-  -portal-domain portal.example.com \
-  -sandbox-host app.example.net \
+  -portal-origin https://portal.example.com \
+  -sandbox-origin https://app.example.net \
   -bound-keys-file /var/lib/webrtc-gateway/bound-keys.json \
   -tls-cert /etc/webrtc-gateway/certs/dual-fixed.pem \
   -tls-key /etc/webrtc-gateway/certs/dual-fixed.key
@@ -313,8 +312,8 @@ npm --prefix web run build
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ./bin/signal \
   -addr 127.0.0.1:8888 \
-  -portal-domain portal.example.com \
-  -sandbox-domain sandbox.example.net \
+  -portal-origin https://portal.example.com \
+  -sandbox-origin 'https://*.sandbox.example.net' \
   -static /srv/webrtc-gateway/web/dist
 ```
 

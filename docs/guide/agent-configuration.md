@@ -27,7 +27,8 @@ WebRTC Gateway 采用统一配置加载器（`pkg/config`）：
 | `-target` | `TARGET_URL` | `target_url` | 空 | 本地 HTTP/HTTPS 反代目标（与 `-dir`/`-file` 三选一） |
 | `-dir` | `DIR_PATH` | `dir_path` | 空 | 只读静态目录（`os.Root` 适配器） |
 | `-file` | `FILE_PATH` | `file_path` | 空 | 只读单文件分享（`os.Root` 适配器） |
-| `-hide-dotfiles` | `P2P_HIDE_DOTFILES` | `hide_dotfiles` | `true` | 隐藏点文件与指向点文件的根内软链 |
+| `-hide-dotfiles` | `P2P_HIDE_DOTFILES` | `hide_dotfiles` | `true` | 隐藏点文件与点目录 |
+| `-follow-symlinks` | `FOLLOW_SYMLINKS` | `follow_symlinks` | `false` | 显式允许在根目录与当前能力 `path_prefix` 边界内解析有限跳数符号链接（默认 Fail-Closed `O_NOFOLLOW` 拒绝一切软链） |
 | `-file-inline-active` | `FILE_INLINE_ACTIVE` | `file_inline_active` | `false` | 允许静态文件内联执行脚本（关闭默认全文件 `CSP: sandbox`） |
 | `-upstream-host` | `UPSTREAM_HOST` | `upstream_host` | 空 | 覆写上游虚拟主机 `Host` 头（RFC 9110 `host[:port]`，仅 `-target` 有效，同步作用于 `Origin`/`Location`/CookieJar） |
 | `-proxy` | `PROXY_URL` | `proxy_url` | 空 | 出站 HTTP/HTTPS/SOCKS5 代理（无效 URL 启动即拒） |
@@ -36,7 +37,7 @@ WebRTC Gateway 采用统一配置加载器（`pkg/config`）：
 | `-ice-mdns` | `ICE_MDNS` | `ice_mdns` | `true` | 通过 mDNS 与 Fail-Closed 出站候选清洗隐藏内网 LAN/Docker/VPN 宿主 ICE IP |
 | `-stun-servers` | `STUN_SERVERS` | `stun_servers` | `stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302` | 自定义 STUN 列表（逗号分隔，仅限 `stun:`/`stuns:`；设为 `none`/`off` 禁用） |
 | `-turn-url` / `-turn-user` / `-turn-pass` | `TURN_URL` / `TURN_USER` / `TURN_PASS(_FILE)` | `turn_*` | 空 | 用户自建 TURN 中继配置 |
-| `-max-streams` | `MAX_STREAMS` | `max_streams` | `512` | 全局并发 P2PMux V7 流上限 |
+| `-max-streams` | `MAX_STREAMS` | `max_streams` | `512` | 全局并发 P2PMux V8 流上限 |
 | `-metrics-addr` | `METRICS_ADDR` | `metrics_addr` | 空 | Prometheus `/metrics` 与 `/healthz` 监听地址 |
 | `-portal-url` | `PORTAL_URL` | `portal_url` | 空 | 门户基地址（用于输出钉扎与分享链接） |
 | `-mint-link` | — | — | 空 | 离线签发 Ed25519 能力分享链接（如 `2h`、`7d`）并退出 |
@@ -50,13 +51,13 @@ WebRTC Gateway 采用统一配置加载器（`pkg/config`）：
 | CLI 参数 | 环境变量 / 密钥文件 | YAML 字段 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- | :--- |
 | `-config` | `CONFIG_FILE` | — | 空 | 显式 YAML/JSON 配置文件路径 |
-| `-addr` | `ADDR` | `addr` | `127.0.0.1:8888` | 监听地址（非回环地址必须配域名，否则拒绝启动） |
-| `-portal-domain` | `PORTAL_DOMAIN` | `portal_domain` | 空 | Portal 基准域名（如 `portal.example.com`） |
-| `-sandbox-domain` | `SANDBOX_DOMAIN` | `sandbox_domain` | 空 | 通配符沙箱域（Tier 3 跨站或 Tier 2 同站，如 `sandbox.example.net`，与 `-sandbox-host` 互斥） |
-| `-sandbox-host` | `SANDBOX_HOST` | `sandbox_host` | 空 | Tier 1 跨站固定沙箱主机名（如 `app.example.net`，无需通配符证书，与 `-sandbox-domain` 互斥） |
-| `-allow-same-site-sandbox` | `ALLOW_SAME_SITE_SANDBOX` | `allow_same_site_sandbox` | `false` | 显式允许 Tier 2 单根域同站通配符沙箱（自动附加 `Origin-Agent-Cluster: ?1`） |
-| `-signal-secret` | `SIGNAL_SECRET` / `SIGNAL_SECRET_FILE` | `signal_secret` | 空 | Agent 集群默认注册密钥（未设且无 `-node-secrets-file` / `-allow-anonymous-agents` 时拒绝启动） |
-| `-node-secrets-file` | `NODE_SECRETS_FILE` | `node_secrets_file` | 空 | 节点级专属密钥映射文件（YAML/JSON `node_id: secret`，覆盖全局密钥且不回退） |
+| `-addr` | `ADDR` | `addr` | `127.0.0.1:8888` | 监听地址（非回环地址必须配显式源，禁止与 `-dev` 同用） |
+| `-portal-origin` | `PORTAL_ORIGIN` | `portal_origin` | 空 | 启动期显式 Portal 源（含协议与可选端口，如 `https://portal.example.com`） |
+| `-sandbox-origin` | `SANDBOX_ORIGIN` | `sandbox_origin` | 空 | 启动期显式沙箱源：Tier 1 跨站通配符（`https://*.sandbox.example.net`）或 Tier 2 受限固定单域（`https://app.example.net`） |
+| `-dev` | `DEV_MODE` | `dev` | `false` | 显式启用本地回环开发模式（`localhost` + `*.localhost`，仅限回环 `-addr` 且按 IPv4/IPv6 地址族隔离） |
+| `-allow-same-site-sandbox` | `ALLOW_SAME_SITE_SANDBOX` | `allow_same_site_sandbox` | `false` | 显式允许 Tier 2 单根域同站通配符沙箱（自动附加 `Origin-Agent-Cluster: ?1` 并展示警示条） |
+| `-signal-secret` | `SIGNAL_SECRET` / `SIGNAL_SECRET_FILE` | `signal_secret` | 空 | Agent 集群默认注册密钥（不少于 16 字节；未设且无 `-node-secrets-file` / `-allow-anonymous-agents` 时拒绝启动） |
+| `-node-secrets-file` | `NODE_SECRETS_FILE` | `node_secrets_file` | 空 | 节点级专属密钥映射文件（YAML/JSON `node_id: secret`，每条不少于 16 字节，覆盖全局密钥且不回退） |
 | `-allow-force-rekey` | `ALLOW_FORCE_REKEY` | `allow_force_rekey` | 自动（共享密钥 `false`，逐节点密钥 `true`） | 是否允许已鉴权 Agent 通过 `force_rekey` 轮换已绑定的 Ed25519 公钥 |
 | `-allow-anonymous-agents` | `ALLOW_ANONYMOUS_AGENTS` | `allow_anonymous_agents` | `false` | 显式允许匿名 Agent 注册 |
 | `-bound-keys-file` | `BOUND_KEYS_FILE` | `bound_keys_file` | 空 | 持久化各 `node_id` Ed25519 公钥绑定表的 JSON 文件（`AtomicFileStore` 原子写入，重启防抢注） |

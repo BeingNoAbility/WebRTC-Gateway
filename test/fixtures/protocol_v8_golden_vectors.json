@@ -1,9 +1,9 @@
 {
-  "version": 7,
+  "version": 8,
   "valid_frames": [
     {
       "name": "ping_8b_seq1",
-      "gen": 0,
+      "stream_id": 0,
       "type": 8,
       "flags": 0,
       "payload_hex": "0000000000000001",
@@ -11,7 +11,7 @@
     },
     {
       "name": "pong_8b_max_u64",
-      "gen": 0,
+      "stream_id": 0,
       "type": 9,
       "flags": 0,
       "payload_hex": "ffffffffffffffff",
@@ -19,47 +19,47 @@
     },
     {
       "name": "goaway_going_away",
-      "gen": 0,
+      "stream_id": 0,
       "type": 10,
       "flags": 0,
       "payload_hex": "00000009",
       "wire_hex": "000000000a00000400000009"
     },
     {
+      "name": "auth_result_chunk_more",
+      "stream_id": 0,
+      "type": 4,
+      "flags": 4,
+      "payload_hex": "7b226f6b22",
+      "wire_hex": "00000000040400057b226f6b22"
+    },
+    {
       "name": "headers_more_and_fin",
-      "gen": 5,
+      "stream_id": 5,
       "type": 16,
       "flags": 5,
       "payload_hex": "deadbeef",
       "wire_hex": "0000000510050004deadbeef"
     },
     {
-      "name": "continuation_nonfinal_nonempty",
-      "gen": 5,
-      "type": 17,
-      "flags": 4,
-      "payload_hex": "aa",
-      "wire_hex": "0000000511040001aa"
-    },
-    {
-      "name": "continuation_final",
-      "gen": 5,
-      "type": 17,
+      "name": "headers_final",
+      "stream_id": 5,
+      "type": 16,
       "flags": 0,
       "payload_hex": "cafebabe",
-      "wire_hex": "0000000511000004cafebabe"
+      "wire_hex": "0000000510000004cafebabe"
     },
     {
       "name": "data_empty_fin",
-      "gen": 7,
+      "stream_id": 7,
       "type": 18,
       "flags": 1,
       "payload_hex": "",
       "wire_hex": "0000000712010000"
     },
     {
-      "name": "credit_high_bit_gen",
-      "gen": 2147483649,
+      "name": "credit_high_bit_stream_id",
+      "stream_id": 2147483649,
       "type": 19,
       "flags": 0,
       "payload_hex": "7fffffff",
@@ -67,43 +67,51 @@
     },
     {
       "name": "reset_auth_required",
-      "gen": 3,
+      "stream_id": 3,
       "type": 20,
       "flags": 0,
       "payload_hex": "00000007",
       "wire_hex": "000000031400000400000007"
     },
     {
-      "name": "ws_text_single_chunk_fin",
-      "gen": 1,
+      "name": "ws_text_chunk_nonfinal",
+      "stream_id": 9,
+      "type": 33,
+      "flags": 0,
+      "payload_hex": "68656c6c6f",
+      "wire_hex": "000000092100000568656c6c6f"
+    },
+    {
+      "name": "ws_text_chunk_final",
+      "stream_id": 9,
       "type": 33,
       "flags": 2,
-      "payload_hex": "68656c6c6f",
-      "wire_hex": "000000012102000568656c6c6f"
-    },
-    {
-      "name": "ws_cont_nonfinal_nonempty",
-      "gen": 1,
-      "type": 35,
-      "flags": 0,
-      "payload_hex": "bb",
-      "wire_hex": "0000000123000001bb"
-    },
-    {
-      "name": "ws_cont_final",
-      "gen": 1,
-      "type": 35,
-      "flags": 2,
       "payload_hex": "776f726c64",
-      "wire_hex": "0000000123020005776f726c64"
+      "wire_hex": "0000000921020005776f726c64"
+    },
+    {
+      "name": "ws_text_empty_final",
+      "stream_id": 9,
+      "type": 33,
+      "flags": 2,
+      "payload_hex": "",
+      "wire_hex": "0000000921020000"
+    },
+    {
+      "name": "ws_binary_single_final",
+      "stream_id": 10,
+      "type": 34,
+      "flags": 2,
+      "payload_hex": "bb",
+      "wire_hex": "0000000a22020001bb"
     },
     {
       "name": "ws_close_normal",
-      "gen": 1,
+      "stream_id": 9,
       "type": 36,
       "flags": 0,
       "payload_hex": "03e8627965",
-      "wire_hex": "000000012400000503e8627965"
+      "wire_hex": "000000092400000503e8627965"
     }
   ],
   "invalid_frames": [
@@ -111,20 +119,22 @@
     { "name": "trailing_extra_byte", "wire_hex": "0000000712010000ff" },
     { "name": "unknown_type_0xff", "wire_hex": "00000001ff000000" },
     { "name": "legacy_cookie_sync_0x07_removed", "wire_hex": "00000000070000027b7d" },
+    { "name": "legacy_continuation_0x11_removed", "wire_hex": "0000000111000001aa" },
+    { "name": "legacy_ws_cont_0x23_removed", "wire_hex": "0000000123020001bb" },
     { "name": "ping_oversized_9b", "wire_hex": "0000000008000009000000000000000100" },
-    { "name": "ping_nonzero_gen", "wire_hex": "00000001080000080000000000000001" },
+    { "name": "ping_nonzero_stream_id", "wire_hex": "00000001080000080000000000000001" },
     { "name": "credit_zero_delta", "wire_hex": "000000011300000400000000" },
     { "name": "credit_msb_set", "wire_hex": "000000011300000480000000" },
-    { "name": "continuation_with_fin_forbidden", "wire_hex": "0000000111010001aa" },
-    { "name": "continuation_0b_nonfinal_forbidden", "wire_hex": "0000000111040000" },
-    { "name": "ws_cont_0b_nonfinal_forbidden", "wire_hex": "0000000123000000" },
+    { "name": "headers_0b_more_forbidden", "wire_hex": "0000000110040000" },
+    { "name": "ws_text_0b_nonfinal_forbidden", "wire_hex": "0000000121000000" },
+    { "name": "ctrl_json_0b_more_forbidden", "wire_hex": "0000000004040000" },
     { "name": "headers_reserved_flag_0xfa", "wire_hex": "0000000110fa0000" },
-    { "name": "data_gen_zero", "wire_hex": "0000000012000001aa" },
+    { "name": "data_stream_id_zero", "wire_hex": "0000000012000001aa" },
     { "name": "ws_close_too_short_1b", "wire_hex": "000000012400000103" }
   ],
   "tlv_requests": [
     {
-      "name": "http_get_v7_with_cookie_mutations",
+      "name": "http_get_with_cookie_mutations",
       "kind": 1,
       "fetch_ctx": 5,
       "method": "GET",
@@ -155,7 +165,7 @@
   ],
   "tlv_responses": [
     {
-      "name": "http_200_v7_gzip_with_cookie_deltas",
+      "name": "http_200_gzip_with_cookie_deltas",
       "status": 200,
       "resp_flags": 1,
       "headers": [
@@ -184,6 +194,10 @@
     {
       "name": "cookie_expires_ms_msb_set",
       "hex": "01000347455400012f0000000101016100013100012f8000000000000001"
+    },
+    {
+      "name": "cookie_expires_ms_exceeds_max_safe_int",
+      "hex": "01000347455400012f0000000101016100013100012f0020000000000000"
     },
     {
       "name": "trailing_extra_byte",

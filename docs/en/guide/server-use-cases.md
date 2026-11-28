@@ -17,36 +17,36 @@ flowchart TD
     F -- "Behind CDN proxy" --> I["Case 4: CDN Fronting & -client-ip-header"]
     F -- "Single root + wildcard cert" --> J["Case 5: Tier 2 Same-Site Wildcard (Trusted Apps)"]
     F -- "Containerized ops" --> K["Case 6: Hardened Docker Compose"]
-    C --> M["Optional: Case 7 (Tier 1 Fixed Dual-Domain & -static)"]
+    C --> M["Optional: Case 7 (Tier 2 Fixed Dual-Domain & -static)"]
 ```
 
 | Scenario | Server Stack | Key Flags / Config | Best Fit |
 | :--- | :--- | :--- | :--- |
-| **1. Local Dev & CI Verification** | Go `signal` | `-addr 127.0.0.1:8888`, optional `-tls-auto` | Local testing and E2E CI without public domains |
-| **2. Dual-Domain VPS Direct TLS** | Go `signal` | `-portal-domain`, `-sandbox-domain`, `-bound-keys-file`, `-tls-cert` | Dedicated host with zero reverse-proxy dependency |
-| **3. Behind Nginx / Caddy Proxy** | Go `signal` + proxy | `-trusted-proxies`, forward `Host`/`XFF`/`XFP`/WS | Sharing port 443 with existing websites |
+| **1. Local Dev & CI Verification** | Go `signal` | `-addr 127.0.0.1:8888 -dev`, optional `-tls-auto` | Local testing and E2E CI without public domains |
+| **2. Dual-Domain VPS Direct TLS** | Go `signal` | `-portal-origin`, `-sandbox-origin`, `-bound-keys-file`, `-tls-cert` | Dedicated host with zero reverse-proxy dependency |
+| **3. Behind Nginx / Caddy Proxy** | Go `signal` + proxy | `-trusted-proxies`, forward `Host`/`XFF`/WS | Sharing port 443 with existing websites |
 | **4. Behind CDN / Edge Proxy** | Go `signal` + CDN | `-trusted-proxies`, `-client-ip-header`, `-node-secrets-file` | Origin IP hiding and per-node secret isolation |
-| **5. Tier 2 Same-Site Wildcard** | Go `signal` | `-portal-domain`, `-sandbox-domain`, `-allow-same-site-sandbox` | Single root domain exposing only mutually trusted personal apps |
+| **5. Tier 2 Same-Site Wildcard** | Go `signal` | `-portal-origin`, `-sandbox-origin`, `-allow-same-site-sandbox` | Single root domain exposing only mutually trusted personal apps |
 | **6. Hardened Container Stack** | Docker Compose | `read_only`, `cap_drop: [ALL]`, `signal_state` persistent volume | Public VPS runs `server`; intranet hosts run `agent` |
-| **7. Tier 1 Fixed Dual-Domain & `-static`** | Go `signal` | `-portal-domain`, `-sandbox-host`, `-static` | Cross-site isolation without wildcard certs or custom external assets |
+| **7. Tier 2 Fixed Dual-Domain & `-static`** | Go `signal` | `-portal-origin`, fixed `-sandbox-origin`, `-static` | Cross-site isolation without wildcard certs or custom external assets |
 
 ---
 
 ## Case 1: Local Development, Debugging & CI Verification
 
-**Summary**: Binding to loopback (`127.0.0.1` or `::1`) automatically activates RFC 6761 `*.localhost` cross-site sandbox mode with zero public domain or DNS setup.
+**Summary**: Passing `-dev` on a loopback listener (`127.0.0.1` or `::1`) enables RFC 6761 `*.localhost` cross-site sandbox mode (address-family scoped) with zero public domain or DNS setup.
 
 ```bash
-# 1. Minimal loopback HTTP startup (enforcing SIGNAL_SECRET admission)
-SIGNAL_SECRET=dev-cluster-secret \
-./bin/signal -addr 127.0.0.1:8888
+# 1. Minimal loopback HTTP startup (enforcing >=16-byte SIGNAL_SECRET admission)
+SIGNAL_SECRET=dev-cluster-secret-16b \
+./bin/signal -addr 127.0.0.1:8888 -dev
 
 # 2. Local HTTPS testing with in-memory self-signed cert (scoped to localhost / *.localhost / 127.0.0.1 / ::1)
-SIGNAL_SECRET=dev-cluster-secret \
-./bin/signal -addr 127.0.0.1:8888 -tls-auto
+SIGNAL_SECRET=dev-cluster-secret-16b \
+./bin/signal -addr 127.0.0.1:8888 -dev -tls-auto
 
 # 3. Throwaway local testing only: explicitly allow anonymous Agent registrations
-./bin/signal -addr 127.0.0.1:8888 -allow-anonymous-agents
+./bin/signal -addr 127.0.0.1:8888 -dev -allow-anonymous-agents
 ```
 
 > [!WARNING]
@@ -69,8 +69,8 @@ Create `/etc/webrtc-gateway/server.yaml` (see [`configs/server.example.yaml`](ht
 
 ```yaml
 addr: "0.0.0.0:443"
-portal_domain: "portal.example.com"
-sandbox_domain: "sandbox.example.net"
+portal_origin: "https://portal.example.com"
+sandbox_origin: "https://*.sandbox.example.net"
 tls_cert: "/etc/webrtc-gateway/certs/fullchain.pem"
 tls_key: "/etc/webrtc-gateway/certs/privkey.pem"
 bound_keys_file: "/var/lib/webrtc-gateway/bound-keys.json"
@@ -112,7 +112,7 @@ WantedBy=multi-user.target
 
 ## Case 3: Behind an Nginx or Caddy Reverse Proxy
 
-**Summary**: When port 443 is already managed by Nginx or Caddy, bind `signal` to `127.0.0.1:8888`, forward the original `Host`, `X-Forwarded-For`, `X-Forwarded-Proto`, and WebSocket `Upgrade` headers, and list the proxy's real CIDR in `-trusted-proxies` if it runs on another host or container bridge.
+**Summary**: When port 443 is already managed by Nginx or Caddy, bind `signal` to `127.0.0.1:8888`, forward the original `Host`, `X-Forwarded-For`, and WebSocket `Upgrade` headers (external scheme and port are authoritatively declared via `-portal-origin` and `-sandbox-origin`, with zero runtime `X-Forwarded-Proto` guessing), and list the proxy's real CIDR in `-trusted-proxies` if it runs on another host or container bridge.
 
 ### 3.1 Start the Signaling Backend
 
@@ -120,8 +120,8 @@ WantedBy=multi-user.target
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ./bin/signal \
   -addr 127.0.0.1:8888 \
-  -portal-domain portal.example.com \
-  -sandbox-domain sandbox.example.net \
+  -portal-origin https://portal.example.com \
+  -sandbox-origin 'https://*.sandbox.example.net' \
   -bound-keys-file /var/lib/webrtc-gateway/bound-keys.json \
   -trusted-proxies "127.0.0.0/8,::1/128"
 ```
@@ -148,7 +148,6 @@ server {
         proxy_set_header Connection $connection_upgrade;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
     }
@@ -158,7 +157,6 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
@@ -181,7 +179,7 @@ portal.example.com, *.sandbox.example.net {
 
 ## Case 4: Behind a CDN / Edge Proxy & Per-Node Secret Isolation
 
-**Summary**: Place Go `signal` behind any CDN or L7 edge proxy with `-trusted-proxies` and the single-value `-client-ip-header` flag (such as `CF-Connecting-IP`, `Fastly-Client-IP`, `True-Client-IP`, `CloudFront-Viewer-Address`, or `X-Real-IP`), and pair it with `-node-secrets-file` when multiple nodes share one signaling instance so a node-specific secret strictly overrides the global `SIGNAL_SECRET` without fallback.
+**Summary**: Place Go `signal` behind any CDN or L7 edge proxy with `-trusted-proxies` and the single-value `-client-ip-header` flag (such as `CF-Connecting-IP`, `Fastly-Client-IP`, `True-Client-IP`, `CloudFront-Viewer-Address`, or `X-Real-IP`), and pair it with `-node-secrets-file` when multiple nodes share one signaling instance (minimum 16 bytes per secret; a node-specific secret strictly overrides the global `SIGNAL_SECRET` without fallback).
 
 ### 4.1 Self-Hosted Go Signal Behind a CDN Proxy
 
@@ -191,8 +189,8 @@ Configure strict origin TLS on your CDN (e.g. Cloudflare, Fastly, or CloudFront)
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ./bin/signal \
   -addr 0.0.0.0:443 \
-  -portal-domain portal.example.com \
-  -sandbox-domain sandbox.example.net \
+  -portal-origin https://portal.example.com \
+  -sandbox-origin 'https://*.sandbox.example.net' \
   -bound-keys-file /var/lib/webrtc-gateway/bound-keys.json \
   -node-secrets-file /etc/webrtc-gateway/node-secrets.yaml \
   -tls-cert /etc/webrtc-gateway/certs/origin.pem \
@@ -219,14 +217,14 @@ When `-node-secrets-file` is set without a global `SIGNAL_SECRET`, only listed n
 
 ## Case 5: Tier 2 Single-Root Same-Site Wildcard (Trusted Apps Only)
 
-**Summary**: If you currently own only one root domain and expose solely mutually trusted personal intranet services, explicitly opt into `-allow-same-site-sandbox` (`ALLOW_SAME_SITE_SANDBOX=true`) using `portal.example.com` and a wildcard `*.sbx.example.com` certificate (the server emits `Origin-Agent-Cluster: ?1`).
+**Summary**: If you currently own only one root domain and expose solely mutually trusted personal intranet services, explicitly opt into `-allow-same-site-sandbox` (`ALLOW_SAME_SITE_SANDBOX=true`) using `https://portal.example.com` and a wildcard `https://*.sbx.example.com` certificate (the server emits `Origin-Agent-Cluster: ?1`).
 
 ```bash
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ./bin/signal \
   -addr 0.0.0.0:443 \
-  -portal-domain portal.example.com \
-  -sandbox-domain sbx.example.com \
+  -portal-origin https://portal.example.com \
+  -sandbox-origin 'https://*.sbx.example.com' \
   -allow-same-site-sandbox \
   -bound-keys-file /var/lib/webrtc-gateway/bound-keys.json \
   -tls-cert /etc/webrtc-gateway/certs/wildcard-example.pem \
@@ -234,7 +232,7 @@ SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ```
 
 > [!CAUTION]
-> In this mode, the Portal and sandbox subdomains share the same eTLD+1 (same-site), removing browser site-level isolation; the Portal displays a persistent same-site warning banner. Use a distinct eTLD+1 `-sandbox-host` (Tier 1) or `-sandbox-domain` (Tier 3) for multi-user or untrusted apps.
+> In this mode, the Portal and sandbox subdomains share the same eTLD+1 (same-site), removing browser site-level isolation; the Portal displays a persistent Tier 2 warning banner. Migrate to a distinct eTLD+1 Tier 1 cross-site wildcard `-sandbox-origin 'https://*.sandbox.example.net'` for multi-user or untrusted apps.
 
 ---
 
@@ -246,8 +244,9 @@ SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 
 ```bash
 cat <<'EOF' > .env
-PORTAL_DOMAIN=portal.example.com
-SANDBOX_DOMAIN=sandbox.example.net
+PORTAL_ORIGIN=https://portal.example.com
+SANDBOX_ORIGIN=https://*.sandbox.example.net
+SIGNAL_URL=wss://portal.example.com/ws
 SIGNAL_SECRET=replace-with-random-cluster-secret
 ACCESS_SECRET=unused-on-server-only-host
 TRUSTED_PROXIES=127.0.0.0/8,::1/128
@@ -284,11 +283,11 @@ docker run -d \
 
 ---
 
-## Case 7: Tier 1 No-Wildcard Dual Fixed Domains & External `-static` Override
+## Case 7: Tier 2 Fixed Cross-Site Host & External `-static` Override
 
-**Summary**: When wildcard certificates are unavailable, use `-sandbox-host` (Tier 1 dual fixed domains with two ordinary HTTP-01 certs) for cross-site isolation; pass `-static` to override embedded web assets without rebuilding Go binaries.
+**Summary**: When wildcard certificates are unavailable for a single-node or mutually trusted setup, use a fixed cross-site `-sandbox-origin https://app.example.net` (two ordinary HTTP-01 certs; Portal displays the Tier 2 warning banner); pass `-static` to override embedded web assets without rebuilding Go binaries.
 
-### 7.1 Tier 1 Cross-Site Dual Fixed Domains (Zero Wildcard Certs)
+### 7.1 Tier 2 Fixed Cross-Site Host (Zero Wildcard Certs)
 
 Point two fixed hostnames on distinct eTLD+1 sites (`portal.example.com` and `app.example.net`) to the server with ordinary ACME HTTP-01 certificates:
 
@@ -296,8 +295,8 @@ Point two fixed hostnames on distinct eTLD+1 sites (`portal.example.com` and `ap
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ./bin/signal \
   -addr 0.0.0.0:443 \
-  -portal-domain portal.example.com \
-  -sandbox-host app.example.net \
+  -portal-origin https://portal.example.com \
+  -sandbox-origin https://app.example.net \
   -bound-keys-file /var/lib/webrtc-gateway/bound-keys.json \
   -tls-cert /etc/webrtc-gateway/certs/dual-fixed.pem \
   -tls-key /etc/webrtc-gateway/certs/dual-fixed.key
@@ -313,8 +312,8 @@ npm --prefix web run build
 SIGNAL_SECRET_FILE=/etc/webrtc-gateway/signal.secret \
 ./bin/signal \
   -addr 127.0.0.1:8888 \
-  -portal-domain portal.example.com \
-  -sandbox-domain sandbox.example.net \
+  -portal-origin https://portal.example.com \
+  -sandbox-origin 'https://*.sandbox.example.net' \
   -static /srv/webrtc-gateway/web/dist
 ```
 

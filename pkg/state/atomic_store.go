@@ -7,44 +7,13 @@ import (
 	"sync"
 )
 
-// AtomicFileStore serializes crash-safe atomic JSON/binary state persistence to disk.
-// Stale snapshots with a version <= lastWrittenVer are skipped so out-of-order concurrent
-// callers can never roll back newer revocations or key bindings.
-// Concurrent versioned Save() calls coalesce onto the newest snapshot while still
-// guaranteeing every caller waits until a version >= its own is durably flushed.
-type AtomicFileStore struct {
-	path string
-
-	mu             sync.Mutex
-	cond           *sync.Cond
-	writing        bool
-	lastWrittenVer uint64
-	lastErr        error
-	hasPending     bool
-	pendingVer     uint64
-	pendingPayload []byte
-}
-
-func NewAtomicFileStore(path string) *AtomicFileStore {
-	s := &AtomicFileStore{path: path}
-	s.cond = sync.NewCond(&s.mu)
-	return s
-}
-
-func (s *AtomicFileStore) Path() string {
-	if s == nil {
-		return ""
-	}
-	return s.path
-}
-
-// CheckWritable verifies at startup that the target directory exists (or can be created)
+// CheckWritable verifies at startup that the parent directory of path exists (or can be created)
 // and is writable by the current user (Fail-Closed for misconfigured container mounts).
-func (s *AtomicFileStore) CheckWritable() error {
-	if s == nil || s.path == "" {
+func CheckWritable(path string) error {
+	if path == "" {
 		return nil
 	}
-	dir := filepath.Dir(s.path)
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("state: create dir %q: %w", dir, err)
 	}
@@ -58,97 +27,16 @@ func (s *AtomicFileStore) CheckWritable() error {
 	return nil
 }
 
-// Save atomically writes payload to s.path using a unique temp file + fsync + rename + dir fsync.
-// If ver > 0 and ver <= lastWrittenVer, Save is a no-op and returns nil.
-// Concurrent callers with ver > 0 coalesce into the highest pending version while preserving
-// durability: Save returns nil only once a version >= ver has been fsynced and renamed.
-func (s *AtomicFileStore) Save(ver uint64, payload []byte) error {
-	if s == nil || s.path == "" {
+// WriteAtomic writes payload to path via unique temp file -> chmod -> write -> fsync -> close ->
+// atomic rename -> best-effort parent directory fsync.
+func WriteAtomic(path string, payload []byte, perm os.FileMode) error {
+	if path == "" {
 		return nil
 	}
-
-	s.mu.Lock()
-	if ver == 0 {
-		for s.writing {
-			s.cond.Wait()
-		}
-		s.writing = true
-		s.mu.Unlock()
-
-		err := s.writeAtomic(payload)
-
-		s.mu.Lock()
-		s.writing = false
-		s.cond.Broadcast()
-		s.mu.Unlock()
-		return err
+	if perm == 0 {
+		perm = 0600
 	}
-
-	if ver <= s.lastWrittenVer {
-		s.mu.Unlock()
-		return nil
-	}
-	if !s.hasPending || ver > s.pendingVer {
-		s.hasPending = true
-		s.pendingVer = ver
-		s.pendingPayload = payload
-	}
-
-	for {
-		if ver <= s.lastWrittenVer {
-			s.mu.Unlock()
-			return nil
-		}
-		if s.writing {
-			s.cond.Wait()
-			if ver <= s.lastWrittenVer {
-				s.mu.Unlock()
-				return nil
-			}
-			// If our batch finished with an error and nothing newer superseded it, report that error.
-			if !s.writing && !s.hasPending && s.lastErr != nil {
-				err := s.lastErr
-				s.mu.Unlock()
-				return err
-			}
-			continue
-		}
-		if !s.hasPending {
-			err := s.lastErr
-			s.mu.Unlock()
-			return err
-		}
-
-		writeVer := s.pendingVer
-		writePayload := s.pendingPayload
-		s.hasPending = false
-		s.pendingVer = 0
-		s.pendingPayload = nil
-		s.writing = true
-		s.mu.Unlock()
-
-		err := s.writeAtomic(writePayload)
-
-		s.mu.Lock()
-		s.writing = false
-		s.lastErr = err
-		if err == nil && writeVer > s.lastWrittenVer {
-			s.lastWrittenVer = writeVer
-		}
-		s.cond.Broadcast()
-		if err != nil {
-			s.mu.Unlock()
-			return err
-		}
-		if ver <= s.lastWrittenVer {
-			s.mu.Unlock()
-			return nil
-		}
-	}
-}
-
-func (s *AtomicFileStore) writeAtomic(payload []byte) error {
-	dir := filepath.Dir(s.path)
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("state: create dir %q: %w", dir, err)
 	}
@@ -166,7 +54,7 @@ func (s *AtomicFileStore) writeAtomic(payload []byte) error {
 		}
 	}()
 
-	if err := f.Chmod(0600); err != nil {
+	if err := f.Chmod(perm); err != nil {
 		return fmt.Errorf("state: chmod temp file: %w", err)
 	}
 	if _, err := f.Write(payload); err != nil {
@@ -178,8 +66,8 @@ func (s *AtomicFileStore) writeAtomic(payload []byte) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("state: close temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		return fmt.Errorf("state: rename %q -> %q: %w", tmpPath, s.path, err)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("state: rename %q -> %q: %w", tmpPath, path, err)
 	}
 	cleanup = false
 
@@ -188,5 +76,91 @@ func (s *AtomicFileStore) writeAtomic(payload []byte) error {
 		_ = df.Sync()
 		_ = df.Close()
 	}
+	return nil
+}
+
+// LatestFileWriter serializes and coalesces concurrent versioned atomic snapshot writes.
+//
+// Invariants:
+//   - Disk state is strictly monotonic: once version V has been submitted, no older version < V
+//     can ever overwrite latestPayload or roll back disk state, even after transient write errors.
+//   - Save(ver, payload) returns nil ONLY after a version >= ver has been durably fsynced and renamed.
+type LatestFileWriter struct {
+	path string
+
+	mu             sync.Mutex
+	latestVer      uint64
+	latestPayload  []byte
+	lastWrittenVer uint64
+
+	writeMu sync.Mutex
+}
+
+func NewLatestFileWriter(path string) *LatestFileWriter {
+	return &LatestFileWriter{path: path}
+}
+
+func (w *LatestFileWriter) Path() string {
+	if w == nil {
+		return ""
+	}
+	return w.path
+}
+
+func (w *LatestFileWriter) CheckWritable() error {
+	if w == nil {
+		return nil
+	}
+	return CheckWritable(w.path)
+}
+
+// Save durably writes the highest submitted snapshot >= ver to disk.
+// Callers passing ver == 0 perform an unversioned serialized atomic write.
+func (w *LatestFileWriter) Save(ver uint64, payload []byte) error {
+	if w == nil || w.path == "" {
+		return nil
+	}
+	if ver == 0 {
+		w.writeMu.Lock()
+		defer w.writeMu.Unlock()
+		return WriteAtomic(w.path, payload, 0600)
+	}
+
+	w.mu.Lock()
+	if ver <= w.lastWrittenVer {
+		w.mu.Unlock()
+		return nil
+	}
+	if ver > w.latestVer {
+		w.latestVer = ver
+		w.latestPayload = payload
+	}
+	w.mu.Unlock()
+
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+
+	w.mu.Lock()
+	if ver <= w.lastWrittenVer {
+		w.mu.Unlock()
+		return nil
+	}
+	targetVer := w.latestVer
+	targetPayload := w.latestPayload
+	w.mu.Unlock()
+
+	if err := WriteAtomic(w.path, targetPayload, 0600); err != nil {
+		// Retain latestVer/latestPayload intact so subsequent retries never roll back to older versions.
+		return err
+	}
+
+	w.mu.Lock()
+	if targetVer > w.lastWrittenVer {
+		w.lastWrittenVer = targetVer
+	}
+	if w.latestVer == targetVer {
+		w.latestPayload = nil
+	}
+	w.mu.Unlock()
 	return nil
 }

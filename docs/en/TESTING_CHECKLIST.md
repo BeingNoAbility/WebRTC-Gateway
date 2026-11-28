@@ -20,9 +20,13 @@ Targeted suite runs and inventory lookup:
 # Inspect live Go test inventory directly from source
 go test -list . ./...
 
-# Go race suite and fuzz smoke tests
-go test -race -count=1 ./...
-go test -run=^$ -fuzz=. -fuzztime=5s ./pkg/protocol ./pkg/proxy
+# Go race suite (with embedded web) and per-target fuzz smoke tests
+go test -race -count=1 -tags embedweb ./...
+for pkg in ./pkg/protocol ./pkg/proxy ./pkg/signaling; do
+  for ft in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz'); do
+    go test -run='^$' -fuzz="^${ft}\$" -fuzztime=2s "$pkg"
+  done
+done
 
 # Real TS module tests, black-box signaling conformance, release hygiene, and Chrome CDP E2E
 npm --prefix web run build && npm --prefix web test
@@ -66,4 +70,4 @@ Headless Linux Chrome CI cannot capture every browser engine or real-world netwo
 - **Safari / WebKit (macOS and iOS)**: Storage partitioning, background tab suspension and silent reconnect, SW wake-up, and `206 Range` media seeking.
 - **Firefox (Desktop)**: DTLS/SCTP interoperability, Service Worker Fetch interception, and cross-site sandbox navigation.
 - **Mobile handoffs and symmetric NAT**: Cellular ↔ Wi-Fi transitions and end-to-end encrypted traversal through a self-hosted TURN server.
-- **Production reverse proxies and real TLS**: Tier 1 dual fixed domains, Tier 2 same-site wildcard, and Tier 3 dual-domain wildcard behind Nginx or Caddy, covering WebSocket upgrades, trusted client-IP propagation, and certificate hot-reload.
+- **Production reverse proxies and real TLS**: Tier 1 cross-site wildcard and Tier 2 restricted modes (fixed cross-site host / same-site wildcard) behind Nginx or Caddy, covering WebSocket upgrades, trusted client-IP propagation, and certificate hot-reload.

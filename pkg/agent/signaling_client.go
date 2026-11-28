@@ -141,8 +141,12 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 	defer connCancel()
 	sendCh := make(chan []byte, 256)
 
-	var lastAlive atomic.Int64
-	lastAlive.Store(time.Now().UnixNano())
+	connStart := time.Now()
+	var lastAliveNanos atomic.Int64
+	touchAlive := func() {
+		lastAliveNanos.Store(int64(time.Since(connStart)))
+	}
+	touchAlive()
 
 	// Writer & RFC 6455 Ping keepalive goroutine.
 	go func() {
@@ -174,12 +178,12 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 					connCancel()
 					return
 				}
-				lastAlive.Store(time.Now().UnixNano())
+				touchAlive()
 			}
 		}
 	}()
 
-	// 60s liveness watchdog: catches silently wedged or half-open signaling sockets even if sendCh starves pings.
+	// 60s monotonic liveness watchdog: catches silently wedged or half-open signaling sockets even if sendCh starves pings.
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -194,7 +198,8 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 			case <-connCtx.Done():
 				return
 			case <-watchTicker.C:
-				if time.Since(time.Unix(0, lastAlive.Load())) > agentSignalReadTimeout {
+				idle := time.Since(connStart) - time.Duration(lastAliveNanos.Load())
+				if idle > agentSignalReadTimeout {
 					log.Printf("[Agent] Signaling connection read/keepalive timeout (%v)", agentSignalReadTimeout)
 					connCancel()
 					return
@@ -225,7 +230,7 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read challenge: %w", err)
 	}
-	lastAlive.Store(time.Now().UnixNano())
+	touchAlive()
 	var ch signaling.ChallengeDTO
 	if err := json.Unmarshal(chRaw, &ch); err != nil || ch.Type != signaling.TypeChallenge || ch.Nonce == "" {
 		return time.Time{}, errors.New("invalid signaling challenge")
@@ -249,7 +254,7 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read register ack: %w", err)
 	}
-	lastAlive.Store(time.Now().UnixNano())
+	touchAlive()
 	var ack signaling.InboundEnvelope
 	if err := json.Unmarshal(ackRaw, &ack); err != nil || ack.Type != signaling.TypeRegistered {
 		return time.Time{}, fmt.Errorf("registration rejected: %s (%s)", ack.Code, ack.Error)
@@ -275,7 +280,7 @@ func (a *Agent) runOneSignalingConn(ctx context.Context, dialURL, redactedURL st
 		if err != nil {
 			return registeredAt, err
 		}
-		lastAlive.Store(time.Now().UnixNano())
+		touchAlive()
 		var env signaling.InboundEnvelope
 		if err := json.Unmarshal(raw, &env); err != nil {
 			continue

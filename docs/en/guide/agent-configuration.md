@@ -27,7 +27,8 @@ See complete templates in [`configs/agent.example.yaml`](https://github.com/Bein
 | `-target` | `TARGET_URL` | `target_url` | empty | Local HTTP/HTTPS target URL (mutually exclusive with `-dir`/`-file`) |
 | `-dir` | `DIR_PATH` | `dir_path` | empty | Read-only static directory (`os.Root` adapter) |
 | `-file` | `FILE_PATH` | `file_path` | empty | Read-only single file (`os.Root` adapter) |
-| `-hide-dotfiles` | `P2P_HIDE_DOTFILES` | `hide_dotfiles` | `true` | Hide dotfiles and in-root symlinks pointing to dotfiles |
+| `-hide-dotfiles` | `P2P_HIDE_DOTFILES` | `hide_dotfiles` | `true` | Hide dotfiles and dot-prefixed directories |
+| `-follow-symlinks` | `FOLLOW_SYMLINKS` | `follow_symlinks` | `false` | Opt-in bounded symlink traversal strictly confined to root and active capability `path_prefix` (default Fail-Closed `O_NOFOLLOW` rejects all symlinks) |
 | `-file-inline-active` | `FILE_INLINE_ACTIVE` | `file_inline_active` | `false` | Permit inline scripts in served static files (disables default all-file `CSP: sandbox`) |
 | `-upstream-host` | `UPSTREAM_HOST` | `upstream_host` | empty | Override upstream virtual-host `Host` header (RFC 9110 `host[:port]`, valid with `-target` only; also applies to `Origin`, `Location`, and CookieJar) |
 | `-proxy` | `PROXY_URL` | `proxy_url` | empty | Outbound HTTP/HTTPS/SOCKS5 proxy (fails closed on invalid URL) |
@@ -36,7 +37,7 @@ See complete templates in [`configs/agent.example.yaml`](https://github.com/Bein
 | `-ice-mdns` | `ICE_MDNS` | `ice_mdns` | `true` | Obfuscate LAN/Docker/VPN host ICE candidates via mDNS and Fail-Closed outbound scrubbing |
 | `-stun-servers` | `STUN_SERVERS` | `stun_servers` | `stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302` | Custom comma-separated `stun:`/`stuns:` URIs (set `none`/`off` to disable) |
 | `-turn-url` / `-turn-user` / `-turn-pass` | `TURN_URL` / `TURN_USER` / `TURN_PASS(_FILE)` | `turn_*` | empty | User-run TURN relay configuration |
-| `-max-streams` | `MAX_STREAMS` | `max_streams` | `512` | Global concurrent P2PMux V7 stream ceiling |
+| `-max-streams` | `MAX_STREAMS` | `max_streams` | `512` | Global concurrent P2PMux V8 stream ceiling |
 | `-metrics-addr` | `METRICS_ADDR` | `metrics_addr` | empty | Prometheus `/metrics` and `/healthz` listen address |
 | `-portal-url` | `PORTAL_URL` | `portal_url` | empty | Portal base URL for printing pinned and share links |
 | `-mint-link` | — | — | empty | Mint an offline Ed25519 capability share link (e.g. `2h`, `7d`) and exit |
@@ -50,13 +51,13 @@ See complete templates in [`configs/agent.example.yaml`](https://github.com/Bein
 | CLI Flag | Env / Secret File | YAML Key | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `-config` | `CONFIG_FILE` | — | empty | Explicit YAML/JSON config path |
-| `-addr` | `ADDR` | `addr` | `127.0.0.1:8888` | Listen address (non-loopback fails closed without domains) |
-| `-portal-domain` | `PORTAL_DOMAIN` | `portal_domain` | empty | Portal base domain (e.g. `portal.example.com`) |
-| `-sandbox-domain` | `SANDBOX_DOMAIN` | `sandbox_domain` | empty | Wildcard sandbox domain (Tier 3 cross-site or Tier 2 same-site, e.g. `sandbox.example.net`; mutually exclusive with `-sandbox-host`) |
-| `-sandbox-host` | `SANDBOX_HOST` | `sandbox_host` | empty | Tier 1 fixed cross-site sandbox host (e.g. `app.example.net`, no wildcard cert required; mutually exclusive with `-sandbox-domain`) |
-| `-allow-same-site-sandbox` | `ALLOW_SAME_SITE_SANDBOX` | `allow_same_site_sandbox` | `false` | Explicitly allow Tier 2 single-root same-site wildcard sandbox (adds `Origin-Agent-Cluster: ?1`) |
-| `-signal-secret` | `SIGNAL_SECRET` / `SIGNAL_SECRET_FILE` | `signal_secret` | empty | Default Agent registration secret (required unless `-node-secrets-file` or `-allow-anonymous-agents`) |
-| `-node-secrets-file` | `NODE_SECRETS_FILE` | `node_secrets_file` | empty | Per-node secret map file (YAML/JSON `node_id: secret`; strictly overrides global secret with no fallback) |
+| `-addr` | `ADDR` | `addr` | `127.0.0.1:8888` | Listen address (non-loopback requires explicit origins; cannot combine with `-dev`) |
+| `-portal-origin` | `PORTAL_ORIGIN` | `portal_origin` | empty | Explicit startup Portal origin including scheme and optional port (e.g. `https://portal.example.com`) |
+| `-sandbox-origin` | `SANDBOX_ORIGIN` | `sandbox_origin` | empty | Explicit startup Sandbox origin: Tier 1 cross-site wildcard (`https://*.sandbox.example.net`) or Tier 2 restricted fixed host (`https://app.example.net`) |
+| `-dev` | `DEV_MODE` | `dev` | `false` | Explicitly enable local loopback dev mode (`localhost` + `*.localhost`; loopback `-addr` only, address-family scoped) |
+| `-allow-same-site-sandbox` | `ALLOW_SAME_SITE_SANDBOX` | `allow_same_site_sandbox` | `false` | Explicitly allow Tier 2 single-root same-site wildcard sandbox (adds `Origin-Agent-Cluster: ?1` and Tier 2 warning banner) |
+| `-signal-secret` | `SIGNAL_SECRET` / `SIGNAL_SECRET_FILE` | `signal_secret` | empty | Default Agent registration secret (minimum 16 bytes; required unless `-node-secrets-file` or `-allow-anonymous-agents`) |
+| `-node-secrets-file` | `NODE_SECRETS_FILE` | `node_secrets_file` | empty | Per-node secret map file (YAML/JSON `node_id: secret`, minimum 16 bytes each; overrides global secret with no fallback) |
 | `-allow-force-rekey` | `ALLOW_FORCE_REKEY` | `allow_force_rekey` | auto (`false` under shared secret, `true` under per-node secrets) | Allow authenticated Agents to rotate bound Ed25519 keys via `force_rekey` |
 | `-allow-anonymous-agents` | `ALLOW_ANONYMOUS_AGENTS` | `allow_anonymous_agents` | `false` | Explicitly allow anonymous Agent registration |
 | `-bound-keys-file` | `BOUND_KEYS_FILE` | `bound_keys_file` | empty | JSON file persisting per-node Ed25519 public key bindings via `AtomicFileStore` across restarts |

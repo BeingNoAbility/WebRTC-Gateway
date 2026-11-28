@@ -30,9 +30,9 @@ type serverFileConfig struct {
 	AllowForceRekey      *bool  `yaml:"allow_force_rekey"`
 	AllowAnonymousAgents bool   `yaml:"allow_anonymous_agents"`
 	BoundKeysFile        string `yaml:"bound_keys_file"`
-	PortalDomain         string `yaml:"portal_domain"`
-	SandboxDomain        string `yaml:"sandbox_domain"`
-	SandboxHost          string `yaml:"sandbox_host"`
+	PortalOrigin         string `yaml:"portal_origin"`
+	SandboxOrigin        string `yaml:"sandbox_origin"`
+	DevMode              bool   `yaml:"dev"`
 	AllowSameSiteSandbox bool   `yaml:"allow_same_site_sandbox"`
 	AllowAllOrigins      bool   `yaml:"allow_all_origins"`
 	MaxIPConns           int    `yaml:"max_ip_conns"`
@@ -47,19 +47,19 @@ func main() {
 	vShort := fs.Bool("v", false, "Print version and exit")
 	vLong := fs.Bool("version", false, "Print version and exit")
 	cfgFlag := fs.String("config", "", "Explicit YAML/JSON config file path (also CONFIG_FILE; never auto-loaded from CWD)")
-	addrFlag := fs.String("addr", "", "Listen address (default 127.0.0.1:8888; non-loopback requires domains)")
+	addrFlag := fs.String("addr", "", "Listen address (default 127.0.0.1:8888; non-loopback requires explicit origins)")
 	staticFlag := fs.String("static", "", "Optional external static directory (overrides embedded web assets)")
 	tlsAutoFlag := fs.Bool("tls-auto", false, "Generate self-signed loopback/domain TLS certificate")
 	tlsCertFlag := fs.String("tls-cert", "", "TLS certificate PEM path (hot-reloaded)")
 	tlsKeyFlag := fs.String("tls-key", "", "TLS private key PEM path (hot-reloaded)")
-	signalSecretFlag := fs.String("signal-secret", "", "Shared secret for Agent HTTP Upgrade Bearer auth (prefer SIGNAL_SECRET_FILE or SIGNAL_SECRET)")
-	nodeSecretsFlag := fs.String("node-secrets-file", "", "Optional YAML/JSON map of node_id -> per-node registration secret")
+	signalSecretFlag := fs.String("signal-secret", "", "Shared secret (>=16 bytes) for Agent HTTP Upgrade Bearer auth (prefer SIGNAL_SECRET_FILE or SIGNAL_SECRET)")
+	nodeSecretsFlag := fs.String("node-secrets-file", "", "Optional YAML/JSON map of node_id -> per-node registration secret (>=16 bytes)")
 	allowForceRekeyFlag := fs.Bool("allow-force-rekey", false, "Allow authenticated agents to rotate bound node keys via force_rekey (default false for shared secret)")
 	allowAnonFlag := fs.Bool("allow-anonymous-agents", false, "Explicitly permit anonymous Agent registration without SIGNAL_SECRET")
 	boundKeysFlag := fs.String("bound-keys-file", "", "Optional JSON file path to persist Ed25519 node bindings across restarts")
-	portalDomainFlag := fs.String("portal-domain", "", "Portal base domain (e.g. portal.example.com)")
-	sandboxDomainFlag := fs.String("sandbox-domain", "", "Wildcard sandbox domain for Tier 2/3 (e.g. sandbox.example.net)")
-	sandboxHostFlag := fs.String("sandbox-host", "", "Fixed cross-site sandbox host for Tier 1 without wildcard TLS (e.g. app.example.net)")
+	portalOriginFlag := fs.String("portal-origin", "", "Explicit Portal origin (e.g. https://portal.example.com)")
+	sandboxOriginFlag := fs.String("sandbox-origin", "", "Explicit Sandbox origin: wildcard https://*.sandbox.example.net (Tier 1) or fixed https://app.example.net (Tier 2 restricted)")
+	devFlag := fs.Bool("dev", false, "Explicit local loopback dev mode (*.localhost; requires loopback -addr)")
 	allowSameSiteFlag := fs.Bool("allow-same-site-sandbox", false, "Allow Tier 2 same-site wildcard sandbox with Origin-Agent-Cluster isolation")
 	allowAllOriginsFlag := fs.Bool("allow-all-origins", false, "Allow all WebSocket Origins (dev/testing only)")
 	maxIPConnsFlag := fs.Int("max-ip-conns", 0, "Max concurrent WebSocket connections per IP (default 64)")
@@ -113,9 +113,9 @@ func main() {
 	allowForceRekey, allowForceRekeySet := mustBool(*allowForceRekeyFlag, explicit["allow-force-rekey"], "ALLOW_FORCE_REKEY", fileCfg.AllowForceRekey, false, false)
 	allowAnon, _ := mustBool(*allowAnonFlag, explicit["allow-anonymous-agents"], "ALLOW_ANONYMOUS_AGENTS", nil, fileCfg.AllowAnonymousAgents, false)
 	boundKeysFile := config.ResolveString(*boundKeysFlag, explicit["bound-keys-file"], "BOUND_KEYS_FILE", fileCfg.BoundKeysFile, "")
-	portalDomain := config.ResolveString(*portalDomainFlag, explicit["portal-domain"], "PORTAL_DOMAIN", fileCfg.PortalDomain, "")
-	sandboxDomain := config.ResolveString(*sandboxDomainFlag, explicit["sandbox-domain"], "SANDBOX_DOMAIN", fileCfg.SandboxDomain, "")
-	sandboxHost := config.ResolveString(*sandboxHostFlag, explicit["sandbox-host"], "SANDBOX_HOST", fileCfg.SandboxHost, "")
+	portalOrigin := config.ResolveString(*portalOriginFlag, explicit["portal-origin"], "PORTAL_ORIGIN", fileCfg.PortalOrigin, "")
+	sandboxOrigin := config.ResolveString(*sandboxOriginFlag, explicit["sandbox-origin"], "SANDBOX_ORIGIN", fileCfg.SandboxOrigin, "")
+	devMode, _ := mustBool(*devFlag, explicit["dev"], "DEV_MODE", nil, fileCfg.DevMode, false)
 	allowSameSite, _ := mustBool(*allowSameSiteFlag, explicit["allow-same-site-sandbox"], "ALLOW_SAME_SITE_SANDBOX", nil, fileCfg.AllowSameSiteSandbox, false)
 	allowAllOrigins, _ := mustBool(*allowAllOriginsFlag, explicit["allow-all-origins"], "SIGNAL_ALLOW_ALL_ORIGINS", nil, fileCfg.AllowAllOrigins, false)
 	maxIPConns := mustInt(*maxIPConnsFlag, explicit["max-ip-conns"], "MAX_IP_CONNS", fileCfg.MaxIPConns, signaling.DefaultMaxIPConns, 1, 10000)
@@ -172,9 +172,9 @@ func main() {
 		AllowForceRekey:      allowForceRekeyPtr,
 		AllowAnonymousAgents: allowAnon,
 		BoundKeysFile:        boundKeysFile,
-		PortalDomain:         portalDomain,
-		SandboxDomain:        sandboxDomain,
-		SandboxHost:          sandboxHost,
+		PortalOrigin:         portalOrigin,
+		SandboxOrigin:        sandboxOrigin,
+		DevMode:              devMode,
 		AllowSameSiteSandbox: allowSameSite,
 		AllowAllOrigins:      allowAllOrigins,
 		MaxIPConns:           maxIPConns,

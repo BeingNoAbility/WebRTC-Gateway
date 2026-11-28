@@ -1,19 +1,15 @@
 /**
- * V7 Portal TunnelBridge (Untrusted Sandbox Boundary)
- * - Bridges Service Worker `bridgePort` <-> `PoolMux` (32 reusable HTTP pool DCs + dynamic `"p2pws"` DCs).
- * - Treats the ENTIRE sandbox origin as an untrusted tenant:
- *     * Strips forbidden/spoofed headers before sending V7 TLV to Go Agent.
- *     * Strictly bounds-checks `REQ_BODY_CHUNK` offsets/lengths & validates `WS_CLOSE` arguments.
- *     * Enforces active request-port (256) and WebSocket (64) concurrency caps.
- *     * Unconditionally resets half-open streams in `closeBoth()` so early responses on body-bearing
- *       requests never leak HTTP pool slots.
- *     * Binds `wsPort.onmessage` BEFORE `await openWSStream()` so early frames/closes are never dropped.
- *     * Registers one-time 128-bit `enterNonce` tokens with SW over `bridgePort` before mounting `appFrame`.
- *     * Propagates V7 `cookieDeltas` back to Portal so SW wakeups never roll back cookies.
+ * Portal TunnelBridge (Untrusted Sandbox Boundary — P2PMux V8 + Transferable Streams)
+ * - Bridges Service Worker `bridgePort` <-> P2PMux V8 (`PoolMux` 12 ordered lanes carrying both HTTP & WS).
+ * - Uses native Transferable ReadableStreams over MessagePort for HTTP request & response bodies
+ *   (zero manual IPC chunk/credit loops).
+ * - Strips forbidden/spoofed headers, enforces concurrency caps (256 HTTP / 64 WS), sends `REQ_ACK`
+ *   immediately after `openHTTPStream` puts `HEADERS` on the wire, and pushes WS `cookieDeltas`
+ *   back to SW over the trusted `bridgePort`.
  */
 
 import { ErrorCode, MAX_WS_MESSAGE_BYTES } from '../../protocol/frame';
-import type { DataChannelLike, PoolMux, PoolStream, WSStream } from '../../protocol/mux';
+import type { PoolMux, PoolStream, WSStream } from '../../protocol/mux';
 import {
   CookieOp,
   FETCH_CTX_VALID_MASK,
@@ -26,6 +22,7 @@ import {
 } from '../../protocol/tlv';
 import {
   isClientCookieMutation,
+  isCookieDelta,
   isRecord,
   type BackendMeta,
   type CookieDelta,
@@ -37,10 +34,10 @@ import {
 
 const MAX_CONCURRENT_REQ_PORTS = 256;
 const MAX_CONCURRENT_WS_STREAMS = 64;
-const MAX_REQ_BODY_CHUNK_BYTES = 256 * 1024;
-const MAX_PENDING_HTTP_WRITE_BYTES = 8 * 1024 * 1024;
 const MAX_PENDING_WS_WRITE_BYTES = MAX_WS_MESSAGE_BYTES; // 16 MiB strict per-WS outbound buffer cap
 const WS_CLOSE_ACK_TIMEOUT_MS = 2_000;
+const DOWNLOAD_STREAM_HWM_BYTES = 512 * 1024;
+const MAX_ROUTE_SYNC_LEN = 4096;
 
 const FORBIDDEN_SANDBOX_REQ_HEADERS = new Set([
   'host',
@@ -58,6 +55,12 @@ const FORBIDDEN_SANDBOX_REQ_HEADERS = new Set([
   'x-forwarded-host',
   'x-forwarded-proto',
   'x-forwarded-port',
+  'x-forwarded-prefix',
+  'x-original-host',
+  'x-host',
+  'x-forwarded-ssl',
+  'front-end-https',
+  'x-client-ip',
   'x-real-ip',
   'cf-connecting-ip',
   'true-client-ip',
@@ -69,7 +72,6 @@ const FORBIDDEN_SANDBOX_REQ_HEADERS = new Set([
 ]);
 
 const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
 
 export interface TunnelBridgeCallbacks {
   onRouteSync?: (path: string) => void;
@@ -127,15 +129,6 @@ function fromCookieTLVEntries(entries: CookieTLVEntry[] | undefined): CookieDelt
   });
 }
 
-function isValidChunkBounds(up: { buffer?: unknown; offset?: unknown; length?: unknown }): boolean {
-  if (!(up.buffer instanceof ArrayBuffer)) return false;
-  if (typeof up.offset !== 'number' || typeof up.length !== 'number') return false;
-  if (!Number.isInteger(up.offset) || !Number.isInteger(up.length)) return false;
-  if (up.offset < 0 || up.length < 0 || up.length > MAX_REQ_BODY_CHUNK_BYTES) return false;
-  if (up.offset + up.length > up.buffer.byteLength) return false;
-  return true;
-}
-
 function sanitizeClientWSCloseCode(code: unknown): number {
   if (typeof code === 'number' && Number.isInteger(code)) {
     if (code === 1000 || (code >= 3000 && code <= 4999)) {
@@ -145,9 +138,17 @@ function sanitizeClientWSCloseCode(code: unknown): number {
   return 1000;
 }
 
+function toUint8Chunk(chunk: unknown): Uint8Array | null {
+  if (chunk instanceof Uint8Array) return chunk;
+  if (ArrayBuffer.isView(chunk)) {
+    return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  }
+  if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
+  return null;
+}
+
 export class TunnelBridge {
   private mux: PoolMux | null = null;
-  private openWSDCFn: (() => DataChannelLike) | null = null;
   private sandboxOrigin = '';
   private meta: BackendMeta | null = null;
   private appFrame: HTMLIFrameElement | null = null;
@@ -175,13 +176,11 @@ export class TunnelBridge {
 
   setContext(
     mux: PoolMux,
-    openWSDC: () => DataChannelLike,
     sandboxOrigin: string,
     meta: BackendMeta,
     appFrame: HTMLIFrameElement | null
   ): void {
     this.mux = mux;
-    this.openWSDCFn = openWSDC;
     this.sandboxOrigin = sandboxOrigin;
     this.meta = meta;
     this.appFrame = appFrame;
@@ -198,11 +197,7 @@ export class TunnelBridge {
     this.appFrame = appFrame;
   }
 
-  /**
-   * Probes whether the sandbox Service Worker still holds the live `bridgePort`
-   * (used on silent WebRTC reconnect and before acting on `P2P_SW_EVICTED`).
-   */
-  pingSw(timeoutMs = 1_500): Promise<boolean> {
+  pingSw(timeoutMs = 3_000): Promise<boolean> {
     if (!this.bridgePort) return Promise.resolve(false);
     const pingId = `sp_${++this.swPingSeq}`;
     return new Promise<boolean>((resolve) => {
@@ -221,10 +216,6 @@ export class TunnelBridge {
     });
   }
 
-  /**
-   * Registers a one-time 128-bit `enterNonce` with the Service Worker over `bridgePort`
-   * BEFORE mounting `appFrame`, preventing external sites from invoking `/__p2p_gw__/enter`.
-   */
   registerEnterNonce(nonce: string, nextPath: string, timeoutMs = 4_000): Promise<void> {
     if (!this.bridgePort) {
       return Promise.reject(new Error('bridgePort not attached'));
@@ -296,6 +287,15 @@ export class TunnelBridge {
           }
           break;
 
+        case 'BRIDGE_CLIENT_COOKIE_DELTAS':
+          if (Array.isArray(data.deltas)) {
+            const valid = data.deltas.filter(isCookieDelta);
+            if (valid.length > 0) {
+              this.callbacks.onCookieDeltas?.(valid);
+            }
+          }
+          break;
+
         case 'TUNNEL_FETCH_REQUEST': {
           const reqPort = ev.ports?.[0];
           if (!reqPort) return;
@@ -329,10 +329,6 @@ export class TunnelBridge {
     port.start?.();
   }
 
-  /**
-   * Handles top-level window postMessages ONLY for pure UX route/title sync
-   * and SW-eviction recovery hints (verified against live `pingSw()` in Portal).
-   */
   handleWindowMessage(ev: MessageEvent): void {
     if (ev.isTrusted === false) return;
     if (!this.sandboxOrigin || ev.origin !== this.sandboxOrigin) return;
@@ -340,7 +336,13 @@ export class TunnelBridge {
     const data = ev.data;
     if (!isRecord(data) || typeof data.type !== 'string') return;
 
-    if (data.type === 'P2P_ROUTE_SYNC' && typeof data.path === 'string' && data.path.startsWith('/')) {
+    if (
+      data.type === 'P2P_ROUTE_SYNC' &&
+      typeof data.path === 'string' &&
+      data.path.startsWith('/') &&
+      data.path.length <= MAX_ROUTE_SYNC_LEN &&
+      !/[\x00-\x1f\x7f]/.test(data.path)
+    ) {
       this.callbacks.onRouteSync?.(data.path);
     } else if (data.type === 'P2P_TITLE_SYNC' && typeof data.title === 'string') {
       this.callbacks.onTitleSync?.(data.title.slice(0, 200));
@@ -350,22 +352,20 @@ export class TunnelBridge {
   }
 
   async handleFetchRequest(msg: TunnelFetchRequestMsg, reqPort: MessagePort): Promise<void> {
-    try {
-      reqPort.postMessage({ type: 'REQ_ACK', reqId: msg.reqId });
-    } catch {
-      this.closePort(reqPort);
-      return;
-    }
+    const reqBodyStream = msg.hasBody && msg.bodyStream ? msg.bodyStream : null;
 
     if (!this.mux || !this.meta) {
+      void reqBodyStream?.cancel().catch(() => {});
       this.failReqPort(reqPort, 503, 'P2P tunnel is not connected');
       return;
     }
     if (this.activePorts.size >= MAX_CONCURRENT_REQ_PORTS) {
+      void reqBodyStream?.cancel().catch(() => {});
       this.failReqPort(reqPort, 503, 'Too many concurrent tunnel requests');
       return;
     }
     if (typeof msg.target !== 'string' || !msg.target.startsWith('/')) {
+      void reqBodyStream?.cancel().catch(() => {});
       this.failReqPort(reqPort, 400, 'Invalid request target');
       return;
     }
@@ -387,6 +387,7 @@ export class TunnelBridge {
         cookieMutations,
       });
     } catch (err) {
+      void reqBodyStream?.cancel().catch(() => {});
       const reason = err instanceof Error ? err.message : 'Invalid request headers';
       this.failReqPort(reqPort, 400, reason);
       return;
@@ -394,122 +395,50 @@ export class TunnelBridge {
 
     this.activePorts.add(reqPort);
     let portClosed = false;
-    let headersSentToSw = false;
     let activeStream: PoolStream | null = null;
-    const queuedUpMsgs: RequestPortUpMsg[] = [];
-    let pendingHttpWriteBytes = 0;
-    let writeChain: Promise<void> = Promise.resolve();
-    const openAbort = new AbortController();
+    let uploadReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
-    // Always reset `activeStream` whenever `!activeStream.isClosed` on closeBoth() so early
-    // responses (e.g. 204/3xx/4xx on POST) never leave writeClosed=false and leak pool slots.
-    const closeBoth = (resetCode?: number) => {
+    const closeBoth = (resetCode?: number, sendDone = false) => {
       if (portClosed) return;
       portClosed = true;
-      openAbort.abort();
+      if (uploadReader) {
+        const r = uploadReader;
+        uploadReader = null;
+        void r.cancel().catch(() => {});
+      } else if (reqBodyStream) {
+        void reqBodyStream.cancel().catch(() => {});
+      }
+      if (sendDone) {
+        try {
+          reqPort.postMessage({ type: 'RESP_DONE' });
+        } catch {
+          // ignore
+        }
+      }
       this.closePort(reqPort);
       if (activeStream && !activeStream.isClosed) {
         activeStream.reset(resetCode ?? ErrorCode.CANCEL);
       }
     };
 
-    const dispatchUpMsg = (up: RequestPortUpMsg, stream: PoolStream) => {
-      switch (up.type) {
-        case 'REQ_BODY_CHUNK': {
-          if (!isValidChunkBounds(up)) {
-            this.failReqPort(reqPort, 400, 'Invalid request body chunk bounds');
-            closeBoth(ErrorCode.PROTOCOL_ERROR);
-            return;
-          }
-          const bytes = new Uint8Array(up.buffer, up.offset, up.length);
-          const len = bytes.byteLength;
-          if (pendingHttpWriteBytes + len > MAX_PENDING_HTTP_WRITE_BYTES) {
-            this.failReqPort(reqPort, 429, 'Request body buffer limit exceeded');
-            closeBoth(ErrorCode.FLOW_CONTROL_ERROR);
-            return;
-          }
-          pendingHttpWriteBytes += len;
-          writeChain = writeChain.then(async () => {
-            try {
-              if (portClosed || stream.isClosed) return;
-              await stream.sendData(bytes, false);
-              if (!portClosed) {
-                reqPort.postMessage({ type: 'REQ_BODY_CREDIT', bytes: len });
-              }
-            } catch (err) {
-              const reason = err instanceof Error ? err.message : 'Upload stream write failed';
-              stream.reset(ErrorCode.INTERNAL_ERROR);
-              this.failReqPort(reqPort, 502, reason);
-              closeBoth();
-            } finally {
-              pendingHttpWriteBytes = Math.max(0, pendingHttpWriteBytes - len);
-            }
-          });
-          break;
-        }
-        case 'REQ_BODY_END': {
-          writeChain = writeChain.then(async () => {
-            if (portClosed || stream.isClosed) return;
-            try {
-              await stream.finishWrite();
-            } catch (err) {
-              const reason = err instanceof Error ? err.message : 'Upload stream close failed';
-              stream.reset(ErrorCode.INTERNAL_ERROR);
-              this.failReqPort(reqPort, 502, reason);
-              closeBoth();
-            }
-          });
-          break;
-        }
-        case 'RESP_BODY_CREDIT': {
-          if (typeof up.bytes === 'number' && Number.isFinite(up.bytes) && up.bytes > 0) {
-            stream.ackConsumed(Math.trunc(up.bytes));
-          }
-          break;
-        }
-        case 'RESP_CANCEL': {
-          closeBoth(ErrorCode.CANCEL);
-          break;
-        }
-      }
-    };
-
-    // Attach reqPort listener BEFORE awaiting pool slot so early RESP_CANCEL or chunks are captured!
-    let queuedUpBytes = 0;
     reqPort.onmessage = (ev: MessageEvent) => {
       if (portClosed) return;
       const up = ev.data as RequestPortUpMsg;
-      if (!isRecord(up) || typeof up.type !== 'string') return;
-      if (!activeStream) {
-        if (up.type === 'RESP_CANCEL') {
-          closeBoth(ErrorCode.CANCEL);
-        } else {
-          const chunkLen =
-            up.type === 'REQ_BODY_CHUNK' && typeof up.length === 'number' && Number.isInteger(up.length) && up.length > 0
-              ? up.length
-              : 0;
-          if (queuedUpMsgs.length >= 128 || queuedUpBytes + chunkLen > MAX_PENDING_HTTP_WRITE_BYTES) {
-            this.failReqPort(reqPort, 429, 'Request pre-open buffer limit exceeded');
-            closeBoth(ErrorCode.FLOW_CONTROL_ERROR);
-            return;
-          }
-          queuedUpBytes += chunkLen;
-          queuedUpMsgs.push(up);
-        }
-        return;
+      if (isRecord(up) && up.type === 'RESP_CANCEL') {
+        closeBoth(ErrorCode.CANCEL);
       }
-      dispatchUpMsg(up, activeStream);
     };
     reqPort.start?.();
 
-    const finOnHeaders = !msg.hasBody;
+    const hasBody = Boolean(msg.hasBody && reqBodyStream);
     let stream: PoolStream;
     try {
-      stream = await this.mux.openHTTPStream(reqTLV, finOnHeaders, true, openAbort.signal);
+      stream = await this.mux.openHTTPStream(reqTLV, hasBody);
     } catch (err) {
       if (!portClosed) {
         const m = err instanceof Error ? err.message : 'Unable to open P2P HTTP stream';
         this.failReqPort(reqPort, 503, m);
+        closeBoth();
       }
       return;
     }
@@ -520,30 +449,92 @@ export class TunnelBridge {
     }
     activeStream = stream;
 
-    stream.onHeaders((raw) => {
-      if (portClosed) return;
-      let resp;
-      try {
-        resp = decodeResponseHeaders(raw);
-      } catch (err) {
-        const m = err instanceof Error ? err.message : 'Malformed response headers';
-        this.failReqPort(reqPort, 502, m);
-        closeBoth(ErrorCode.PROTOCOL_ERROR);
-        return;
-      }
+    // Emit REQ_ACK strictly AFTER openHTTPStream put HEADERS (with cookieMutations) on the wire!
+    try {
+      reqPort.postMessage({ type: 'REQ_ACK', reqId: msg.reqId });
+    } catch {
+      closeBoth(ErrorCode.CANCEL);
+      return;
+    }
 
-      headersSentToSw = true;
-      const isNullBody =
-        reqMethod === 'HEAD' ||
-        resp.status === 204 ||
-        resp.status === 205 ||
-        resp.status === 304 ||
-        (resp.status >= 100 && resp.status < 200);
-      const hasBody = !isNullBody && stream.hasResponseBody;
-      const cookieDeltas = fromCookieTLVEntries(resp.cookieDeltas);
-      if (cookieDeltas.length > 0) {
-        this.callbacks.onCookieDeltas?.(cookieDeltas);
+    // Pump request body from transferred ReadableStream directly into P2PMux V8 (native backpressure).
+    if (hasBody && reqBodyStream) {
+      void (async () => {
+        const reader = reqBodyStream.getReader();
+        uploadReader = reader;
+        try {
+          while (!portClosed && !stream.isClosed) {
+            const { done, value } = await reader.read();
+            if (done) {
+              if (!portClosed && !stream.isClosed) {
+                await stream.finishWrite();
+              }
+              return;
+            }
+            const bytes = toUint8Chunk(value);
+            if (!bytes) {
+              this.failReqPort(reqPort, 400, 'Invalid request body chunk type');
+              closeBoth(ErrorCode.PROTOCOL_ERROR);
+              return;
+            }
+            if (bytes.byteLength === 0) continue;
+            await stream.writeBody(bytes);
+          }
+        } catch (err) {
+          if (!portClosed && !stream.isClosed) {
+            const reason = err instanceof Error ? err.message : 'Upload stream write failed';
+            this.failReqPort(reqPort, 502, reason);
+            closeBoth(ErrorCode.INTERNAL_ERROR);
+          }
+        } finally {
+          uploadReader = null;
+          try {
+            reader.releaseLock();
+          } catch {
+            // ignore
+          }
+        }
+      })();
+    }
+
+    // Await response headers on P2PMux V8 stream.
+    let rawRespHeaders: Uint8Array;
+    try {
+      rawRespHeaders = await stream.waitResponseHeaders();
+    } catch (err) {
+      if (!portClosed) {
+        const m = err instanceof Error ? err.message : 'P2P stream reset before response headers';
+        this.failReqPort(reqPort, 502, m);
+        closeBoth();
       }
+      return;
+    }
+
+    if (portClosed) return;
+
+    let resp;
+    try {
+      resp = decodeResponseHeaders(rawRespHeaders);
+    } catch (err) {
+      const m = err instanceof Error ? err.message : 'Malformed response headers';
+      this.failReqPort(reqPort, 502, m);
+      closeBoth(ErrorCode.PROTOCOL_ERROR);
+      return;
+    }
+
+    const isNullBody =
+      reqMethod === 'HEAD' ||
+      resp.status === 204 ||
+      resp.status === 205 ||
+      resp.status === 304 ||
+      (resp.status >= 100 && resp.status < 200);
+    const hasRespBody = !isNullBody && stream.hasResponseBody;
+    const cookieDeltas = fromCookieTLVEntries(resp.cookieDeltas);
+    if (cookieDeltas.length > 0) {
+      this.callbacks.onCookieDeltas?.(cookieDeltas);
+    }
+
+    if (!hasRespBody) {
       try {
         reqPort.postMessage({
           type: 'RESP_START',
@@ -551,60 +542,117 @@ export class TunnelBridge {
           respFlags: resp.respFlags ?? 0,
           headers: resp.headers,
           cookieDeltas,
-          hasBody,
+          hasBody: false,
         });
       } catch {
-        closeBoth(ErrorCode.CANCEL);
-        return;
+        // ignore
       }
-      if (!hasBody) {
-        closeBoth();
+      // Unconditionally reset half-open upload stream on early 204/3xx/4xx responses!
+      closeBoth(ErrorCode.CANCEL, false);
+      return;
+    }
+
+    // Create a native Transferable ReadableStream backed directly by PoolStream with byte-accurate backpressure.
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
+    let unackedBytes = 0;
+    let unackedChunks = 0;
+
+    const flushCredit = () => {
+      if (unackedBytes > 0) {
+        const b = unackedBytes;
+        const c = unackedChunks;
+        unackedBytes = 0;
+        unackedChunks = 0;
+        stream.ackConsumed(b, c);
       }
-    });
+    };
+
+    const queuingStrategy =
+      typeof ByteLengthQueuingStrategy === 'function'
+        ? new ByteLengthQueuingStrategy({ highWaterMark: DOWNLOAD_STREAM_HWM_BYTES })
+        : undefined;
+
+    const respBodyStream = new ReadableStream<Uint8Array>(
+      {
+        start(controller) {
+          streamController = controller;
+        },
+        pull() {
+          flushCredit();
+        },
+        cancel() {
+          streamController = null;
+          closeBoth(ErrorCode.CANCEL, false);
+        },
+      },
+      queuingStrategy
+    );
+
+    // Post RESP_START (transferring respBodyStream) BEFORE attaching stream.onData/onEnd so
+    // buffered single-chunk responses never fire onEnd -> RESP_DONE -> closePort ahead of RESP_START!
+    try {
+      reqPort.postMessage(
+        {
+          type: 'RESP_START',
+          status: resp.status,
+          respFlags: resp.respFlags ?? 0,
+          headers: resp.headers,
+          cookieDeltas,
+          hasBody: true,
+          bodyStream: respBodyStream,
+        },
+        [respBodyStream as unknown as Transferable]
+      );
+    } catch {
+      streamController = null;
+      closeBoth(ErrorCode.CANCEL, false);
+      return;
+    }
 
     stream.onData((chunk) => {
-      if (portClosed) return;
-      const copy = new Uint8Array(chunk.byteLength);
-      copy.set(chunk);
+      if (portClosed || !streamController) return;
       try {
-        reqPort.postMessage(
-          { type: 'RESP_CHUNK', buffer: copy.buffer, offset: 0, length: copy.byteLength },
-          [copy.buffer]
-        );
+        streamController.enqueue(chunk);
+        unackedBytes += chunk.byteLength;
+        unackedChunks++;
+        if ((streamController.desiredSize ?? 1) > 0) {
+          flushCredit();
+        }
       } catch {
-        closeBoth(ErrorCode.CANCEL);
+        streamController = null;
+        closeBoth(ErrorCode.CANCEL, false);
       }
     });
 
     stream.onEnd(() => {
-      if (portClosed) return;
-      if (!headersSentToSw) {
-        this.failReqPort(reqPort, 502, 'Upstream closed stream without response headers');
-      } else {
+      const ctrl = streamController;
+      streamController = null;
+      if (ctrl) {
         try {
-          reqPort.postMessage({ type: 'RESP_END' });
+          ctrl.close();
         } catch {
           // ignore
         }
       }
-      closeBoth();
+      closeBoth(undefined, true);
     });
 
-    stream.onReset((code) => {
-      if (portClosed) return;
-      this.failReqPort(reqPort, 502, `P2P stream reset (${code})`);
-      closeBoth();
+    stream.onReset((err) => {
+      const ctrl = streamController;
+      streamController = null;
+      if (ctrl) {
+        try {
+          ctrl.error(err);
+        } catch {
+          // ignore
+        }
+      }
+      closeBoth(undefined, true);
     });
-
-    // Drain any upstream messages queued while waiting for a pool DC slot.
-    for (const queued of queuedUpMsgs.splice(0)) {
-      if (portClosed) break;
-      dispatchUpMsg(queued, stream);
-    }
   }
 
-  private async handleWsOpen(msg: TunnelWsOpenMsg, wsPort: MessagePort): Promise<void> {
-    if (!this.mux || !this.openWSDCFn) {
+  async handleWsOpen(msg: TunnelWsOpenMsg, wsPort: MessagePort): Promise<void> {
+    if (!this.mux) {
       this.rejectWsPort(wsPort, 'P2P tunnel is not connected');
       return;
     }
@@ -696,16 +744,18 @@ export class TunnelBridge {
       switch (m.type) {
         case 'WS_SEND': {
           const isBinary = m.opcode === 2;
-          const payload = isBinary
+          const payload: Uint8Array | string = isBinary
             ? m.data instanceof ArrayBuffer
               ? new Uint8Array(m.data)
               : new Uint8Array(0)
-            : textEncoder.encode(typeof m.data === 'string' ? m.data : '');
-          if (payload.byteLength > MAX_WS_MESSAGE_BYTES) {
+            : typeof m.data === 'string'
+              ? m.data
+              : '';
+          const ackLen = typeof payload === 'string' ? textEncoder.encode(payload).byteLength : payload.byteLength;
+          if (ackLen > MAX_WS_MESSAGE_BYTES) {
             finishWs(1009, 'Outbound WebSocket frame exceeds 16 MiB limit', true, true);
             return;
           }
-          const ackLen = payload.byteLength;
           if (pendingWsWriteBytes + ackLen > MAX_PENDING_WS_WRITE_BYTES) {
             finishWs(1008, 'Outbound WebSocket send queue limit exceeded', true, true);
             return;
@@ -714,7 +764,7 @@ export class TunnelBridge {
           writeChain = writeChain.then(async () => {
             try {
               if (closed || activeWS.isClosed) return;
-              await activeWS.sendWSMessage(isBinary, payload);
+              await activeWS.sendMessage(payload);
               if (!closed) {
                 wsPort.postMessage({ type: 'WS_ACK', bytes: ackLen });
               }
@@ -733,9 +783,8 @@ export class TunnelBridge {
           writeChain = writeChain.then(() => {
             if (closed) return;
             if (!activeWS.isClosed) {
-              activeWS.sendWSClose(safeCode, safeReason);
+              activeWS.close(safeCode, safeReason);
             }
-            // Wait up to 2s for peer WS_CLOSE echo so close code & wasClean propagate accurately.
             if (!closeAckTimer) {
               closeAckTimer = setTimeout(() => {
                 finishWs(safeCode, safeReason, true, true);
@@ -747,20 +796,19 @@ export class TunnelBridge {
       }
     };
 
-    // Bind wsPort.onmessage BEFORE awaiting openWSStream() so early WS_CLOSE/WS_SEND are never lost!
     wsPort.onmessage = (ev: MessageEvent) => {
       if (closed) return;
       const m = ev.data as WsPortToPortalMsg;
       if (!isRecord(m) || typeof m.type !== 'string') return;
-      if (!wsStream) {
+      if (!wsStream || !opened) {
         if (m.type === 'WS_CLOSE') {
           const safeCode = sanitizeClientWSCloseCode(m.code);
           const safeReason = typeof m.reason === 'string' ? m.reason.slice(0, 256) : '';
-          finishWs(safeCode, safeReason, false, false);
+          finishWs(safeCode, safeReason, false, Boolean(wsStream));
         } else {
           const est = estimateWsMsgBytes(m);
           if (queuedWsMsgs.length >= 64 || queuedWsBytes + est > MAX_PENDING_WS_WRITE_BYTES) {
-            finishWs(1008, 'WebSocket pre-open queue limit exceeded', true, false);
+            finishWs(1008, 'WebSocket pre-open queue limit exceeded', true, Boolean(wsStream));
             return;
           }
           queuedWsBytes += est;
@@ -772,19 +820,16 @@ export class TunnelBridge {
     };
     wsPort.start?.();
 
-    // Always track by Portal-generated internalKey so empty/duplicate untrusted wsId cannot bypass cap!
     this.activeWSStreams.set(internalKey, () => finishWs(1001, 'client navigated away', false, true));
     if (wsId) {
       this.wsAliasToKey.set(wsId, internalKey);
     }
 
-    let wsDC: DataChannelLike;
     try {
-      wsDC = this.openWSDCFn();
-      wsStream = await this.mux.openWSStream(wsDC, reqTLV);
+      wsStream = await this.mux.openWSStream(reqTLV);
     } catch (err) {
       if (!closed) {
-        const reason = err instanceof Error ? err.message : 'Unable to open WS DataChannel';
+        const reason = err instanceof Error ? err.message : 'Unable to open WS stream';
         this.rejectWsPort(wsPort, reason);
         finishWs(1006, reason, false, false);
       }
@@ -797,53 +842,74 @@ export class TunnelBridge {
     }
 
     const activeWS = wsStream;
-    activeWS.onHeaders((raw) => {
-      if (closed) return;
-      let resp;
-      try {
-        resp = decodeResponseHeaders(raw);
-      } catch {
-        this.rejectWsPort(wsPort, 'Malformed WS handshake response');
-        finishWs(1006, 'malformed ws headers', false, true);
-        return;
+    let rawRespHeaders: Uint8Array;
+    try {
+      rawRespHeaders = await activeWS.waitResponseHeaders();
+    } catch (err) {
+      if (!closed) {
+        const reason = err instanceof Error ? err.message : 'WebSocket handshake failed';
+        this.rejectWsPort(wsPort, reason);
+        finishWs(1006, reason, false, false);
       }
-      if (resp.status !== 101) {
-        this.rejectWsPort(wsPort, `WebSocket handshake failed (HTTP ${resp.status})`);
-        finishWs(1006, `HTTP ${resp.status}`, false, true);
-        return;
-      }
-      let negotiatedProto = '';
-      for (const h of resp.headers) {
-        if (h.name === 'sec-websocket-protocol') {
-          negotiatedProto = h.value;
-          break;
-        }
-      }
-      const cookieDeltas = fromCookieTLVEntries(resp.cookieDeltas);
-      if (cookieDeltas.length > 0) {
-        this.callbacks.onCookieDeltas?.(cookieDeltas);
-      }
-      opened = true;
-      try {
-        wsPort.postMessage({
-          type: 'WS_OPEN',
-          protocol: negotiatedProto,
-          cookieDeltas,
-        });
-      } catch {
-        finishWs(1006, 'ws port closed', false, true);
-      }
-    });
+      return;
+    }
 
-    activeWS.onMessage((isBinary, payload) => {
+    if (closed) return;
+
+    let resp;
+    try {
+      resp = decodeResponseHeaders(rawRespHeaders);
+    } catch {
+      this.rejectWsPort(wsPort, 'Malformed WS handshake response');
+      finishWs(1006, 'malformed ws headers', false, true);
+      return;
+    }
+    if (resp.status !== 101) {
+      this.rejectWsPort(wsPort, `WebSocket handshake failed (HTTP ${resp.status})`);
+      finishWs(1006, `HTTP ${resp.status}`, false, true);
+      return;
+    }
+
+    let negotiatedProto = '';
+    for (const h of resp.headers) {
+      if (h.name === 'sec-websocket-protocol') {
+        negotiatedProto = h.value;
+        break;
+      }
+    }
+    const cookieDeltas = fromCookieTLVEntries(resp.cookieDeltas);
+    if (cookieDeltas.length > 0) {
+      this.callbacks.onCookieDeltas?.(cookieDeltas);
+      // H-18c: Push authoritative WS cookie deltas directly to SW over trusted bridgePort.
+      try {
+        this.bridgePort?.postMessage({ type: 'BRIDGE_COOKIE_DELTAS', deltas: cookieDeltas });
+      } catch {
+        // ignore
+      }
+    }
+
+    opened = true;
+    try {
+      wsPort.postMessage({
+        type: 'WS_OPEN',
+        protocol: negotiatedProto,
+        cookieDeltas,
+      });
+    } catch {
+      finishWs(1006, 'ws port closed', false, true);
+      return;
+    }
+
+    activeWS.onMessage((delivered) => {
       if (closed) return;
       try {
-        if (isBinary) {
-          const copy = new Uint8Array(payload.byteLength);
-          copy.set(payload);
+        if (delivered.isBinary) {
+          const bytes = delivered.data as Uint8Array;
+          const copy = new Uint8Array(bytes.byteLength);
+          copy.set(bytes);
           wsPort.postMessage({ type: 'WS_MSG', opcode: 2, data: copy.buffer }, [copy.buffer]);
         } else {
-          wsPort.postMessage({ type: 'WS_MSG', opcode: 1, data: textDecoder.decode(payload) });
+          wsPort.postMessage({ type: 'WS_MSG', opcode: 1, data: delivered.data as string });
         }
       } catch {
         finishWs(1006, 'ws port closed', false, true);
@@ -852,15 +918,6 @@ export class TunnelBridge {
 
     activeWS.onClose((code, reason) => {
       finishWs(code || 1000, reason || '', true, false);
-    });
-
-    activeWS.onReset((code) => {
-      if (!opened) {
-        this.rejectWsPort(wsPort, `WebSocket stream reset (${code})`);
-        finishWs(1006, `reset ${code}`, false, false);
-      } else {
-        finishWs(1006, `WebSocket reset (${code})`, true, false);
-      }
     });
 
     for (const queued of queuedWsMsgs.splice(0)) {
@@ -909,7 +966,6 @@ export class TunnelBridge {
     }
     this.activePorts.clear();
     this.mux = null;
-    this.openWSDCFn = null;
   }
 
   private failReqPort(port: MessagePort, status: number, message: string): void {

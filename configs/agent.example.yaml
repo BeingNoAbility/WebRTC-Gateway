@@ -34,6 +34,7 @@ target_url: "http://127.0.0.1:8080"
 
 # Static os.Root adapter security options (applies to dir_path / file_path):
 hide_dotfiles: true
+follow_symlinks: false
 file_inline_active: false
 
 # Optional RFC 9110 host[:port] Host header override for virtual-host reverse proxies behind target_url.

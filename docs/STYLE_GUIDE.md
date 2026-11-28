@@ -72,10 +72,10 @@ flowchart LR
 ### 1. 排版与示例脱敏
 
 - **中西文混排**：中文与英文、数字、行内代码之间保留一个半角空格；中文标点与英文之间不加空格。
-- **行内代码与专有名词**：命令、文件路径、CLI 参数、环境变量与代码标识符使用反引号（如 `scripts/gate.sh`、`-sandbox-domain`、`MemoryBudget`）；产品与协议名（WebRTC、TypeScript、Docker、Service Worker、Nginx）使用官方大小写且不加反引号。
+- **行内代码与专有名词**：命令、文件路径、CLI 参数、环境变量与代码标识符使用反引号（如 `scripts/gate.sh`、`-sandbox-origin`、`MemoryBudget`）；产品与协议名（WebRTC、TypeScript、Docker、Service Worker、Nginx）使用官方大小写且不加反引号。
 - **示例域名与 IP**：必须使用 RFC 2606 / 6761 保留域名（`example.com`、`*.example`）与 RFC 5737 文档 IP（`192.0.2.x`、`198.51.100.x`、`203.0.113.x`）；本机默认值可用 `127.0.0.1`。
 - **不硬编码易漂移计数**：测试用例数、键数量等会随提交变化的数据改写为“全部通过”或给出运行命令。
-- **协议与版本名**：传输协议名与版本号以协议规范（`protocol-specification.md`）中的当前版本为准（如 P2PMux V7）；容器镜像标签统一使用带 `v` 前缀的 `vX.Y.Z`。
+- **协议与版本名**：传输协议名与版本号以协议规范（`protocol-specification.md`）中的当前版本为准（如 P2PMux V8）；容器镜像标签统一使用带 `v` 前缀的 `vX.Y.Z`。
 
 ### 2. 代码块、Mermaid 与链接
 

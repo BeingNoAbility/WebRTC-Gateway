@@ -6,12 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"log"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"webrtc-gateway/pkg/signaling"
@@ -26,12 +28,17 @@ const (
 	visitorAuthGlobalWindow      = 1 * time.Minute
 	authKeyStripeCount           = 64
 
-	DefaultCapListLimit  = 50
-	MaxCapListLimit      = 200
-	maxCapabilityJTILen  = 128
-	maxCapabilityRecords = 4096
-	maxCapabilityRevoked = 8192
+	DefaultCapListLimit       = 50
+	MaxCapListLimit           = 200
+	maxCapabilityJTILen       = 128
+	maxCapabilityRecords      = 4096
+	maxCapabilityRevoked      = 8192
+	maxCapabilityImmortalRevs = 2048
 )
+
+// ErrCapPersistFailed signals that a revocation took effect in memory immediately,
+// but atomic persistence to disk failed.
+var ErrCapPersistFailed = errors.New("agent: capability state updated in memory but failed to persist to disk")
 
 func randomBytes(n int) []byte {
 	b := make([]byte, n)
@@ -106,18 +113,25 @@ type CapabilityRecord struct {
 
 type persistedCapState struct {
 	Records map[string]CapabilityPayload `json:"records,omitempty"`
-	Revoked map[string]int64             `json:"revoked,omitempty"` // jti -> exp unix (0 = keep until pruned)
+	Revoked map[string]int64             `json:"revoked,omitempty"` // jti -> exp unix (0 = unknown/manual revocation)
 }
 
+// CapabilityStore manages share capability records, connection limits, and cross-process-safe
+// revocation tombstones.
+//
+// Concurrency invariant: IsRevoked() is a 100% pure-memory lock-free atomic snapshot read (never
+// performs disk I/O or OS flock), so callers holding session mutexes can check revocations safely.
+// Disk synchronization happens via MaybeReload() outside session locks and via WriteAtomic under
+// WithFileLock on mutating calls.
 type CapabilityStore struct {
+	stateFile string
+
 	mu          sync.Mutex
-	store       *state.AtomicFileStore
-	version     uint64
-	fileModTime time.Time
-	fileSize    int64
+	fileInfo    os.FileInfo
 	records     map[string]*CapabilityRecord
-	revoked     map[string]int64 // jti -> exp unix (monotonic union across processes)
+	revoked     map[string]int64
 	active      map[string]int
+	revokedSnap atomic.Pointer[map[string]int64]
 }
 
 func NewCapabilityStore() *CapabilityStore {
@@ -126,19 +140,20 @@ func NewCapabilityStore() *CapabilityStore {
 }
 
 func NewCapabilityStoreWithFile(stateFile string) (*CapabilityStore, error) {
-	var store *state.AtomicFileStore
 	if stateFile != "" {
-		store = state.NewAtomicFileStore(stateFile)
-		if err := store.CheckWritable(); err != nil {
+		if err := state.CheckWritable(stateFile); err != nil {
 			return nil, err
 		}
 	}
 	s := &CapabilityStore{
-		store:   store,
-		records: make(map[string]*CapabilityRecord),
-		revoked: make(map[string]int64),
-		active:  make(map[string]int),
+		stateFile: stateFile,
+		records:   make(map[string]*CapabilityRecord),
+		revoked:   make(map[string]int64),
+		active:    make(map[string]int),
 	}
+	emptySnap := make(map[string]int64)
+	s.revokedSnap.Store(&emptySnap)
+
 	if stateFile != "" {
 		if err := s.loadFromDisk(); err != nil {
 			return nil, err
@@ -148,10 +163,18 @@ func NewCapabilityStoreWithFile(stateFile string) (*CapabilityStore, error) {
 }
 
 func (s *CapabilityStore) lockPath() string {
-	if s.store == nil {
+	if s.stateFile == "" {
 		return ""
 	}
-	return s.store.Path() + ".lock"
+	return s.stateFile + ".lock"
+}
+
+func (s *CapabilityStore) publishRevokedLocked() {
+	cp := make(map[string]int64, len(s.revoked))
+	for k, v := range s.revoked {
+		cp[k] = v
+	}
+	s.revokedSnap.Store(&cp)
 }
 
 func parsePersistedCapState(raw []byte) (*persistedCapState, error) {
@@ -199,14 +222,15 @@ func (s *CapabilityStore) mergeStateLocked(st *persistedCapState, nowUnix int64)
 		}
 	}
 	s.pruneExpiredLocked(nowUnix)
+	s.publishRevokedLocked()
 }
 
 func (s *CapabilityStore) loadFromDisk() error {
-	if s.store == nil || s.store.Path() == "" {
+	if s.stateFile == "" {
 		return nil
 	}
 	return state.WithFileLock(s.lockPath(), func() error {
-		raw, err := os.ReadFile(s.store.Path())
+		raw, err := os.ReadFile(s.stateFile) // #nosec G304 -- operator-configured state file path
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
@@ -215,43 +239,49 @@ func (s *CapabilityStore) loadFromDisk() error {
 		}
 		st, err := parsePersistedCapState(raw)
 		if err != nil {
-			return err
+			return fmt.Errorf("agent: corrupt capability state file %q: %w", s.stateFile, err)
 		}
-		fi, serr := os.Stat(s.store.Path())
+		fi, serr := os.Stat(s.stateFile)
 		s.mu.Lock()
 		s.mergeStateLocked(st, time.Now().Unix())
 		if serr == nil {
-			s.fileModTime = fi.ModTime()
-			s.fileSize = fi.Size()
+			s.fileInfo = fi
 		}
 		s.mu.Unlock()
 		return nil
 	})
 }
 
-// maybeReload performs a fast stat check and merges disk changes (e.g. from CLI -mint-link)
-// using a monotonic union for revocations so concurrent processes never lose records or revocations.
-func (s *CapabilityStore) maybeReload() {
-	if s.store == nil || s.store.Path() == "" {
+// MaybeReload checks stat (inode/SameFile + mtime + size) and merges external disk updates
+// (e.g. from CLI -mint-link) without blocking session locks.
+func (s *CapabilityStore) MaybeReload() {
+	if s.stateFile == "" {
 		return
 	}
-	fi, err := os.Stat(s.store.Path())
+	fi, err := os.Stat(s.stateFile)
 	if err != nil {
 		return
 	}
 	s.mu.Lock()
-	unchanged := fi.ModTime().Equal(s.fileModTime) && fi.Size() == s.fileSize
+	unchanged := s.fileInfo != nil &&
+		os.SameFile(s.fileInfo, fi) &&
+		fi.ModTime().Equal(s.fileInfo.ModTime()) &&
+		fi.Size() == s.fileInfo.Size()
 	s.mu.Unlock()
 	if unchanged {
 		return
 	}
-	_ = s.loadFromDisk()
+	if err := s.loadFromDisk(); err != nil {
+		log.Printf("[Agent] Reload capability state failed: %v", err)
+	}
 }
 
-func (s *CapabilityStore) pruneExpiredLocked(nowUnix int64) {
+func (s *CapabilityStore) pruneExpiredLocked(nowUnix int64) bool {
+	revChanged := false
 	for jti, exp := range s.revoked {
 		if exp > 0 && nowUnix >= exp {
 			delete(s.revoked, jti)
+			revChanged = true
 		}
 	}
 	for jti, r := range s.records {
@@ -262,19 +292,20 @@ func (s *CapabilityStore) pruneExpiredLocked(nowUnix int64) {
 			}
 		}
 	}
+	return revChanged
 }
 
 // PruneExpired garbage-collects expired capability records and expired revocation tombstones in memory.
 func (s *CapabilityStore) PruneExpired(now time.Time) {
 	s.mu.Lock()
-	s.pruneExpiredLocked(now.Unix())
+	if s.pruneExpiredLocked(now.Unix()) {
+		s.publishRevokedLocked()
+	}
 	s.mu.Unlock()
 }
 
-func (s *CapabilityStore) buildSnapshotLocked(nowUnix int64) (uint64, *persistedCapState) {
+func (s *CapabilityStore) buildSnapshotLocked(nowUnix int64) *persistedCapState {
 	s.pruneExpiredLocked(nowUnix)
-	s.version++
-	ver := s.version
 	out := &persistedCapState{
 		Records: make(map[string]CapabilityPayload, len(s.records)),
 		Revoked: make(map[string]int64, len(s.revoked)),
@@ -285,24 +316,31 @@ func (s *CapabilityStore) buildSnapshotLocked(nowUnix int64) (uint64, *persisted
 	for jti, r := range s.records {
 		out.Records[jti] = r.Payload
 	}
-	return ver, out
+	return out
 }
 
-func (s *CapabilityStore) applyAndPersist(mutate func(nowUnix int64) error) error {
-	if s.store == nil {
+func (s *CapabilityStore) applyAndPersist(mutate func(nowUnix int64) error, isRevoke bool) error {
+	if s.stateFile == "" {
 		s.mu.Lock()
 		err := mutate(time.Now().Unix())
+		if err == nil {
+			s.publishRevokedLocked()
+		}
 		s.mu.Unlock()
 		return err
 	}
 	return state.WithFileLock(s.lockPath(), func() error {
 		var diskState *persistedCapState
-		if raw, err := os.ReadFile(s.store.Path()); err == nil {
-			if st, perr := parsePersistedCapState(raw); perr == nil {
-				diskState = st
+		rawDisk, rerr := os.ReadFile(s.stateFile) // #nosec G304 -- operator-configured state file path
+		if rerr == nil {
+			st, perr := parsePersistedCapState(rawDisk)
+			if perr != nil {
+				// Fail-Closed: NEVER silently overwrite corrupt disk revocation history!
+				return fmt.Errorf("agent: refusing to overwrite corrupt capability state %q: %w", s.stateFile, perr)
 			}
-		} else if !os.IsNotExist(err) {
-			return err
+			diskState = st
+		} else if !os.IsNotExist(rerr) {
+			return rerr
 		}
 
 		nowUnix := time.Now().Unix()
@@ -314,22 +352,28 @@ func (s *CapabilityStore) applyAndPersist(mutate func(nowUnix int64) error) erro
 			s.mu.Unlock()
 			return err
 		}
-		ver, snap := s.buildSnapshotLocked(nowUnix)
+		s.publishRevokedLocked()
+		snap := s.buildSnapshotLocked(nowUnix)
 		s.mu.Unlock()
 
 		raw, err := json.Marshal(snap)
 		if err != nil {
 			log.Printf("[Agent] Marshal capability state failed: %v", err)
+			if isRevoke {
+				return fmt.Errorf("%w: %v", ErrCapPersistFailed, err)
+			}
 			return err
 		}
-		if err := s.store.Save(ver, raw); err != nil {
+		if err := state.WriteAtomic(s.stateFile, raw, 0600); err != nil {
 			log.Printf("[Agent] Persist capability state failed: %v", err)
+			if isRevoke {
+				return fmt.Errorf("%w: %v", ErrCapPersistFailed, err)
+			}
 			return err
 		}
-		if fi, serr := os.Stat(s.store.Path()); serr == nil {
+		if fi, serr := os.Stat(s.stateFile); serr == nil {
 			s.mu.Lock()
-			s.fileModTime = fi.ModTime()
-			s.fileSize = fi.Size()
+			s.fileInfo = fi
 			s.mu.Unlock()
 		}
 		return nil
@@ -350,7 +394,7 @@ func (s *CapabilityStore) Track(p CapabilityPayload) error {
 		_, isRev := s.revoked[p.JTI]
 		s.records[p.JTI] = &CapabilityRecord{Payload: p, Revoked: isRev}
 		return nil
-	})
+	}, false)
 }
 
 func (s *CapabilityStore) Revoke(jti string) error {
@@ -360,29 +404,50 @@ func (s *CapabilityStore) Revoke(jti string) error {
 	}
 	return s.applyAndPersist(func(nowUnix int64) error {
 		s.pruneExpiredLocked(nowUnix)
-		if _, exists := s.revoked[jti]; !exists && len(s.revoked) >= maxCapabilityRevoked {
-			return errors.New("agent: capability revocation table limit reached")
-		}
 		var exp int64
 		if r, ok := s.records[jti]; ok {
 			r.Revoked = true
 			exp = r.Payload.Exp
 		}
+		if _, exists := s.revoked[jti]; !exists {
+			if len(s.revoked) >= maxCapabilityRevoked {
+				return errors.New("agent: capability revocation table limit reached")
+			}
+			if exp == 0 {
+				immortalCount := 0
+				for _, e := range s.revoked {
+					if e == 0 {
+						immortalCount++
+					}
+				}
+				if immortalCount >= maxCapabilityImmortalRevs {
+					return errors.New("agent: unknown capability revocation limit reached")
+				}
+			}
+		}
 		s.revoked[jti] = exp
 		return nil
-	})
+	}, true)
 }
 
+// IsRevoked performs a lock-free pure-memory lookup against the latest published revocation snapshot.
+// Never performs disk I/O or OS flock; safe to invoke while holding session mutexes.
 func (s *CapabilityStore) IsRevoked(jti string) bool {
-	s.maybeReload()
-	s.mu.Lock()
-	_, ok := s.revoked[jti]
-	s.mu.Unlock()
-	return ok
+	if jti == "" {
+		return false
+	}
+	snap := s.revokedSnap.Load()
+	if snap == nil {
+		return false
+	}
+	exp, ok := (*snap)[jti]
+	if !ok {
+		return false
+	}
+	return exp == 0 || time.Now().Unix() < exp
 }
 
 func (s *CapabilityStore) AcquireConn(p *CapabilityPayload) bool {
-	s.maybeReload()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, rev := s.revoked[p.JTI]; rev {
@@ -416,10 +481,9 @@ func (s *CapabilityStore) ReleaseConn(jti string) {
 	s.mu.Unlock()
 }
 
-// ListPage returns a deterministically sorted, bounded page of capability records so CAP_RESP
-// never overflows the control JSON frame limit.
+// ListPage returns a deterministically sorted, bounded page of capability records.
 func (s *CapabilityStore) ListPage(now time.Time, offset, limit int) (items []CapabilityRecord, total int, hasMore bool) {
-	s.maybeReload()
+	s.MaybeReload()
 	if offset < 0 {
 		offset = 0
 	}

@@ -23,8 +23,18 @@ const (
 	maxAuthFailedIPs           = 8192
 	authLockoutThreshold       = 10
 	authLockoutDuration        = 5 * time.Minute
-	signalGlobalAuthFailMax    = 600 // global failed upgrade attempts per minute across all IPs
+	authStripeCount            = 64
 )
+
+// AuthScopeKey combines normalized IP (/32 IPv4, /64 IPv6) with an optional scope (such as nodeID
+// in per-node secret mode) so successful auth on one node cannot reset failures for another node.
+func AuthScopeKey(rawIP, scope string) string {
+	k := RateLimitKey(rawIP)
+	if scope == "" {
+		return k
+	}
+	return k + "\x00" + scope
+}
 
 // RateLimitKey normalizes an IP address for rate-limiting and brute-force lockouts:
 // IPv4 addresses are tracked per /32; IPv6 addresses are normalized to their /64 prefix
@@ -74,6 +84,7 @@ type IPRateLimiter struct {
 	upgrLRU     *list.List
 
 	authLockout *AuthLockoutTable
+	authStripes [authStripeCount]sync.Mutex
 	rejections  atomic.Uint64
 }
 
@@ -97,12 +108,13 @@ func NewIPRateLimiter(maxIPConns, maxMsgsPer10s int) *IPRateLimiter {
 		upgrBuckets:          make(map[string]*tokenBucket),
 		upgrLRU:              list.New(),
 		authLockout: NewAuthLockoutTable(AuthLockoutConfig{
-			MaxFailures:       authLockoutThreshold,
-			LockoutDuration:   authLockoutDuration,
-			MaxPendingKeys:    maxAuthFailedIPs,
-			MaxLockedKeys:     maxAuthFailedIPs,
-			GlobalMaxFailures: signalGlobalAuthFailMax,
-			GlobalWindow:      time.Minute,
+			MaxFailures:     authLockoutThreshold,
+			LockoutDuration: authLockoutDuration,
+			MaxPendingKeys:  maxAuthFailedIPs,
+			MaxLockedKeys:   maxAuthFailedIPs,
+			// Machine secrets (>= 128 bits) are immune to online brute-force under per-IP
+			// lockout; disabling the global kill-switch prevents distributed DoS against all Agents.
+			GlobalMaxFailures: 0,
 		}),
 	}
 }
@@ -136,6 +148,17 @@ func (l *IPRateLimiter) allowBucket(
 				break
 			}
 			victim := back.Value.(*tokenBucket)
+			elapsed := now.Sub(victim.lastRefill).Seconds()
+			refilled := victim.tokens
+			if elapsed > 0 {
+				refilled += elapsed * ratePerSec
+			}
+			// Fail-Closed on saturation: never evict an actively rate-limited bucket to hand
+			// fresh full bursts to a distributed IP flood. Only evict fully-refilled idle keys.
+			if refilled < burst {
+				l.rejections.Add(1)
+				return false
+			}
 			lru.Remove(back)
 			delete(m, victim.key)
 		}
@@ -220,8 +243,20 @@ func (l *IPRateLimiter) ReleaseAgentConn(ip string) {
 	}
 }
 
-func (l *IPRateLimiter) IsAuthLocked(ip string) bool {
-	allowed, _ := l.authLockout.Allow(ip, time.Now())
+func (l *IPRateLimiter) LockAuthScope(ip, scope string) func() {
+	key := AuthScopeKey(ip, scope)
+	var h uint32 = 2166136261
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= 16777619
+	}
+	stripe := &l.authStripes[h%authStripeCount]
+	stripe.Lock()
+	return stripe.Unlock
+}
+
+func (l *IPRateLimiter) IsAuthLockedScoped(ip, scope string) bool {
+	allowed, _ := l.authLockout.Allow(AuthScopeKey(ip, scope), time.Now())
 	if !allowed {
 		l.rejections.Add(1)
 		return true
@@ -229,16 +264,28 @@ func (l *IPRateLimiter) IsAuthLocked(ip string) bool {
 	return false
 }
 
-func (l *IPRateLimiter) RecordFailedAuth(ip string) bool {
-	locked := l.authLockout.RecordFailure(ip, time.Now())
+func (l *IPRateLimiter) RecordFailedAuthScoped(ip, scope string) bool {
+	locked := l.authLockout.RecordFailure(AuthScopeKey(ip, scope), time.Now())
 	if locked {
 		l.rejections.Add(1)
 	}
 	return locked
 }
 
+func (l *IPRateLimiter) ResetFailedAuthScoped(ip, scope string) {
+	l.authLockout.Reset(AuthScopeKey(ip, scope))
+}
+
+func (l *IPRateLimiter) IsAuthLocked(ip string) bool {
+	return l.IsAuthLockedScoped(ip, "")
+}
+
+func (l *IPRateLimiter) RecordFailedAuth(ip string) bool {
+	return l.RecordFailedAuthScoped(ip, "")
+}
+
 func (l *IPRateLimiter) ResetFailedAuth(ip string) {
-	l.authLockout.Reset(ip)
+	l.ResetFailedAuthScoped(ip, "")
 }
 
 // SessionMessageLimiter is an independent per-session token bucket for authenticated Agents

@@ -9,11 +9,11 @@ import (
 	"testing"
 )
 
-func TestAtomicStoreConcurrentNoLoss(t *testing.T) {
+func TestLatestFileWriterConcurrentNoLoss(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
-	store := NewAtomicFileStore(path)
-	if err := store.CheckWritable(); err != nil {
+	writer := NewLatestFileWriter(path)
+	if err := writer.CheckWritable(); err != nil {
 		t.Fatalf("CheckWritable failed on writable dir: %v", err)
 	}
 
@@ -28,7 +28,7 @@ func TestAtomicStoreConcurrentNoLoss(t *testing.T) {
 			defer wg.Done()
 			v := ver.Add(1)
 			data := []byte(fmt.Sprintf(`{"ver":%d}`, v))
-			if err := store.Save(v, data); err != nil {
+			if err := writer.Save(v, data); err != nil {
 				errCh <- err
 			}
 		}()
@@ -37,15 +37,15 @@ func TestAtomicStoreConcurrentNoLoss(t *testing.T) {
 	close(errCh)
 
 	for err := range errCh {
-		t.Fatalf("concurrent AtomicFileStore.Save failed: %v", err)
+		t.Fatalf("concurrent LatestFileWriter.Save failed: %v", err)
 	}
 
 	finalVer := ver.Add(1)
 	finalPayload := []byte(fmt.Sprintf(`{"ver":%d,"revoked":true}`, finalVer))
-	if err := store.Save(finalVer, finalPayload); err != nil {
+	if err := writer.Save(finalVer, finalPayload); err != nil {
 		t.Fatalf("final save failed: %v", err)
 	}
-	if err := store.Save(finalVer-1, []byte(`{"ver":0,"revoked":false}`)); err != nil {
+	if err := writer.Save(finalVer-1, []byte(`{"ver":0,"revoked":false}`)); err != nil {
 		t.Fatalf("stale save should cleanly no-op, got: %v", err)
 	}
 
@@ -66,14 +66,50 @@ func TestAtomicStoreConcurrentNoLoss(t *testing.T) {
 	}
 }
 
-func TestAtomicStoreCheckWritableFailsClosed(t *testing.T) {
+// Regression test for H-1: after a transient write error on a newer version (v6), a late stale
+// version (v3) MUST NOT roll back disk to v3 and MUST NOT cause Save(v5) to falsely succeed with v3 on disk.
+func TestLatestFileWriterNoRollbackAfterTransientError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	writer := NewLatestFileWriter(path)
+
+	// Force transient failure by placing a directory at target path so Rename fails.
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Save(6, []byte(`{"v":6}`)); err == nil {
+		t.Fatal("expected Save(6) to fail when target path is a directory")
+	}
+
+	// Recover disk.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	// Late stale v3 arrives: must retry latest v6 rather than writing stale v3!
+	if err := writer.Save(3, []byte(`{"v":3}`)); err != nil {
+		t.Fatalf("Save(3) after recovery failed: %v", err)
+	}
+	if err := writer.Save(5, []byte(`{"v":5}`)); err != nil {
+		t.Fatalf("Save(5) after v6 durable failed: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"v":6}` {
+		t.Fatalf("disk rolled back to stale version: got %s, want {\"v\":6}", string(got))
+	}
+}
+
+func TestCheckWritableFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	store := NewAtomicFileStore(filepath.Join(blocker, "state.json"))
-	if err := store.CheckWritable(); err == nil {
+	if err := CheckWritable(filepath.Join(blocker, "state.json")); err == nil {
 		t.Fatal("expected CheckWritable to fail closed when parent path is not a directory")
 	}
 }

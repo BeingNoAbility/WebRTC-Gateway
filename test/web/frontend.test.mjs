@@ -45,14 +45,10 @@ const [
 ]);
 
 function runHtmlInjector(chunks, cfgOverrides = {}, opts = { hasHttpCharset: true }) {
-  const cfg = {
-    nodeId: 'demo',
-    portalOrigin: 'https://portal.example',
-    backendOrigin: 'http://app.local:8080',
-    initCookies: [],
-    ...cfgOverrides,
-  };
-  const inj = new htmlMod.StreamingHtmlInjector('https://sbx-1.sandbox.example', cfg, opts);
+  const inj = new htmlMod.StreamingHtmlInjector('https://sbx-1.sandbox.example', {
+    ...opts,
+    scriptNonce: cfgOverrides.scriptNonce ?? opts.scriptNonce,
+  });
   const parts = [];
   for (const c of chunks) {
     const bytes = typeof c === 'string' ? new TextEncoder().encode(c) : c;
@@ -69,13 +65,13 @@ function runHtmlInjector(chunks, cfgOverrides = {}, opts = { hasHttpCharset: tru
   return merged;
 }
 
-test('html_injector V7: HTML5 comments (<!-->, <!--->, --!>), unquoted attrs, <template>/<svg>, UTF-16 skip, post-DOCTYPE fallback', async () => {
+test('html_injector V8: external boot.js + patch.js (zero inline data-p2p-boot), nonce propagation, HTML5 comments, <template>/<svg>, UTF-16 skip', async () => {
   const html =
     '<!doctype html>' +
     '<!--><!---><!-- fake <head> --!>' +
     '<html data-raw=a"b>c>' +
     '<template><head>fake</head><script>ignored()</script></template>' +
-    '<svg><head>fake</head><title/></svg>' +
+    '<svg><head>fake</head><title/><script>svgScript()</script></svg>' +
     '<noscript><head>fake</head></noscript>' +
     '<style>/* <head> */</style>' +
     '<head data-expr="a>b" data-sq=\'c>d\'><base href="/sub/"><meta charset="utf-8" /></head>' +
@@ -88,14 +84,45 @@ test('html_injector V7: HTML5 comments (<!-->, <!--->, --!>), unquoted attrs, <t
   const out = new TextDecoder().decode(runHtmlInjector(chunks));
   const realHeadTag = '<head data-expr="a>b" data-sq=\'c>d\'>';
   const realHeadEnd = out.indexOf(realHeadTag) + realHeadTag.length;
-  const snippetStart = out.indexOf('<script src="https://sbx-1.sandbox.example/__p2p_gw__/assets/patch.js" data-p2p-boot="');
+  const expectedSnippet =
+    '<script src="https://sbx-1.sandbox.example/__p2p_gw__/boot.js"></script>' +
+    '<script src="https://sbx-1.sandbox.example/__p2p_gw__/assets/patch.js"></script>';
+  const snippetStart = out.indexOf(expectedSnippet);
   assert.equal(snippetStart, realHeadEnd, 'snippet must inject immediately after real <head>');
+  assert.ok(!out.includes('data-p2p-boot'), 'H-16: must NOT embed 22 KiB inline data-p2p-boot in HTML');
+
+  // H-16: CSP scriptNonce propagation onto both injected external scripts!
+  const noncedOut = new TextDecoder().decode(
+    runHtmlInjector(['<!doctype html><head></head><body>x</body>'], {}, { hasHttpCharset: true, scriptNonce: 'abc123XYZ' })
+  );
+  assert.ok(
+    noncedOut.includes('<script src="https://sbx-1.sandbox.example/__p2p_gw__/boot.js" nonce="abc123XYZ"></script>'),
+    'must propagate upstream CSP nonce to boot.js'
+  );
+  assert.ok(
+    noncedOut.includes('<script src="https://sbx-1.sandbox.example/__p2p_gw__/assets/patch.js" nonce="abc123XYZ"></script>'),
+    'must propagate upstream CSP nonce to patch.js'
+  );
+
+  // buildBootScriptPayload escapes </script> and bounds expired cookies
+  const bootJs = htmlMod.buildBootScriptPayload({
+    nodeId: 'demo',
+    portalOrigin: 'https://portal.example',
+    backendOrigin: 'http://app.local',
+    initCookies: [
+      { op: 'set', name: 'fresh', value: '</script><x>', path: '/' },
+      { op: 'set', name: 'old', value: 'expired', path: '/', expires: 1000 },
+    ],
+  });
+  assert.ok(bootJs.startsWith('globalThis.__P2P_GW_BOOT__='));
+  assert.ok(!bootJs.includes('</script>'), 'boot.js must escape < as \\u003c');
+  assert.ok(bootJs.includes('fresh') && !bootJs.includes('expired'));
 
   // Executable <script> before <head> MUST inject strictly BEFORE that <script> so patch runs first!
   const scriptFirst = '<!doctype html><html><script>window.x=1;</script><head><title>t</title></head></html>';
   const scriptFirstOut = new TextDecoder().decode(runHtmlInjector([scriptFirst]));
   assert.equal(
-    scriptFirstOut.indexOf('<script src="https://sbx-1.sandbox.example/__p2p_gw__/assets/patch.js"'),
+    scriptFirstOut.indexOf('<script src="https://sbx-1.sandbox.example/__p2p_gw__/boot.js"'),
     scriptFirst.indexOf('<script>window.x=1;'),
     'snippet must inject before first executable <script>'
   );
@@ -272,26 +299,45 @@ test('sandbox_origin V7: 3-tier derivation (Tier 1 fixed, Tier 3 HMAC device sal
   assert.notEqual(cap1, cap2);
 });
 
-test('fetch_router: multi-value CSP sandbox append, strict directive tokenizer, Emoji header safe', () => {
-  // Two CSP headers — first has `sandbox`, second does not; first must survive.
+test('fetch_router H-16/M-25: CSP directive rewriter preserves upstream CSP, extracts nonce, strips transformed ETag & checks multi Content-Encoding', () => {
+  // Two CSP headers — first has `sandbox` (preserved verbatim), second is rewritten (preserving directives).
   const { headers, preserveFileSandboxCSP } = fetchMod.buildSafeResponseHeaders(
     [
       { name: 'content-security-policy', value: "SANDBOX; default-src 'none'" },
-      { name: 'content-security-policy', value: "default-src 'self'; report-to sandbox" },
+      { name: 'content-security-policy', value: "default-src 'self'; object-src 'none'; report-to sandbox" },
       { name: 'content-disposition', value: 'attachment; filename="年度财务报告 2026.pdf"' },
       { name: 'x-emoji-note', value: 'Hello 🚀 世界!' },
       { name: 'service-worker-allowed', value: '/' },
       { name: 'x-p2p-cookie-delta', value: 'eyJ0ZXN0IjoxfQ' },
+      { name: 'etag', value: '"strong-123"' },
     ],
-    { stripContentLength: false }
+    { stripContentLength: true, stripContentEncoding: false, backendOrigin: 'http://app.local' }
   );
 
   assert.equal(preserveFileSandboxCSP, true);
-  assert.equal(headers.get('content-security-policy'), "SANDBOX; default-src 'none'");
+  assert.ok(headers.get('content-security-policy')?.includes("SANDBOX; default-src 'none'"));
+  assert.ok(headers.get('content-security-policy')?.includes("object-src 'none'"), 'H-16: upstream CSP directives must be preserved');
+  assert.equal(headers.get('etag'), null, 'M-25: strong ETag must be stripped when response body is transformed');
   assert.equal(headers.get('service-worker-allowed'), null, 'service-worker-allowed must be stripped');
   assert.equal(headers.get('x-p2p-cookie-delta'), null, 'internal cookie delta header must be stripped');
-  // Emoji surrogate pair must encode cleanly without throwing URIError.
   assert.ok(headers.get('x-emoji-note')?.includes('%F0%9F%9A%80'));
+
+  // H-16: rewriteUpstreamCsp extracts nonce, maps backendOrigin -> 'self', strips frame-ancestors!
+  const rewritten = fetchMod.rewriteUpstreamCsp(
+    "default-src 'none'; script-src 'nonce-secret99' 'strict-dynamic'; connect-src http://app.local ws://app.local; frame-ancestors https://old.example",
+    { swOrigin: 'https://sbx-1.sandbox.example', backendOrigin: 'http://app.local' }
+  );
+  assert.equal(rewritten.scriptNonce, 'secret99');
+  assert.ok(!rewritten.policy.includes('frame-ancestors'), 'upstream frame-ancestors must be replaced');
+  assert.ok(rewritten.policy.includes("connect-src 'self'"), 'backendOrigin must rewrite to self');
+  assert.ok(rewritten.policy.includes("'nonce-secret99'"), 'nonce must be preserved');
+
+  // M-25: Multi-header Content-Encoding detection!
+  assert.equal(fetchMod.hasUndecodedContentEncoding(['gzip'], true), false);
+  assert.equal(fetchMod.hasUndecodedContentEncoding(['gzip', 'br'], true), true);
+  assert.equal(fetchMod.hasUndecodedContentEncoding(['br, gzip'], true), true);
+  assert.equal(fetchMod.hasUndecodedContentEncoding(['identity'], false), false);
+  assert.equal(fetchMod.hasUndecodedContentEncoding(['br'], false), true);
 
   // Negative test: `report-to sandbox` must not be mistaken for a `sandbox` directive.
   assert.equal(fetchMod.hasSandboxCspDirective("default-src 'self'; report-to sandbox"), false);
@@ -445,13 +491,54 @@ test('decompress_pipeline V7: native gzip bomb aborts, rejects zstd, safe transf
     });
     const textOut = await new Response(decompMod.pipeThroughBoundedDecompression(interleavedSrc, 'gzip')).text();
     assert.equal(textOut, 'hello-zero-chunk');
+
+    // H-17 Negative test: cancelling BEFORE first pull() MUST still cancel upstream source!
+    let prePullCancelled = false;
+    const lazySrc = new ReadableStream({
+      pull(c) {
+        c.enqueue(realGz);
+        c.close();
+      },
+      cancel() {
+        prePullCancelled = true;
+      },
+    });
+    const decomp = decompMod.pipeThroughBoundedDecompression(lazySrc, 'gzip');
+    await decomp.cancel('abort-early');
+    assert.equal(prePullCancelled, true, 'H-17: cancel() before first pull() must cancel upstream source');
   }
 
-  const big = new Uint8Array(64);
-  big.set([1, 2, 3, 4], 10);
-  const xfer = streamBridgeMod.toSafeTransferableBuffer(big.subarray(10, 14));
-  assert.notEqual(xfer.buffer, big.buffer);
-  assert.deepEqual(Array.from(new Uint8Array(xfer.buffer)), [1, 2, 3, 4]);
+  // C-3a: Firefox request.body === undefined fallback via arrayBuffer()!
+  const fakeFirefoxReq = {
+    method: 'POST',
+    body: undefined,
+    async arrayBuffer() {
+      return new TextEncoder().encode('firefox-post-body').buffer;
+    },
+  };
+  const extracted = await streamBridgeMod.createTransferableRequestBody(fakeFirefoxReq);
+  assert.equal(extracted.hasBody, true);
+  assert.equal(await new Response(extracted.bodyStream).text(), 'firefox-post-body');
+
+  const emptyFirefoxReq = {
+    method: 'POST',
+    body: undefined,
+    async arrayBuffer() {
+      return new ArrayBuffer(0);
+    },
+  };
+  const emptyExtracted = await streamBridgeMod.createTransferableRequestBody(emptyFirefoxReq);
+  assert.equal(emptyExtracted.hasBody, false);
+
+  // C-3b: Canonical URL comparison avoids rebuilding same-origin Request objects!
+  assert.equal(
+    patchMod.isSameCanonicalRequestUrl('/api/v1?x=1', 'https://sbx-1.sandbox.example/api/v1?x=1', 'https://sbx-1.sandbox.example/page'),
+    true
+  );
+  assert.equal(
+    patchMod.isSameCanonicalRequestUrl('/api/v2', 'https://sbx-1.sandbox.example/api/v1', 'https://sbx-1.sandbox.example/page'),
+    false
+  );
 });
 
 test('sdp & identity V7: structured SessionDescriptor, Pure Ed25519 verify, TOFU vs ?pk=evil block', async () => {
@@ -527,12 +614,43 @@ test('sdp & identity V7: structured SessionDescriptor, Pure Ed25519 verify, TOFU
   // Idempotent commit of identical hash succeeds!
   await identityMod.commitTofuKey('https://portal.example', 'tofunode', pkHash);
 
-  // RFC 8841 max-message-size=0 means unlimited -> clamped to 262144; 1..4095 rejected; huge sdp_ver rejected!
-  const zeroMmsSdp = synth.replace('a=max-message-size:262144', 'a=max-message-size:0');
-  assert.equal(sdpMod.extractSessionDescriptor(zeroMmsSdp, 2).max_msg_size, 262144);
-  const tinyMmsSdp = synth.replace('a=max-message-size:262144', 'a=max-message-size:1024');
-  assert.throws(() => sdpMod.extractSessionDescriptor(tinyMmsSdp, 2), /max-message-size|invalid|4096/i);
-  assert.equal(sdpMod.validateSessionDescriptor({ ...offerDesc, sdp_ver: 2 ** 51 }, true), false);
+  // H-20: verifyPeerDtlsCertificate unit tests (match, mismatch, Fail-Closed when supported, degrade on Safari).
+  const certBytes = new Uint8Array([0x30, 0x82, 0x01, 0x0a, 1, 2, 3, 4]);
+  const certFp = await cryptoMod.sha256Hex(certBytes);
+  assert.equal(
+    await sdpMod.verifyPeerDtlsCertificate(
+      { sctp: { transport: { getRemoteCertificates: () => [certBytes.buffer] } } },
+      certFp
+    ),
+    true
+  );
+  assert.equal(
+    await sdpMod.verifyPeerDtlsCertificate(
+      { sctp: { transport: { getRemoteCertificates: () => [certBytes.buffer] } } },
+      '0'.repeat(64)
+    ),
+    false
+  );
+  const origRtcDtls = globalThis.RTCDtlsTransport;
+  try {
+    globalThis.RTCDtlsTransport = class {
+      getRemoteCertificates() { return []; }
+    };
+    assert.equal(
+      await sdpMod.verifyPeerDtlsCertificate({ sctp: null }, certFp),
+      false,
+      'must fail closed when RTCDtlsTransport.getRemoteCertificates is supported but transport is missing'
+    );
+    delete globalThis.RTCDtlsTransport;
+    assert.equal(
+      await sdpMod.verifyPeerDtlsCertificate({ sctp: null }, certFp),
+      true,
+      'degrades only on engines lacking RTCDtlsTransport.getRemoteCertificates (Safari)'
+    );
+  } finally {
+    if (origRtcDtls !== undefined) globalThis.RTCDtlsTransport = origRtcDtls;
+    else delete globalThis.RTCDtlsTransport;
+  }
 });
 
 test('config V7: relayOnly omits STUN, scrubSensitiveHashParams removes cap=, %63ap redacted in logs', () => {
@@ -674,44 +792,32 @@ test('AuthClient V7: rejects SPAKE2+ -> public downgrade, missing/wrong confirm_
   });
 });
 
-test('TunnelBridge V7: BRIDGE_PING, immediate REQ_ACK, header strip, V7 TLV cookieMutations & cookieDeltas', async () => {
+test('TunnelBridge V8: BRIDGE_PING, Transferable ReadableStream HTTP, immediate REQ_ACK, header strip, TLV cookies & early 204 cleanup', async () => {
   function makePair() {
-    const mk = () => {
-      const listeners = new Map();
-      return {
-        readyState: 'open',
-        bufferedAmount: 0,
-        bufferedAmountLowThreshold: 0,
-        binaryType: 'arraybuffer',
-        peer: null,
-        addEventListener(type, fn) {
-          let s = listeners.get(type);
-          if (!s) {
-            s = new Set();
-            listeners.set(type, s);
-          }
-          s.add(fn);
-        },
-        removeEventListener(type, fn) {
-          listeners.get(type)?.delete(fn);
-        },
-        _emit(type, ev) {
-          for (const fn of Array.from(listeners.get(type) || [])) fn(ev);
-        },
-        send(data) {
-          if (this.readyState !== 'open') throw new Error('closed');
-          const cp = new Uint8Array(data).slice();
-          const p = this.peer;
-          if (p && p.readyState === 'open') {
-            queueMicrotask(() => p._emit('message', { data: cp.buffer }));
-          }
-        },
-        close() {
-          this.readyState = 'closed';
-          this._emit('close', {});
-        },
-      };
-    };
+    const mk = () => ({
+      readyState: 'open',
+      bufferedAmount: 0,
+      bufferedAmountLowThreshold: 0,
+      binaryType: 'arraybuffer',
+      peer: null,
+      onmessage: null,
+      onopen: null,
+      onclose: null,
+      onerror: null,
+      onbufferedamountlow: null,
+      send(data) {
+        if (this.readyState !== 'open') throw new Error('closed');
+        const cp = new Uint8Array(data).slice();
+        const p = this.peer;
+        if (p && p.readyState === 'open') {
+          queueMicrotask(() => p.onmessage?.({ data: cp.buffer }));
+        }
+      },
+      close() {
+        this.readyState = 'closed';
+        this.onclose?.({});
+      },
+    });
     const a = mk();
     const b = mk();
     a.peer = b;
@@ -720,34 +826,39 @@ test('TunnelBridge V7: BRIDGE_PING, immediate REQ_ACK, header strip, V7 TLV cook
   }
 
   const [cCtrl, sCtrl] = makePair();
-  const [cSlot, sSlot] = makePair();
+  const [cLane, sLane] = makePair();
 
   const receivedReqs = [];
-  sSlot.addEventListener('message', (ev) => {
+  sLane.onmessage = (ev) => {
     const f = frameMod.decodeFrame(new Uint8Array(ev.data));
     if (f.type === frameMod.FrameType.HEADERS) {
-      receivedReqs.push(tlvMod.decodeRequestHeaders(f.payload));
+      const req = tlvMod.decodeRequestHeaders(f.payload);
+      receivedReqs.push(req);
+      if (req.target === '/beacon') {
+        const resp = tlvMod.encodeResponseHeaders({ status: 204, headers: [] });
+        sLane.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.HEADERS, frameMod.FrameFlag.FIN, resp));
+        return;
+      }
       const resp = tlvMod.encodeResponseHeaders({
         status: 200,
         respFlags: tlvMod.RespFlag.NONE,
         headers: [{ name: 'content-type', value: 'text/plain' }],
         cookieDeltas: [{ op: tlvMod.CookieOp.SET, name: 'theme', value: 'dark', path: '/', expiresMs: 0 }],
       });
-      sSlot.send(frameMod.encodeFrame(f.gen, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, resp));
-      sSlot.send(
-        frameMod.encodeFrame(f.gen, frameMod.FrameType.DATA, frameMod.FrameFlag.FIN, new TextEncoder().encode('hello-v7'))
+      sLane.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, resp));
+      sLane.send(
+        frameMod.encodeFrame(f.streamId, frameMod.FrameType.DATA, frameMod.FrameFlag.FIN, new TextEncoder().encode('hello-v8'))
       );
     }
-  });
+  };
 
-  const clientMux = new muxMod.PoolMux({}, 1);
+  const clientMux = new muxMod.PoolMux(1, {});
   clientMux.attachControlDC(cCtrl);
-  clientMux.attachPoolDC(0, cSlot);
+  clientMux.attachLaneDC(0, cLane);
 
   const bridge = new portalBridgeMod.TunnelBridge();
   bridge.setContext(
     clientMux,
-    () => makePair()[0],
     'https://sbx-1.sandbox.example',
     {
       nodeId: 'demo',
@@ -768,13 +879,19 @@ test('TunnelBridge V7: BRIDGE_PING, immediate REQ_ACK, header strip, V7 TLV cook
   assert.deepEqual(await pongP, { type: 'BRIDGE_PONG', pingId: 'p1' });
   bCh.port2.close();
 
-  // 2. HTTP fetch request strips spoofed headers, carries V7 TLV cookieMutations & receives cookieDeltas!
+  // 2. HTTP fetch request via Transferable ReadableStream: strips spoofed headers, carries TLV cookieMutations & receives cookieDeltas!
   const reqCh = new MessageChannel();
   const events = [];
+  let respBodyText = '';
   const doneP = new Promise((r) => {
-    reqCh.port1.onmessage = (ev) => {
+    reqCh.port1.onmessage = async (ev) => {
       events.push(ev.data);
-      if (ev.data.type === 'RESP_END' || ev.data.type === 'RESP_ERROR') r();
+      if (ev.data.type === 'RESP_START' && ev.data.bodyStream) {
+        respBodyText = await new Response(ev.data.bodyStream).text();
+        r();
+      } else if (ev.data.type === 'RESP_ERROR') {
+        r();
+      }
     };
   });
   await bridge.handleFetchRequest(
@@ -802,6 +919,7 @@ test('TunnelBridge V7: BRIDGE_PING, immediate REQ_ACK, header strip, V7 TLV cook
   assert.equal(events[0].type, 'REQ_ACK');
   assert.equal(events[1].type, 'RESP_START');
   assert.equal(events[1].status, 200);
+  assert.equal(respBodyText, 'hello-v8');
   assert.deepEqual(events[1].cookieDeltas, [{ op: 'set', name: 'theme', value: 'dark', path: '/' }]);
   assert.deepEqual(receivedReqs[0].headers, [{ name: 'accept', value: 'text/plain' }]);
   assert.equal(receivedReqs[0].fetchCtx, tlvMod.FetchCtxFlag.SAME_ORIGIN_CLIENT);
@@ -809,91 +927,10 @@ test('TunnelBridge V7: BRIDGE_PING, immediate REQ_ACK, header strip, V7 TLV cook
     { op: tlvMod.CookieOp.DEL, name: 'sid', value: '', path: '/', expiresMs: 0 },
   ]);
 
-  bridge.destroy();
-  clientMux.close();
-  sCtrl.close();
-  sSlot.close();
-});
-
-test('TunnelBridge V7: early 204 POST pool slot release & untrusted bridgePort chunk bounds defense', async () => {
-  function makePair() {
-    const mk = () => {
-      const listeners = new Map();
-      return {
-        readyState: 'open',
-        bufferedAmount: 0,
-        bufferedAmountLowThreshold: 0,
-        binaryType: 'arraybuffer',
-        peer: null,
-        addEventListener(type, fn) {
-          let s = listeners.get(type);
-          if (!s) {
-            s = new Set();
-            listeners.set(type, s);
-          }
-          s.add(fn);
-        },
-        removeEventListener(type, fn) {
-          listeners.get(type)?.delete(fn);
-        },
-        _emit(type, ev) {
-          for (const fn of Array.from(listeners.get(type) || [])) fn(ev);
-        },
-        send(data) {
-          if (this.readyState !== 'open') throw new Error('closed');
-          const cp = new Uint8Array(data).slice();
-          const p = this.peer;
-          if (p && p.readyState === 'open') {
-            queueMicrotask(() => p._emit('message', { data: cp.buffer }));
-          }
-        },
-        close() {
-          this.readyState = 'closed';
-          this._emit('close', {});
-        },
-      };
-    };
-    const a = mk();
-    const b = mk();
-    a.peer = b;
-    b.peer = a;
-    return [a, b];
-  }
-
-  const [cCtrl, sCtrl] = makePair();
-  const poolSize = 4;
-  const cSlots = [];
-  const sSlots = [];
-  for (let i = 0; i < poolSize; i++) {
-    const [a, b] = makePair();
-    cSlots.push(a);
-    sSlots.push(b);
-    // Server immediately replies 204 No Content (FIN) on POST BEFORE client finishes sending body!
-    b.addEventListener('message', (ev) => {
-      const f = frameMod.decodeFrame(new Uint8Array(ev.data));
-      if (f.type === frameMod.FrameType.HEADERS) {
-        const resp = tlvMod.encodeResponseHeaders({ status: 204, headers: [] });
-        b.send(frameMod.encodeFrame(f.gen, frameMod.FrameType.HEADERS, frameMod.FrameFlag.FIN, resp));
-      }
-    });
-  }
-
-  const clientMux = new muxMod.PoolMux({}, poolSize);
-  clientMux.attachControlDC(cCtrl);
-  for (let i = 0; i < poolSize; i++) clientMux.attachPoolDC(i, cSlots[i]);
-
-  const bridge = new portalBridgeMod.TunnelBridge();
-  bridge.setContext(
-    clientMux,
-    () => makePair()[0],
-    'https://sbx-1.sandbox.example',
-    { nodeId: 'demo', backendOrigin: 'http://app.local', isStaticMode: false, sameSiteMode: false },
-    null
-  );
-
-  // 40 sequential POSTs returning early 204 No Content on a 4-slot pool MUST NOT deadlock or leak slots!
+  // 3. 40 sequential POSTs returning early 204 No Content MUST NOT deadlock or leak active streams!
   for (let i = 0; i < 40; i++) {
     const ch = new MessageChannel();
+    const neverEndingUpload = new ReadableStream({ start() {} });
     const got204 = new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error(`204 POST #${i} deadlocked!`)), 2000);
       ch.port1.onmessage = (ev) => {
@@ -911,59 +948,20 @@ test('TunnelBridge V7: early 204 POST pool slot release & untrusted bridgePort c
         method: 'POST',
         target: '/beacon',
         headers: [],
-        hasBody: true, // Intentionally never send REQ_BODY_END — simulates early 204 before upload finishes!
+        hasBody: true,
+        bodyStream: neverEndingUpload,
       },
       ch.port2
     );
     assert.equal(await got204, 204);
     ch.port1.close();
   }
-  assert.equal(clientMux.getActiveStreamCount(), 0, 'all 4 pool slots must be cleanly released');
-
-  // Untrusted bridgePort out-of-bounds REQ_BODY_CHUNK MUST fail with 400 and release stream!
-  const [cSlow, sSlow] = makePair();
-  const slowMux = new muxMod.PoolMux({}, 1);
-  slowMux.attachControlDC(cCtrl);
-  slowMux.attachPoolDC(0, cSlow);
-  const bridge2 = new portalBridgeMod.TunnelBridge();
-  bridge2.setContext(
-    slowMux,
-    () => makePair()[0],
-    'https://sbx-1.sandbox.example',
-    { nodeId: 'demo', backendOrigin: 'http://app.local', isStaticMode: false, sameSiteMode: false },
-    null
-  );
-  const badCh = new MessageChannel();
-  const errP = new Promise((resolve) => {
-    badCh.port1.onmessage = (ev) => {
-      if (ev.data.type === 'RESP_ERROR') resolve(ev.data);
-    };
-  });
-  await bridge2.handleFetchRequest(
-    {
-      type: 'TUNNEL_FETCH_REQUEST',
-      reqId: 'oob-1',
-      tabId: 'tab-1',
-      method: 'POST',
-      target: '/upload',
-      headers: [],
-      hasBody: true,
-    },
-    badCh.port2
-  );
-  const tiny = new ArrayBuffer(8);
-  badCh.port1.postMessage({ type: 'REQ_BODY_CHUNK', buffer: tiny, offset: 4, length: 9999 }, [tiny]);
-  const badResp = await errP;
-  assert.equal(badResp.status, 400, 'out-of-bounds REQ_BODY_CHUNK must return 400');
-  badCh.port1.close();
+  assert.equal(clientMux.activeStreamCount, 0, 'all V8 streams must be cleanly released after early 204');
 
   bridge.destroy();
-  bridge2.destroy();
   clientMux.close();
-  slowMux.close();
   sCtrl.close();
-  sSlow.close();
-  for (const s of sSlots) s.close();
+  sLane.close();
 });
 
 test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions, TOP_LEVEL_NAV, CREDENTIALS_OMIT & Brotli', async () => {
@@ -1023,11 +1021,30 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
     ch1.port2.postMessage({ type: 'PORTAL_PING', pingId: 'alive-1' });
     assert.equal(await pongP, 'alive-1');
 
-    // 2. handleEnterNavigation: requires registered one-time enterNonce, blocks \t open-redirect, handles Chinese path!
+    // 2. handleEnterNavigation: requires registered one-time enterNonce bound to nextPath + GET/navigate/iframe!
     const noNonce = reg.handleEnterNavigation(new URL(`${swOrigin}/__p2p_gw__/enter?tab=tab-1&next=/app`), 'c1', '');
     assert.equal(noNonce.status, 403, 'enter without nonce must return 403');
 
-    reg.registerEnterNonce('nonce-tab-redirect-1234', 'tab-1');
+    // M-24: tampered ?next= path or non-GET / non-iframe enter MUST fail with 403!
+    reg.registerEnterNonce('nonce-bound-path-1234', 'tab-1', '/dashboard');
+    const tamperedNext = reg.handleEnterNavigation(
+      new URL(`${swOrigin}/__p2p_gw__/enter?tab=tab-1&nonce=nonce-bound-path-1234&next=/admin`),
+      'c-tamper',
+      '',
+      { method: 'GET', mode: 'navigate', destination: 'iframe' }
+    );
+    assert.equal(tamperedNext.status, 403, 'M-24: enterNonce must reject tampered ?next= path');
+
+    reg.registerEnterNonce('nonce-doc-dest-1234', 'tab-1', '/');
+    const docEnter = reg.handleEnterNavigation(
+      new URL(`${swOrigin}/__p2p_gw__/enter?tab=tab-1&nonce=nonce-doc-dest-1234&next=/`),
+      'c-doc-enter',
+      '',
+      { method: 'GET', mode: 'navigate', destination: 'document' }
+    );
+    assert.equal(docEnter.status, 403, 'M-24: /enter must reject destination=document');
+
+    reg.registerEnterNonce('nonce-tab-redirect-1234', 'tab-1', '/');
     const tabAttack = reg.handleEnterNavigation(
       new URL(`${swOrigin}/__p2p_gw__/enter?tab=tab-1&nonce=nonce-tab-redirect-1234&next=%2F%09%2Fevil.example`),
       'c-tab',
@@ -1045,16 +1062,30 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
     assert.equal(replay.status, 403, 'replayed enterNonce must be rejected');
 
     // Chinese path & query must succeed cleanly with ASCII percent-encoded Location header!
-    reg.registerEnterNonce('nonce-cn-path-567890', 'tab-1');
+    const cnNext = '/目录/文档?q=中文#节';
+    reg.registerEnterNonce('nonce-cn-path-567890', 'tab-1', cnNext);
     const cnResp = reg.handleEnterNavigation(
-      new URL(`${swOrigin}/__p2p_gw__/enter?tab=tab-1&nonce=nonce-cn-path-567890&next=${encodeURIComponent('/目录/文档?q=中文#节')}`),
+      new URL(`${swOrigin}/__p2p_gw__/enter?tab=tab-1&nonce=nonce-cn-path-567890&next=${encodeURIComponent(cnNext)}`),
       'c-app',
-      ''
+      '',
+      { method: 'GET', mode: 'navigate', destination: 'iframe' }
     );
     assert.equal(cnResp.status, 302);
     assert.equal(cnResp.headers.get('location'), '/%E7%9B%AE%E5%BD%95/%E6%96%87%E6%A1%A3?q=%E4%B8%AD%E6%96%87#%E8%8A%82');
 
-    // 3. W3C Fetch Anti-CSRF Gate (authorizeFetchRequest):
+    // 3. C-1 Negative Test: destination === 'document' MUST be rejected EVEN WHEN clientId IS BOUND!
+    const boundDocEscape = fetchMod.authorizeFetchRequest(reg, {
+      clientId: 'c-app',
+      resultingClientId: 'r-popup-escape',
+      mode: 'navigate',
+      destination: 'document',
+      method: 'GET',
+      referrer: `${swOrigin}/`,
+      swOrigin,
+    });
+    assert.equal(boundDocEscape.allowed, false, 'C-1: destination=document MUST be blocked even for a bound clientId');
+
+    // W3C Fetch Anti-CSRF Gate:
     assert.equal(
       fetchMod.authorizeFetchRequest(reg, {
         clientId: '',
@@ -1082,18 +1113,6 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
     assert.equal(
       fetchMod.authorizeFetchRequest(reg, {
         clientId: '',
-        resultingClientId: 'r-doc',
-        mode: 'navigate',
-        destination: 'document',
-        method: 'GET',
-        referrer: '',
-        swOrigin,
-      }).allowed,
-      false
-    );
-    assert.equal(
-      fetchMod.authorizeFetchRequest(reg, {
-        clientId: '',
         resultingClientId: 'r-ext',
         mode: 'navigate',
         destination: 'iframe',
@@ -1104,21 +1123,35 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
       false
     );
 
-    // P0-2 Negative test: unbound empty-referrer iframe in `-target` proxy mode MUST return 403!
-    const emptyRefProxy = fetchMod.authorizeFetchRequest(reg, {
+    // M-24 Negative test: proxy `-target` mode rejects unbound iframe even with portalOrigin referrer!
+    const portalRefProxy = fetchMod.authorizeFetchRequest(reg, {
       clientId: '',
-      resultingClientId: 'r-emptyref-proxy',
+      resultingClientId: 'r-portalref',
+      mode: 'navigate',
+      destination: 'iframe',
+      method: 'GET',
+      referrer: `${portalOrigin}/`,
+      swOrigin,
+    });
+    assert.equal(portalRefProxy.allowed, false, 'M-24: proxy mode must NOT authorize unbound iframe via referrer fallback');
+
+    // M-24 Positive test: W3C `replacesClientId` authorizes Back/Forward/Reload strictly via bound client!
+    const reloadAuth = fetchMod.authorizeFetchRequest(reg, {
+      clientId: '',
+      resultingClientId: 'c-app-reloaded',
+      replacesClientId: 'c-app',
       mode: 'navigate',
       destination: 'iframe',
       method: 'GET',
       referrer: '',
       swOrigin,
     });
-    assert.equal(emptyRefProxy.allowed, false, 'P0-2: unbound empty-referrer iframe MUST be blocked in -target proxy mode');
-    assert.equal(reg.isBoundClient('r-emptyref-proxy'), false);
+    assert.equal(reloadAuth.allowed, true, 'replacesClientId must preserve bound session across Back/Forward/Reload');
+    assert.equal(reloadAuth.sameOriginClient, true);
+    assert.equal(reg.getSessionByTabId('tab-1').rootClientId, 'c-app-reloaded', 'rootClientId must transfer on reload');
 
-    // P0-2 Positive test: static `-dir`/`-file` (cookie-less, isStaticMode=true) allows empty-referrer iframe
-    // AND binds resultingClientId so subresources (<img>/<link>) work!
+    // Static `-dir`/`-file` (cookie-less, isStaticMode=true) allows opaque-origin iframe navigation
+    // AND binds resultingClientId so subresources work!
     const staticReg = new sessionRegMod.SessionRegistry(new Set([portalOrigin]));
     const chStatic = makeCh();
     staticReg.attachPort(
@@ -1136,26 +1169,13 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
       referrer: '',
       swOrigin,
     });
-    assert.equal(emptyRefStatic.allowed, true, 'static -dir mode must allow opaque-origin empty-referrer iframe navigation');
+    assert.equal(emptyRefStatic.allowed, true, 'static -dir mode must allow opaque-origin iframe navigation');
     assert.equal(emptyRefStatic.sameOriginClient, false);
     assert.equal(staticReg.isBoundClient('r-emptyref-dir'), true, 'static -dir mode must bind resultingClientId for subresources');
 
-    // Unbound navigate iframe with trusted portalOrigin referrer when sessions.size === 1 IS allowed!
-    const portalRefAuth = fetchMod.authorizeFetchRequest(reg, {
-      clientId: '',
-      resultingClientId: 'r-portalref',
-      mode: 'navigate',
-      destination: 'iframe',
-      method: 'GET',
-      referrer: `${portalOrigin}/`,
-      swOrigin,
-    });
-    assert.equal(portalRefAuth.allowed, true);
-    assert.equal(portalRefAuth.sameOriginClient, true);
-
     // Bound appFrame client spawning Worker -> inherits session, sameOriginClient === true, binds resultingClientId!
     const workerAuth = fetchMod.authorizeFetchRequest(reg, {
-      clientId: 'c-app',
+      clientId: 'c-app-reloaded',
       resultingClientId: 'c-worker-1',
       mode: 'same-origin',
       destination: 'worker',
@@ -1167,7 +1187,7 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
     assert.equal(workerAuth.sameOriginClient, true);
     assert.equal(reg.isBoundClient('c-worker-1'), true, 'Worker resultingClientId must be bound to parent tab session');
 
-    // Multi-tab Tier 1 tightening: when sessions.size === 2, unbound iframe navigation MUST return 403!
+    // C-2 Negative test: Tab-2 flooding 200 child clients MUST NEVER evict Tab-1's root appFrame!
     const ch2 = makeCh();
     reg.attachPort(
       'tab-2',
@@ -1175,34 +1195,26 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
       { nodeId: 'demo', backendOrigin: 'http://app.local', isStaticMode: false, sameSiteMode: false },
       ch2.port1
     );
-    assert.equal(
-      fetchMod.authorizeFetchRequest(reg, {
-        clientId: '',
-        resultingClientId: 'r-multitab',
-        mode: 'navigate',
-        destination: 'iframe',
-        method: 'GET',
-        referrer: `${portalOrigin}/`,
-        swOrigin,
-      }).allowed,
-      false,
-      'multi-tab sessions.size > 1 must reject unbound iframe navigation'
-    );
+    reg.bindClient('tab2-root', 'tab-2', true);
+    for (let i = 0; i < 200; i++) {
+      reg.bindClient(`tab2-spam-${i}`, 'tab-2', false);
+    }
+    assert.equal(reg.isBoundClient('c-app-reloaded'), true, 'C-2: Tab-2 flood MUST NOT evict Tab-1 root appFrame');
+    assert.equal(reg.isBoundClient('tab2-root'), true, 'C-2: Tab-2 flood MUST NOT evict its own root appFrame');
+    assert.ok(reg.getSessionByTabId('tab-2').clientIds.size <= sessionRegMod.MAX_CLIENTS_PER_TAB);
 
-    // 4. P1-25: pruneDeadSessions deletes closed/reloaded tab whose bridgePort does not answer BRIDGE_PING,
-    //    restoring getSingleActiveSession() cleanly!
+    // 4. pruneDeadSessions deletes closed/reloaded tab whose bridgePort does not answer BRIDGE_PING!
     ch2.port2.onmessage = (ev) => {
       if (ev.data?.type === 'BRIDGE_PING') {
         ch2.port2.postMessage({ type: 'BRIDGE_PONG', pingId: ev.data.pingId });
       }
     };
-    // tab-1 port2 does NOT answer BRIDGE_PING -> simulates closed/reloaded Portal tab!
     ch1.port2.onmessage = null;
     const pruneScope = {
       location: { origin: swOrigin },
       clients: { get: async () => undefined },
     };
-    await reg.pruneDeadSessions(pruneScope);
+    await reg.pruneDeadSessions(pruneScope, '', 100);
     assert.equal(reg.getSessionByTabId('tab-1'), null, 'dead tab-1 session must be removed on pruneDeadSessions');
     assert.equal(reg.getActiveSessionCount(), 1, 'only live tab-2 must remain');
     assert.equal(reg.getSingleActiveSession()?.tabId, 'tab-2', 'getSingleActiveSession must recover after reload');
@@ -1267,7 +1279,7 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
     assert.equal((omitCtx.fetchCtx & tlvMod.FetchCtxFlag.CREDENTIALS_OMIT) !== 0, true);
     assert.equal(omitCtx.combinedMutations.length, 0, 'credentials:omit must not send cookie mutations');
 
-    // 7. buildSafeResponseHeaders preserves Brotli Content-Encoding when stripContentEncoding=false & adds frame-ancestors!
+    // 7. buildSafeResponseHeaders preserves Brotli Content-Encoding & upstream CSP alongside frame-ancestors!
     const brRes = fetchMod.buildSafeResponseHeaders(
       [
         { name: 'content-type', value: 'text/html; charset=utf-8' },
@@ -1277,7 +1289,8 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
       { stripContentLength: false, stripContentEncoding: false, frameAncestorsOrigin: portalOrigin }
     );
     assert.equal(brRes.headers.get('content-encoding'), 'br', 'non-gzip Content-Encoding must not be stripped');
-    assert.equal(brRes.headers.get('content-security-policy'), `frame-ancestors 'self' ${portalOrigin}`);
+    assert.ok(brRes.headers.get('content-security-policy')?.includes("default-src 'self'"), 'upstream CSP preserved');
+    assert.ok(brRes.headers.get('content-security-policy')?.includes(`frame-ancestors 'self' ${portalOrigin}`));
   } finally {
     for (const p of openPorts) {
       try {
@@ -1290,7 +1303,7 @@ test('SW Anti-CSRF Gate (P0-2), SessionRegistry Fail-Closed / pruneDeadSessions,
   }
 });
 
-test('stream_bridge V7: pre-aborted Request.signal rejects with AbortError (no TDZ ReferenceError)', async () => {
+test('stream_bridge V8: pre-aborted Request.signal rejects with AbortError & onAck fires before RESP_START (H-18a)', async () => {
   const reg = new sessionRegMod.SessionRegistry(new Set(['https://portal.example']));
   const ch = new MessageChannel();
   try {
@@ -1305,9 +1318,53 @@ test('stream_bridge V7: pre-aborted Request.signal rejects with AbortError (no T
     ac.abort();
     const req = new Request('https://sbx-a.sandbox.example/api', { method: 'GET', signal: ac.signal });
     await assert.rejects(
-      () => streamBridgeMod.executeTunnelRequest({}, reg, sess, req, '/api', [], false, 0, []),
+      () => streamBridgeMod.executeTunnelRequest({}, reg, sess, req, '/api', [], 0, []),
       (err) => err && (err.name === 'AbortError' || /abort/i.test(err.message))
     );
+
+    // H-18a: verify onAck callback triggers as soon as REQ_ACK arrives (even while RESP_START is delayed!).
+    let ackedBeforeResp = false;
+    ch.port2.onmessage = (ev) => {
+      if (ev.data?.type === 'TUNNEL_FETCH_REQUEST') {
+        const rp = ev.ports[0];
+        rp.postMessage({ type: 'REQ_ACK', reqId: ev.data.reqId });
+        setTimeout(() => {
+          rp.postMessage({ type: 'RESP_START', status: 200, headers: [], hasBody: false });
+        }, 40);
+      }
+    };
+    const okReq = new Request('https://sbx-a.sandbox.example/slow', { method: 'GET' });
+    const resP = streamBridgeMod.executeTunnelRequest({}, reg, sess, okReq, '/slow', [], 0, [], () => {
+      ackedBeforeResp = true;
+    });
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(ackedBeforeResp, true, 'H-18a: onAck must fire immediately on REQ_ACK before RESP_START');
+    const res = await resP;
+    assert.equal(res.response.status, 200);
+
+    // C-3a Negative test: Firefox FetchEvent.request where request.body === undefined MUST fall back to arrayBuffer()!
+    let uploadedText = '';
+    ch.port2.onmessage = async (ev) => {
+      if (ev.data?.type === 'TUNNEL_FETCH_REQUEST') {
+        const rp = ev.ports[0];
+        assert.equal(ev.data.hasBody, true, 'C-3a: Firefox POST fallback must mark hasBody=true');
+        assert.ok(ev.data.bodyStream, 'C-3a: Firefox POST fallback must transfer a ReadableStream');
+        uploadedText = await new Response(ev.data.bodyStream).text();
+        rp.postMessage({ type: 'REQ_ACK', reqId: ev.data.reqId });
+        rp.postMessage({ type: 'RESP_START', status: 201, headers: [], hasBody: false });
+      }
+    };
+    const firefoxMockReq = {
+      method: 'POST',
+      body: undefined,
+      signal: undefined,
+      async arrayBuffer() {
+        return new TextEncoder().encode('firefox-post-body').buffer;
+      },
+    };
+    const ffRes = await streamBridgeMod.executeTunnelRequest({}, reg, sess, firefoxMockReq, '/submit', [], 0, []);
+    assert.equal(ffRes.response.status, 201);
+    assert.equal(uploadedText, 'firefox-post-body', 'C-3a: Firefox POST body must NOT be silently dropped');
   } finally {
     ch.port1.onmessage = null;
     ch.port1.close();
@@ -1315,44 +1372,32 @@ test('stream_bridge V7: pre-aborted Request.signal rejects with AbortError (no T
   }
 });
 
-test('TunnelBridge V7: duplicate/empty wsId still caps MAX_CONCURRENT_WS_STREAMS & outbound >16MiB WS closes with 1008', async () => {
+test('TunnelBridge V8: multiplexed WS concurrency cap (64) & outbound >16MiB WS closes with 1008', async () => {
   function makePair() {
-    const mk = () => {
-      const listeners = new Map();
-      return {
-        readyState: 'open',
-        bufferedAmount: 0,
-        bufferedAmountLowThreshold: 0,
-        binaryType: 'arraybuffer',
-        peer: null,
-        addEventListener(type, fn) {
-          let s = listeners.get(type);
-          if (!s) {
-            s = new Set();
-            listeners.set(type, s);
-          }
-          s.add(fn);
-        },
-        removeEventListener(type, fn) {
-          listeners.get(type)?.delete(fn);
-        },
-        _emit(type, ev) {
-          for (const fn of Array.from(listeners.get(type) || [])) fn(ev);
-        },
-        send(data) {
-          if (this.readyState !== 'open') throw new Error('closed');
-          const cp = new Uint8Array(data).slice();
-          const p = this.peer;
-          if (p && p.readyState === 'open') {
-            queueMicrotask(() => p._emit('message', { data: cp.buffer }));
-          }
-        },
-        close() {
-          this.readyState = 'closed';
-          this._emit('close', {});
-        },
-      };
-    };
+    const mk = () => ({
+      readyState: 'open',
+      bufferedAmount: 0,
+      bufferedAmountLowThreshold: 0,
+      binaryType: 'arraybuffer',
+      peer: null,
+      onmessage: null,
+      onopen: null,
+      onclose: null,
+      onerror: null,
+      onbufferedamountlow: null,
+      send(data) {
+        if (this.readyState !== 'open') throw new Error('closed');
+        const cp = new Uint8Array(data).slice();
+        const p = this.peer;
+        if (p && p.readyState === 'open') {
+          queueMicrotask(() => p.onmessage?.({ data: cp.buffer }));
+        }
+      },
+      close() {
+        this.readyState = 'closed';
+        this.onclose?.({});
+      },
+    });
     const a = mk();
     const b = mk();
     a.peer = b;
@@ -1361,33 +1406,28 @@ test('TunnelBridge V7: duplicate/empty wsId still caps MAX_CONCURRENT_WS_STREAMS
   }
 
   const [cCtrl, sCtrl] = makePair();
-  const [cSlot, sSlot] = makePair();
-  const clientMux = new muxMod.PoolMux({}, 1);
-  clientMux.attachControlDC(cCtrl);
-  clientMux.attachPoolDC(0, cSlot);
+  const [cLane, sLane] = makePair();
+  sLane.onmessage = (ev) => {
+    const f = frameMod.decodeFrame(new Uint8Array(ev.data));
+    if (f.type === frameMod.FrameType.HEADERS) {
+      sLane.send(
+        frameMod.encodeFrame(
+          f.streamId,
+          frameMod.FrameType.HEADERS,
+          frameMod.FrameFlag.NONE,
+          tlvMod.encodeResponseHeaders({ status: 101, headers: [] })
+        )
+      );
+    }
+  };
 
-  const serverWsDCs = [];
+  const clientMux = new muxMod.PoolMux(1, {});
+  clientMux.attachControlDC(cCtrl);
+  clientMux.attachLaneDC(0, cLane);
+
   const bridge = new portalBridgeMod.TunnelBridge();
   bridge.setContext(
     clientMux,
-    () => {
-      const [cWs, sWs] = makePair();
-      serverWsDCs.push(sWs);
-      sWs.addEventListener('message', (ev) => {
-        const f = frameMod.decodeFrame(new Uint8Array(ev.data));
-        if (f.type === frameMod.FrameType.HEADERS) {
-          sWs.send(
-            frameMod.encodeFrame(
-              1,
-              frameMod.FrameType.HEADERS,
-              frameMod.FrameFlag.NONE,
-              tlvMod.encodeResponseHeaders({ status: 101, headers: [] })
-            )
-          );
-        }
-      });
-      return cWs;
-    },
     'https://sbx-1.sandbox.example',
     { nodeId: 'demo', backendOrigin: 'http://app.local', isStaticMode: false, sameSiteMode: false },
     null
@@ -1396,7 +1436,7 @@ test('TunnelBridge V7: duplicate/empty wsId still caps MAX_CONCURRENT_WS_STREAMS
   const openChannels = [];
   try {
     // 1. Open 64 WS streams with IDENTICAL empty wsId '' -> internal wsKeySeq still tracks all 64,
-    //    so the 65th MUST fail with WS_ERROR (cannot bypass concurrency cap with empty/duplicate wsId)!
+    //    so the 65th MUST fail with WS_ERROR!
     for (let i = 0; i < 64; i++) {
       const ch = new MessageChannel();
       openChannels.push(ch);
@@ -1421,14 +1461,12 @@ test('TunnelBridge V7: duplicate/empty wsId still caps MAX_CONCURRENT_WS_STREAMS
     assert.match(err65.message || err65.error || '', /Too many concurrent/i);
 
     // 2. Outbound WS_SEND queue cap (>16 MiB) closes the WS with 1008 Policy Violation!
-    // Use the first opened WS channel (whose peer never sends CREDIT so outbound queue builds up).
     const firstPort = openChannels[0].port1;
     const capCloseP = new Promise((resolve) => {
       firstPort.onmessage = (ev) => {
         if (ev.data?.type === 'WS_CLOSE') resolve(ev.data);
       };
     });
-    // Wait for WS_OPEN handshake microtask then flood >16 MiB
     await new Promise((r) => setTimeout(r, 20));
     for (let i = 0; i < 18; i++) {
       const buf = new ArrayBuffer(1024 * 1024);
@@ -1445,8 +1483,7 @@ test('TunnelBridge V7: duplicate/empty wsId still caps MAX_CONCURRENT_WS_STREAMS
     bridge.destroy();
     clientMux.close();
     sCtrl.close();
-    sSlot.close();
-    for (const s of serverWsDCs) s.close();
+    sLane.close();
   }
 });
 
@@ -1487,6 +1524,9 @@ test('PeerSession V7 regressions: PEER_OFFLINE teardown, timer cancellation, GOA
       this.sent = [];
       this.onopen = null;
       this.onclose = null;
+      this.onmessage = null;
+      this.onerror = null;
+      this.onbufferedamountlow = null;
     }
     send(data) {
       this.sent.push(new Uint8Array(data));
@@ -1501,6 +1541,11 @@ test('PeerSession V7 regressions: PEER_OFFLINE teardown, timer cancellation, GOA
       this.readyState = 'open';
       this.onopen?.();
       this.dispatchEvent(new Event('open'));
+    }
+    _recv(buf) {
+      const ev = new MessageEvent('message', { data: buf });
+      this.onmessage?.(ev);
+      this.dispatchEvent(ev);
     }
   }
 
@@ -1629,12 +1674,11 @@ test('PeerSession V7 regressions: PEER_OFFLINE teardown, timer cancellation, GOA
     const ctrl3 = pc3.dcs.get('p2pctrl');
     ctrl3._open();
     const goAwayBytes = frameMod.encodeFrame(0, frameMod.FrameType.GOAWAY, frameMod.FrameFlag.NONE, frameMod.encodeGoAwayPayload(frameMod.ErrorCode.GOING_AWAY));
-    ctrl3.dispatchEvent(new MessageEvent('message', { data: goAwayBytes.buffer }));
+    ctrl3._recv(goAwayBytes.buffer);
     assert.equal(session.getPeerConnection(), null, 'GOAWAY must immediately tear down current PeerConnection');
     assert.equal(pc3.closed, true);
 
-    // 4. P1-01: Once in-DTLS authentication succeeds, Portal MUST immediately close signaling WS
-    //    so signaling never stays idle until server's 45s client_idle_timeout!
+    // 4. Once in-DTLS authentication succeeds, Portal MUST immediately close signaling WS!
     ws1._recv({ type: 'peer_status', node_id: 'demo', online: true, require_visitor_auth: false, agent_pk: '' });
     await new Promise((r) => setTimeout(r, 20));
     assert.equal(pcs.length, 4);
@@ -1653,7 +1697,7 @@ test('PeerSession V7 regressions: PEER_OFFLINE teardown, timer cancellation, GOA
       frameMod.FrameFlag.NONE,
       te.encode(JSON.stringify({ agent_nonce: 'anonce-ok', auth_methods: ['public'] }))
     );
-    ctrl4.dispatchEvent(new MessageEvent('message', { data: chalFrame.buffer }));
+    ctrl4._recv(chalFrame.buffer);
     await new Promise((r) => setTimeout(r, 15));
     const resFrame = frameMod.encodeFrame(
       0,
@@ -1667,7 +1711,7 @@ test('PeerSession V7 regressions: PEER_OFFLINE teardown, timer cancellation, GOA
         })
       )
     );
-    ctrl4.dispatchEvent(new MessageEvent('message', { data: resFrame.buffer }));
+    ctrl4._recv(resFrame.buffer);
     await new Promise((r) => setTimeout(r, 20));
     assert.equal(authedEvents.length, 1, 'public auth must complete');
     assert.equal(ws1.readyState, MockWS.CLOSED, 'P1-01: signaling WS MUST be closed immediately after authentication');

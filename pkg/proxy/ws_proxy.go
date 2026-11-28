@@ -5,10 +5,12 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -17,6 +19,33 @@ import (
 	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/protocol"
 )
+
+type wsRawConnCapture struct {
+	mu   sync.Mutex
+	conn net.Conn
+}
+
+func (c *wsRawConnCapture) set(nc net.Conn) {
+	c.mu.Lock()
+	c.conn = nc
+	c.mu.Unlock()
+}
+
+func (c *wsRawConnCapture) forceClose() {
+	c.mu.Lock()
+	nc := c.conn
+	c.mu.Unlock()
+	if nc != nil {
+		_ = nc.SetDeadline(time.Now())
+		_ = nc.Close()
+	}
+}
+
+type wsDialCaptureKey struct{}
+
+func withWSRawConnCapture(ctx context.Context, cap *wsRawConnCapture) context.Context {
+	return context.WithValue(ctx, wsDialCaptureKey{}, cap)
+}
 
 const (
 	MaxWSFramePayloadBytes = protocol.MaxWSMessageBytes // 16 MiB
@@ -55,10 +84,22 @@ func NewWSProxy(opts WSProxyOptions) (*WSProxy, error) {
 	if sni := opts.Policy.DefaultTLSServerName(opts.SNI); sni != "" {
 		targetTLS.ServerName = sni
 	}
+	baseDial := newTargetDialContext()
 	targetTr := &http.Transport{
-		DialContext:         newTargetDialContext(),
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			nc, err := baseDial(ctx, network, addr)
+			if err == nil {
+				if cap, ok := ctx.Value(wsDialCaptureKey{}).(*wsRawConnCapture); ok && cap != nil {
+					cap.set(nc)
+				}
+			}
+			return nc, err
+		},
 		TLSClientConfig:     targetTLS,
 		TLSHandshakeTimeout: defaultTLSHandshakeTimeout,
+		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConns:        32,
+		MaxIdleConnsPerHost: 16,
 	}
 	if opts.ProxyURL != nil {
 		targetTr.Proxy = http.ProxyURL(opts.ProxyURL)
@@ -116,7 +157,8 @@ func (wp *WSProxy) HandleStream(
 	upstreamHeaders.Del("Sec-WebSocket-Protocol")
 	upstreamHeaders.Del("Sec-WebSocket-Extensions")
 
-	dialCtx, dialCancel := context.WithTimeout(stream.Context(), wsDialTimeout)
+	rawCapture := &wsRawConnCapture{}
+	dialCtx, dialCancel := context.WithTimeout(withWSRawConnCapture(stream.Context(), rawCapture), wsDialTimeout)
 	conn, resp, err := websocket.Dial(dialCtx, dest.URL.String(), &websocket.DialOptions{
 		HTTPClient:   wp.client,
 		HTTPHeader:   upstreamHeaders,
@@ -172,12 +214,13 @@ func (wp *WSProxy) HandleStream(
 			_ = stream.WriteWSClose(code, reason)
 		})
 	}
-	var backendClosedClean bool
+	var backendClosedClean atomic.Bool
 	closeBackend := func(code websocket.StatusCode, reason string) bool {
 		closeOnce.Do(func() {
 			reason = sanitizeUTF8CloseReason(reason, 120)
-			// Run RFC 6455 Close handshake BEFORE cancelling pumpCtx so coder/websocket doesn't
-			// immediately poison the TCP conn, bounded to 1s so unresponsive backends never stall!
+			// Cancel pumpCtx so Goroutine A releases coder/websocket's internal readMu, then attempt
+			// a strictly bounded 1s RFC 6455 Close handshake. If the backend stalls, force-close the
+			// underlying net.Conn directly (bypassing coder/websocket's casClosing CloseNow stall, H-10b).
 			done := make(chan error, 1)
 			go func() {
 				done <- conn.Close(code, reason)
@@ -187,16 +230,19 @@ func (wp *WSProxy) HandleStream(
 			case err := <-done:
 				timer.Stop()
 				if err == nil {
-					backendClosedClean = true
+					backendClosedClean.Store(true)
 				} else {
+					rawCapture.forceClose()
 					_ = conn.CloseNow()
 				}
 			case <-timer.C:
+				pumpCancel()
+				rawCapture.forceClose()
 				_ = conn.CloseNow()
 			}
 			pumpCancel()
 		})
-		return backendClosedClean
+		return backendClosedClean.Load()
 	}
 
 	var wg sync.WaitGroup
@@ -284,7 +330,6 @@ func (wp *WSProxy) HandleStream(
 				if werr := stream.WriteWSChunk(pumpCtx, curOp, false, curBuf[:nCur]); werr != nil {
 					return
 				}
-				curOp = protocol.TypeWSCont
 				curBuf, nextBuf = nextBuf, curBuf
 				nCur, errCur = nNext, errNext
 			}
@@ -304,9 +349,11 @@ func (wp *WSProxy) HandleStream(
 				curCancel()
 				curCancel = nil
 			}
+			// H-10a: NEVER call curWriter.Close() on abort — coder/websocket can acquire the write lock
+			// on a cancelled context and flush a truncated FIN=1 frame to the backend! Force-close raw socket instead.
 			if curWriter != nil {
-				_ = curWriter.Close()
 				curWriter = nil
+				rawCapture.forceClose()
 			}
 			curBytes = 0
 		}
@@ -350,36 +397,29 @@ func (wp *WSProxy) HandleStream(
 			}
 
 			if chunk.Op == protocol.TypeWSText || chunk.Op == protocol.TypeWSBinary {
-				if curWriter != nil {
-					abortWriter()
-					closeBackend(websocket.StatusProtocolError, "interleaved ws frame")
-					return
-				}
-				wsType := websocket.MessageBinary
-				if chunk.Op == protocol.TypeWSText {
-					wsType = websocket.MessageText
-				}
-				wctx, wcancel := context.WithCancel(pumpCtx)
-				var w io.WriteCloser
-				werr := withWriteDeadline(wcancel, func() error {
-					var err error
-					w, err = conn.Writer(wctx, wsType)
-					return err
-				})
-				if werr != nil {
-					wcancel()
-					return
-				}
-				curWriter = w
-				curCancel = wcancel
-				curBytes = 0
-			} else if chunk.Op == protocol.TypeWSCont {
 				if curWriter == nil {
-					closeBackend(websocket.StatusProtocolError, "unexpected ws continuation")
-					return
+					wsType := websocket.MessageBinary
+					if chunk.Op == protocol.TypeWSText {
+						wsType = websocket.MessageText
+					}
+					wctx, wcancel := context.WithCancel(pumpCtx)
+					var w io.WriteCloser
+					werr := withWriteDeadline(wcancel, func() error {
+						var err error
+						w, err = conn.Writer(wctx, wsType)
+						return err
+					})
+					if werr != nil {
+						wcancel()
+						return
+					}
+					curWriter = w
+					curCancel = wcancel
+					curBytes = 0
 				}
 			} else {
 				closeBackend(websocket.StatusUnsupportedData, "unknown ws opcode")
+				sendWSClose(uint16(websocket.StatusUnsupportedData), "unknown ws opcode")
 				return
 			}
 
@@ -387,6 +427,7 @@ func (wp *WSProxy) HandleStream(
 			if curBytes > MaxWSFramePayloadBytes {
 				abortWriter()
 				closeBackend(websocket.StatusMessageTooBig, "client frame exceeds 16 MiB")
+				sendWSClose(uint16(websocket.StatusMessageTooBig), "client frame exceeds 16 MiB")
 				return
 			}
 			if len(chunk.Payload) > 0 {

@@ -1,6 +1,9 @@
 package mux
 
-import "sync/atomic"
+import (
+	"log"
+	"sync/atomic"
+)
 
 const (
 	DefaultGlobalMemoryBudget  int64 = 256 * 1024 * 1024 // 256 MiB process-wide inbound cap
@@ -44,6 +47,7 @@ func (b *MemoryBudget) Release(n int64) {
 		cur := b.used.Load()
 		next := cur - n
 		if next < 0 {
+			log.Printf("[Mux] WARNING: MemoryBudget underflow (cur=%d release=%d)", cur, n)
 			next = 0
 		}
 		if b.used.CompareAndSwap(cur, next) {

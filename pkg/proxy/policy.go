@@ -32,8 +32,28 @@ type CapabilityScope struct {
 	Readonly   bool
 }
 
-// AllowsDestination validates a request AFTER policy.Resolve() against the canonical decoded
-// destination path, composing cleanly with TargetSubpath (eliminates percent-encoding, query,
+type staticPathPrefixCtxKey struct{}
+
+// WithStaticPathPrefix attaches an active CapabilityScope.PathPrefix to ctx so StaticFSHandler
+// can enforce prefix confinement even when -follow-symlinks is explicitly enabled.
+func WithStaticPathPrefix(ctx context.Context, prefix string) context.Context {
+	if prefix == "" || prefix == "/" {
+		return ctx
+	}
+	return context.WithValue(ctx, staticPathPrefixCtxKey{}, path.Clean("/"+prefix))
+}
+
+// StaticPathPrefixFromContext returns the canonical CapabilityScope path prefix ("/docs") or "".
+func StaticPathPrefixFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(staticPathPrefixCtxKey{}).(string)
+	return v
+}
+
+// AllowsDestination validates a request AFTER policy.Resolve() against BOTH the canonical decoded
+// destination path AND RawPath (eliminates %2F differential bypass, percent-encoding, query,
 // and TargetSubpath+PathPrefix mismatch bypasses).
 func (c *CapabilityScope) AllowsDestination(kind uint8, method string, dest *ResolvedDestination) bool {
 	if c == nil {
@@ -64,6 +84,13 @@ func (c *CapabilityScope) AllowsDestination(kind uint8, method string, dest *Res
 		if cleanReq != allowedPrefix && !strings.HasPrefix(cleanReq, allowedPrefix+"/") {
 			return false
 		}
+		// H-7: When RawPath preserves %2F, require literal '/' boundary for allowedPrefix so
+		// `/public%2Fsecret` can NEVER bypass PathPrefix="/public"!
+		if dest.URL.RawPath != "" {
+			if dest.URL.RawPath != allowedPrefix && !strings.HasPrefix(dest.URL.RawPath, allowedPrefix+"/") {
+				return false
+			}
+		}
 	}
 	return true
 }
@@ -92,12 +119,17 @@ func NewDestinationPolicy(targetRaw string, upstreamHostRaw string) (*Destinatio
 		return nil, fmt.Errorf("%w: %v", ErrInvalidTargetURL, err)
 	}
 	scheme := strings.ToLower(u.Scheme)
-	if (scheme != "http" && scheme != "https") || u.Hostname() == "" {
+	if (scheme != "http" && scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, ErrInvalidTargetURL
 	}
 	host := strings.ToLower(u.Hostname())
 	port := u.Port()
-	if port == "" {
+	if port != "" {
+		pNum, aerr := strconv.Atoi(port)
+		if aerr != nil || pNum < 1 || pNum > 65535 {
+			return nil, ErrInvalidTargetURL
+		}
+	} else {
 		port = defaultSchemePort(scheme)
 	}
 	sub := ""
@@ -262,12 +294,18 @@ func (p *DestinationPolicy) Resolve(rawTarget string, isWS bool) (*ResolvedDesti
 	if err != nil {
 		return nil, err
 	}
+	if strings.HasPrefix(cleanReq, forbiddenCrossOriginProxyPrefix) {
+		return nil, fmt.Errorf("%w: cross-origin proxying is not supported (configure a local reverse proxy behind -target)", ErrUnsafeDestination)
+	}
 
-	// Subpath confinement: ensure `-target http://host/subpath` can NEVER be escaped via `/../admin`.
+	// Subpath confinement: ensure `-target http://host/subpath` can NEVER be escaped via `/../admin`
+	// or `/subpath%2Fsecret` (H-7: when rawP preserves %2F, require literal TargetSubpath boundary).
 	finalPath := cleanReq
 	finalRawPath := rawP
 	if p.TargetSubpath != "" {
-		if cleanReq != p.TargetSubpath && !strings.HasPrefix(cleanReq, p.TargetSubpath+"/") {
+		alreadyUnder := (cleanReq == p.TargetSubpath || strings.HasPrefix(cleanReq, p.TargetSubpath+"/")) &&
+			(rawP == "" || rawP == p.TargetSubpath || strings.HasPrefix(rawP, p.TargetSubpath+"/"))
+		if !alreadyUnder {
 			if cleanReq == "/" {
 				finalPath = p.TargetSubpath + "/"
 			} else {
@@ -318,12 +356,31 @@ func parseAndCleanPath(rawPathAndQuery string) (cleanPath, rawPath, rawQuery str
 }
 
 // RewriteLocationHeader rewrites same-target (or same-upstream-host) Location headers to safe
-// single-slash relative paths while preserving #fragment. Collapses leading `//` to `/` so
-// `http://target//evil.example` can NEVER become a protocol-relative open redirect!
+// single-slash relative paths while preserving #fragment. Strips WHATWG-ignored ASCII tabs/CR/LF
+// before parsing so `/\t/evil.example` can NEVER bypass leading-`//` collapse (H-9)!
 func (p *DestinationPolicy) RewriteLocationHeader(loc string, currentDest *ResolvedDestination) string {
-	loc = strings.TrimSpace(loc)
-	if loc == "" {
-		return loc
+	// WHATWG URL Standard §4.3: browsers strip 0x09 (HTAB), 0x0A (LF), 0x0D (CR) before parsing.
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\r' || r == '\n' {
+			return -1
+		}
+		return r
+	}, loc)
+	origTrimmed := strings.TrimSpace(loc)
+	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return ""
+	}
+	for i := 0; i < len(cleaned); i++ {
+		if cleaned[i] < 0x20 || cleaned[i] == 0x7f {
+			return "/"
+		}
+	}
+	// Block HTAB/CR/LF-smuggled protocol-relative redirects (`/\t/evil.example` -> `//evil.example`)
+	// and backslash-smuggled authority redirects (`/\evil.example`).
+	if strings.HasPrefix(cleaned, "\\") || strings.HasPrefix(cleaned, "/\\") ||
+		(strings.HasPrefix(cleaned, "//") && !strings.HasPrefix(origTrimmed, "//")) {
+		return "/" + strings.TrimLeft(cleaned, "/\\")
 	}
 	baseURL := p.CookieURL(currentDest.URL)
 	if baseURL.Scheme == "ws" {
@@ -336,14 +393,18 @@ func (p *DestinationPolicy) RewriteLocationHeader(loc string, currentDest *Resol
 		baseURL = &cp
 	}
 
-	u, err := url.Parse(loc)
+	u, err := url.Parse(cleaned)
 	if err != nil {
-		return loc
+		// Fail-Closed on unparseable relative-looking URLs: collapse leading '/' and '\'.
+		if strings.HasPrefix(cleaned, "/") || strings.HasPrefix(cleaned, "\\") {
+			return "/" + strings.TrimLeft(cleaned, "/\\")
+		}
+		return cleaned
 	}
 	resolved := baseURL.ResolveReference(u)
 	scheme := strings.ToLower(resolved.Scheme)
 	if scheme != "http" && scheme != "https" {
-		return loc
+		return cleaned
 	}
 	host := strings.ToLower(resolved.Hostname())
 	port := resolved.Port()
@@ -352,7 +413,7 @@ func (p *DestinationPolicy) RewriteLocationHeader(loc string, currentDest *Resol
 	}
 
 	if !(p.IsExactTargetOrigin(scheme, host, port) || p.isEffectiveOrigin(scheme, host, port)) {
-		return loc
+		return cleaned
 	}
 
 	suffix := resolved.EscapedPath()
@@ -361,8 +422,8 @@ func (p *DestinationPolicy) RewriteLocationHeader(loc string, currentDest *Resol
 	if resolved.RawQuery != "" {
 		suffix += "?" + resolved.RawQuery
 	}
-	if resolved.Fragment != "" {
-		suffix += "#" + resolved.Fragment
+	if frag := resolved.EscapedFragment(); frag != "" {
+		suffix += "#" + frag
 	}
 	return suffix
 }
@@ -442,10 +503,16 @@ var forbiddenRequestHeaders = map[string]bool{
 	"x-forwarded-host":        true,
 	"x-forwarded-proto":       true,
 	"x-forwarded-port":        true,
+	"x-forwarded-prefix":      true,
+	"x-forwarded-ssl":         true,
+	"front-end-https":         true,
 	"x-real-ip":               true,
+	"x-client-ip":             true,
 	"cf-connecting-ip":        true,
 	"true-client-ip":          true,
 	"x-original-url":          true,
+	"x-original-host":         true,
+	"x-host":                  true,
 	"x-rewrite-url":           true,
 	"forwarded":               true,
 	"x-p2p-dest-host":         true,
@@ -470,6 +537,9 @@ var forbiddenResponseHeaders = map[string]bool{
 	"strict-transport-security": true,
 	"clear-site-data":           true,
 	"service-worker-allowed":    true,
+	"alt-svc":                   true,
+	"nel":                       true,
+	"report-to":                 true,
 	"x-p2p-content-encoding":    true,
 	"x-p2p-cookie-delta":        true,
 }
@@ -569,13 +639,19 @@ func (p *DestinationPolicy) SanitizeRequestHeaders(
 }
 
 func (p *DestinationPolicy) sanitizeReferer(rawRef string) string {
-	u, err := url.Parse(rawRef)
+	u, err := url.Parse(strings.TrimSpace(rawRef))
 	if err != nil {
+		return ""
+	}
+	sch := strings.ToLower(u.Scheme)
+	if sch != "http" && sch != "https" {
 		return ""
 	}
 	refPath := u.EscapedPath()
 	if refPath == "" {
 		refPath = "/"
+	} else {
+		refPath = "/" + strings.TrimLeft(refPath, "/")
 	}
 	out := p.EffectiveOrigin() + refPath
 	if u.RawQuery != "" {

@@ -1,26 +1,33 @@
 /**
- * V7 Thin Service Worker Entrypoint (/__p2p_gw__/sw.js, scope: '/')
+ * Thin Service Worker Entrypoint (/__p2p_gw__/sw.js, scope: '/')
  * - Strictly validates `event.source` on `SW_ATTACH_PORT` is `/__p2p_gw__/bridge.html` AND
  *   pins `portalOrigin` to server-injected `self.__P2P_GW_PORTAL_ORIGINS__`.
- * - Intercepts `/__p2p_gw__/enter?tab=...&nonce=...&next=...` with one-time 128-bit `enterNonce`.
- * - Routes `SW_WS_OPEN` ONLY for bound clients via `ensureLivePort`, carrying V7 `fetchCtx` & `cookieMutations`.
- * - Routes `SW_COOKIE_MUTATE` to tab `CookieMirror` (never acks when `session == null`).
+ * - Intercepts `/__p2p_gw__/enter` (GET + navigate + iframe + one-time nonce bound to nextPath)
+ *   and `/__p2p_gw__/boot.js` (bound appFrame clients only).
+ * - Routes `SW_WS_OPEN` ONLY for bound clients with background-tab-safe 3000ms liveness check.
+ * - Eliminates untrusted `SW_COOKIE_SYNC`; Portal pushes WS cookie deltas over trusted `bridgePort`.
  */
 
 /// <reference lib="webworker" />
 
 import { FetchCtxFlag } from '../protocol/tlv';
-import { isBackendMeta, isClientCookieMutation, isCookieDelta, isRecord } from '../shared/ipc';
+import { isBackendMeta, isClientCookieMutation, isRecord } from '../shared/ipc';
 import { syncCookieDeltasToClients } from './cookie_sync';
 import {
+  GATEWAY_BOOT_SCRIPT_PATH,
   GATEWAY_ENTER_PATH,
+  handleBootScriptRequest,
   handleFetchEvent,
   shouldBypassGatewayRequest,
 } from './fetch_router';
-import { SessionRegistry } from './session_registry';
+import { BRIDGE_PING_TIMEOUT_MS, SessionRegistry } from './session_registry';
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
-const registry = new SessionRegistry();
+const registry = new SessionRegistry(undefined, {
+  onBridgeCookieDeltas: (session, deltas) => {
+    void syncCookieDeltasToClients(sw, '', session.clientIds, deltas).catch(() => {});
+  },
+});
 let wsSeq = 0;
 
 function isBridgeWindowSource(source: ExtendableMessageEvent['source']): boolean {
@@ -61,7 +68,6 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
       return;
     }
     if (registry.attachPort(data.tabId, data.portalOrigin, data.meta, port)) {
-      // Reap any closed/reloaded previous tabs immediately so sessions.size stays accurate!
       event.waitUntil(registry.pruneDeadSessions(sw, data.tabId).catch(() => {}));
     }
     return;
@@ -82,6 +88,7 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
     const inlineMutations = Array.isArray(data.mutations)
       ? data.mutations.filter(isClientCookieMutation)
       : [];
+    const inlineSeq = typeof data.seq === 'number' && Number.isFinite(data.seq) ? data.seq : undefined;
 
     if (!target || !target.startsWith('/')) {
       try {
@@ -96,18 +103,18 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
     event.waitUntil(
       (async () => {
         await registry.pruneDeadClientWebSockets(sw);
-        if (registry.getActiveSessionCount() === 0 && clientId) {
-          const liveCaller = await registry.isLiveNestedAppClient(sw, clientId);
-          if (liveCaller) {
-            try {
-              liveCaller.postMessage({ type: 'P2P_SW_EVICTED' });
-            } catch {
-              // ignore
-            }
-          }
-        }
         const bound = registry.getBoundSession(clientId, '');
         if (!bound) {
+          if (clientId) {
+            const liveCaller = await registry.isLiveNestedAppClient(sw, clientId);
+            if (liveCaller) {
+              try {
+                liveCaller.postMessage({ type: 'P2P_SW_EVICTED' });
+              } catch {
+                // ignore
+              }
+            }
+          }
           try {
             wsPort.postMessage({ type: 'WS_ERROR', message: 'Forbidden: unbound WebSocket client' });
           } catch {
@@ -117,7 +124,7 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
           return;
         }
 
-        if (!bound.port || !(await registry.pingBridgePort(bound, 500))) {
+        if (!bound.port || !(await registry.pingBridgePort(bound, BRIDGE_PING_TIMEOUT_MS))) {
           registry.evictDeadPort(bound.tabId, bound.port);
           const liveCaller = await registry.isLiveNestedAppClient(sw, clientId);
           if (liveCaller) {
@@ -158,6 +165,7 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
           if (inlineMutations.length > 0) {
             bound.cookieMirror.applyClientMutations(inlineMutations, {
               clientId,
+              seq: inlineSeq,
               queueForUpstream: false,
             });
           }
@@ -175,21 +183,6 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
     return;
   }
 
-  if (data.type === 'SW_COOKIE_SYNC') {
-    const rawDeltas = Array.isArray(data.deltas) ? data.deltas.filter(isCookieDelta) : [];
-    if (rawDeltas.length === 0 || !clientId) return;
-    event.waitUntil(
-      (async () => {
-        const session = registry.getBoundSession(clientId, '');
-        if (!session) return;
-        session.cookieMirror.applyDeltas(rawDeltas);
-        const others = Array.from(session.clientIds).filter((id) => id !== clientId);
-        await syncCookieDeltasToClients(sw, '', others, rawDeltas);
-      })()
-    );
-    return;
-  }
-
   if (data.type === 'SW_COOKIE_MUTATE') {
     const rawMuts = Array.isArray(data.mutations) ? data.mutations.filter(isClientCookieMutation) : [];
     const seq = typeof data.seq === 'number' ? data.seq : undefined;
@@ -199,7 +192,6 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
       (async () => {
         const session = registry.getBoundSession(clientId, '');
         if (!session) {
-          // NEVER ack when session is missing so caller retains mutation for inline fetch piggybacking!
           try {
             ackPort?.close();
           } catch {
@@ -216,6 +208,11 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
           if (deltas.length > 0) {
             const others = Array.from(session.clientIds).filter((id) => id !== clientId);
             await syncCookieDeltasToClients(sw, '', others, deltas);
+            try {
+              session.port?.postMessage({ type: 'BRIDGE_CLIENT_COOKIE_DELTAS', deltas });
+            } catch {
+              // ignore
+            }
           }
         }
         if (ackPort) {
@@ -241,9 +238,17 @@ sw.addEventListener('fetch', (event: FetchEvent) => {
   if (reqUrl.origin === sw.location.origin && reqUrl.pathname === GATEWAY_ENTER_PATH) {
     event.respondWith(
       Promise.resolve(
-        registry.handleEnterNavigation(reqUrl, event.resultingClientId, event.clientId)
+        registry.handleEnterNavigation(reqUrl, event.resultingClientId, event.clientId, {
+          method: event.request.method,
+          mode: event.request.mode,
+          destination: event.request.destination,
+        })
       )
     );
+    return;
+  }
+  if (reqUrl.origin === sw.location.origin && reqUrl.pathname === GATEWAY_BOOT_SCRIPT_PATH) {
+    event.respondWith(handleBootScriptRequest(sw, registry, event));
     return;
   }
   if (shouldBypassGatewayRequest(reqUrl, sw.location.origin)) {

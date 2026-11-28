@@ -43,9 +43,26 @@ func TestStaticFSStepwiseRootAndWindowsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h, err := NewStaticFSHandler(StaticFSOptions{
+	// Default Fail-Closed mode (FollowSymlinks: false) MUST reject ALL symlinks (including in-root linkdir).
+	hDefault, err := NewStaticFSHandler(StaticFSOptions{
 		RootDir:      dir,
 		HideDotfiles: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hDefault.Close()
+	recDef := httptest.NewRecorder()
+	hDefault.ServeHTTP(recDef, httptest.NewRequest("GET", "/linkdir/nested/ok.txt", nil))
+	if recDef.Code == http.StatusOK {
+		t.Fatalf("default Fail-Closed O_NOFOLLOW mode must reject symlinks, got 200")
+	}
+
+	// Opt-in FollowSymlinks: true tests stepwise symlink validation + escaping/dotfile/Windows rejection.
+	h, err := NewStaticFSHandler(StaticFSOptions{
+		RootDir:        dir,
+		HideDotfiles:   true,
+		FollowSymlinks: true,
 	})
 	if err != nil {
 		t.Fatal(err)

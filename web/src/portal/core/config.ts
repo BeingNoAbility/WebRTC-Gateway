@@ -89,18 +89,31 @@ export function buildIceServers(prefs: IcePreferences): RTCIceServer[] {
   return servers;
 }
 
+export function icePrefsEqual(a: IcePreferences, b: IcePreferences): boolean {
+  return (
+    a.customStun.trim() === b.customStun.trim() &&
+    a.turnUrl.trim() === b.turnUrl.trim() &&
+    a.turnUser.trim() === b.turnUser.trim() &&
+    a.turnPass === b.turnPass &&
+    a.relayOnly === b.relayOnly
+  );
+}
+
 export function readPortalMetaConfig(doc: Document = document): PortalMetaConfig {
   const host = typeof location !== 'undefined' ? location.hostname : '';
   const isLoopback = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
   const fallback: PortalMetaConfig = {
+    portalOrigin: '',
     portalDomain: '',
+    sandboxOrigin: '',
     sandboxMode: isLoopback ? 'local' : 'wildcard',
     sandboxDomain: '',
     sandboxHost: '',
+    restrictedSandbox: false,
     sameSiteMode: false,
     localDevMode: isLoopback,
     localPort: typeof location !== 'undefined' ? location.port : '',
-    version: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'v7-dev',
+    version: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'v8-dev',
   };
 
   const metaEl = doc.querySelector('meta[name="p2p-config"]');
@@ -116,12 +129,17 @@ export function readPortalMetaConfig(doc: Document = document): PortalMetaConfig
         : Boolean(parsed.localDevMode)
           ? 'local'
           : 'wildcard';
+    const sameSiteMode = Boolean(parsed.sameSiteMode);
+    const restrictedSandbox = Boolean(parsed.restrictedSandbox) || sameSiteMode || sandboxMode === 'fixed';
     return {
+      portalOrigin: typeof parsed.portalOrigin === 'string' ? parsed.portalOrigin : fallback.portalOrigin,
       portalDomain: typeof parsed.portalDomain === 'string' ? parsed.portalDomain : fallback.portalDomain,
+      sandboxOrigin: typeof parsed.sandboxOrigin === 'string' ? parsed.sandboxOrigin : fallback.sandboxOrigin,
       sandboxMode,
       sandboxDomain: typeof parsed.sandboxDomain === 'string' ? parsed.sandboxDomain : fallback.sandboxDomain,
       sandboxHost: typeof parsed.sandboxHost === 'string' ? parsed.sandboxHost : '',
-      sameSiteMode: Boolean(parsed.sameSiteMode),
+      restrictedSandbox,
+      sameSiteMode,
       localDevMode: Boolean(parsed.localDevMode),
       localPort: typeof parsed.localPort === 'string' ? parsed.localPort : fallback.localPort,
       version: typeof parsed.version === 'string' && parsed.version ? parsed.version : fallback.version,
@@ -184,10 +202,6 @@ export function parseRouteHash(rawHash: string): ParsedRouteHash {
   return { nodeId, pinnedPk, capToken, initialPath };
 }
 
-/**
- * Strips `cap=` (and any secret/token param) from `location.hash` via `history.replaceState`
- * so bearer capability tokens do not linger in browser history or the address bar.
- */
 export function scrubSensitiveHashParams(rawHash: string): string {
   const qIdx = rawHash.indexOf('?');
   if (qIdx < 0) return rawHash;
@@ -210,9 +224,6 @@ export function scrubSensitiveHashParams(rawHash: string): string {
   return kept.length > 0 ? `${prefix}?${kept.join('&')}` : prefix;
 }
 
-/**
- * Decodes percent-encoded parameter names before redacting sensitive values for logs.
- */
 export function sanitizeHashForLog(rawHash: string): string {
   const qIdx = rawHash.indexOf('?');
   if (qIdx < 0) return rawHash;

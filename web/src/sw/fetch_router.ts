@@ -1,22 +1,12 @@
 /**
- * V7 Service Worker Fetch Router & W3C Fetch Exact Anti-CSRF Gate
- * - Enforces exact W3C Fetch CSRF rules WITHOUT relying on `Sec-Fetch-Site` (always null in SW):
- *   1) Non-navigate (`request.mode !== 'navigate'`): unbound `event.clientId` -> `403`.
- *   2) Worker/SharedWorker: inherits bound `event.clientId` session & binds `event.resultingClientId`.
- *   3) Unbound navigate (without valid `enterNonce`):
- *      - Non-`GET`/`HEAD` (e.g. cross-site `<form POST>`) -> `403`.
- *      - `destination === 'document'` (external `window.open` / top-level nav) -> `403`.
- *      - `destination === 'iframe'` + `GET`/`HEAD`: ONLY when `sessions.size === 1` AND
- *        (`referrer` matches `swOrigin`/`portalOrigin` with `SameOriginClient=true`, OR
- *        `referrer === ''` strictly in cookie-less static `-dir`/`-file` mode (`isStaticMode=true`)
- *        with `resultingClientId` bound so static subresources work; proxy `-target` mode
- *        always rejects unbound empty-referrer iframes to eliminate SameSite=Lax CSRF).
- *        Multi-tab (`sessions.size !== 1`) -> `403`.
- * - Strips `content-encoding` ONLY when `respFlags & DECOMPRESS_GZIP` (fixes Brotli/Deflate corruption).
- * - Always emits `Content-Security-Policy: frame-ancestors <portalOrigin>` on `-target` HTML responses.
- * - Allows HTML injection on `200` and `4xx`/`5xx` UTF-8-compatible `text/html` (excludes `206`, `3xx`,
- *   `Content-Disposition: attachment`, preserved `sandbox` CSP, non-UTF-8 charsets, undecoded `Content-Encoding`).
- * - Caps Worker script injection at 4 MiB (streams raw bytes if larger).
+ * Service Worker Fetch Router, W3C Anti-CSRF Gate & CSP Directive Rewriter
+ * - Unconditionally rejects `destination === 'document'` BEFORE `getBoundSession` (closes top-level popup escape).
+ * - Authorizes proxy mode exclusively via bound `clientId`, pre-bound `resultingClientId` (`/enter`),
+ *   or W3C `replacesClientId` (Back/Forward/Reload) — zero `referrer` or `sessions.size === 1` heuristics.
+ * - Preserves upstream CSP directives while rewriting `frame-ancestors`, `backendOrigin` -> `'self'`,
+ *   and propagating script nonces for SW-synthesized `/__p2p_gw__/boot.js` + `patch.<hash>.js`.
+ * - Inspects ALL `Content-Encoding` headers, strips `ETag` on transformed bodies, and commits
+ *   pending cookie mutations immediately on `REQ_ACK`.
  */
 
 import { FetchCtxFlag, RespFlag, type HeaderField } from '../protocol/tlv';
@@ -26,14 +16,21 @@ import {
   syncCookieDeltasToClients,
 } from './cookie_sync';
 import { pipeThroughBoundedDecompression } from './decompress_pipeline';
-import { createHtmlInjectorTransform, injectWorkerBootstrap } from './html_injector';
+import {
+  GATEWAY_BOOT_SCRIPT_PATH,
+  buildBootScriptPayload,
+  createHtmlInjectorTransform,
+  injectWorkerBootstrap,
+} from './html_injector';
 import type { SessionRegistry, TabSession } from './session_registry';
 import { DeadBridgePortError, executeTunnelRequest } from './stream_bridge';
 
 export const GATEWAY_ASSET_PREFIX = '/__p2p_gw__/';
 export const GATEWAY_ENTER_PATH = '/__p2p_gw__/enter';
+export { GATEWAY_BOOT_SCRIPT_PATH };
 
 const MAX_WORKER_INJECT_BYTES = 4 * 1024 * 1024;
+const CSP_NONCE_TOKEN_RE = /^'nonce-([A-Za-z0-9+/=_-]{1,128})'$/i;
 
 const MULTI_VALUE_RESPONSE_HEADERS = new Set([
   'vary',
@@ -56,6 +53,23 @@ const STRIPPED_FOR_APP_HEADERS = new Set([
   'transfer-encoding',
   'connection',
   'keep-alive',
+]);
+
+const CSP_SOURCE_DIRECTIVES = new Set([
+  'default-src',
+  'script-src',
+  'script-src-elem',
+  'style-src',
+  'style-src-elem',
+  'img-src',
+  'font-src',
+  'connect-src',
+  'media-src',
+  'frame-src',
+  'child-src',
+  'worker-src',
+  'form-action',
+  'manifest-src',
 ]);
 
 // Charsets whose ASCII byte range (0x00..0x7F) is identical to UTF-8 so injecting ASCII `<script>` is safe.
@@ -157,20 +171,124 @@ export function hasSandboxCspDirective(cspValue: string): boolean {
   return false;
 }
 
+/**
+ * Rewrites an upstream non-sandbox Content-Security-Policy value so upstream XSS protections
+ * remain intact while removing conflicting `frame-ancestors`, mapping `backendOrigin` -> `'self'`,
+ * and permitting gateway external scripts (`/boot.js` + `/assets/patch.*.js`) via nonce or `'self'`.
+ */
+export function rewriteUpstreamCsp(
+  rawValue: string,
+  opts: { swOrigin?: string; backendOrigin?: string } = {}
+): { policy: string; scriptNonce?: string } {
+  const backendOrigin = (opts.backendOrigin || '').replace(/\/+$/, '').toLowerCase();
+  let backendWsOrigin = '';
+  if (backendOrigin) {
+    try {
+      const bu = new URL(backendOrigin);
+      backendWsOrigin = `${bu.protocol === 'https:' ? 'wss:' : 'ws:'}//${bu.host.toLowerCase()}`;
+    } catch {
+      // ignore invalid backendOrigin
+    }
+  }
+  const isHttpSw = Boolean(opts.swOrigin && opts.swOrigin.startsWith('http://'));
+  let detectedNonce: string | undefined;
+
+  const rewrittenPolicies: string[] = [];
+  for (const rawPolicy of rawValue.split(',')) {
+    const directives: Array<{ name: string; tokens: string[] }> = [];
+    for (const rawDir of rawPolicy.split(';')) {
+      const trimmed = rawDir.trim();
+      if (!trimmed) continue;
+      const parts = trimmed.split(/\s+/);
+      const name = parts[0].toLowerCase();
+      const tokens = parts.slice(1);
+      if (name === 'frame-ancestors') continue;
+      if (isHttpSw && name === 'upgrade-insecure-requests') continue;
+      directives.push({ name, tokens });
+    }
+    if (directives.length === 0) continue;
+
+    const hasScriptSrc = directives.some((d) => d.name === 'script-src');
+    const hasScriptSrcElem = directives.some((d) => d.name === 'script-src-elem');
+
+    const renderedDirs: string[] = [];
+    for (const dir of directives) {
+      let tokens = dir.tokens;
+      if (CSP_SOURCE_DIRECTIVES.has(dir.name) && backendOrigin) {
+        tokens = tokens.map((tok) => {
+          const low = tok.replace(/\/+$/, '').toLowerCase();
+          if (low === backendOrigin || (dir.name === 'connect-src' && backendWsOrigin && low === backendWsOrigin)) {
+            return "'self'";
+          }
+          return tok;
+        });
+      }
+
+      const controlsExternalScript =
+        dir.name === 'script-src-elem' ||
+        dir.name === 'script-src' ||
+        (dir.name === 'default-src' && !hasScriptSrc && !hasScriptSrcElem);
+
+      if (controlsExternalScript) {
+        let dirNonce: string | undefined;
+        for (const tok of tokens) {
+          const m = CSP_NONCE_TOKEN_RE.exec(tok);
+          if (m) {
+            dirNonce = m[1];
+            break;
+          }
+        }
+        if (dirNonce && (!detectedNonce || detectedNonce === dirNonce)) {
+          detectedNonce = dirNonce;
+        } else {
+          // No reusable nonce -> allow external same-origin gateway scripts via 'self' (never 'unsafe-inline').
+          tokens = tokens.filter((tok) => {
+            const low = tok.toLowerCase();
+            return low !== "'none'" && low !== "'strict-dynamic'";
+          });
+          if (!tokens.some((tok) => tok.toLowerCase() === "'self'")) {
+            tokens.unshift("'self'");
+          }
+        }
+      }
+
+      const deduped: string[] = [];
+      for (const tok of tokens) {
+        if (!deduped.includes(tok)) deduped.push(tok);
+      }
+      renderedDirs.push(deduped.length > 0 ? `${dir.name} ${deduped.join(' ')}` : dir.name);
+    }
+
+    if (renderedDirs.length > 0) {
+      rewrittenPolicies.push(renderedDirs.join('; '));
+    }
+  }
+
+  return {
+    policy: rewrittenPolicies.join(', '),
+    scriptNonce: detectedNonce,
+  };
+}
+
 export function buildSafeResponseHeaders(
   fields: HeaderField[],
   opts: {
     stripContentLength: boolean;
     stripContentEncoding?: boolean;
+    stripEtag?: boolean;
     frameAncestorsOrigin?: string;
     originAgentCluster?: boolean;
+    swOrigin?: string;
+    backendOrigin?: string;
   }
 ): {
   headers: Headers;
   preserveFileSandboxCSP: boolean;
+  scriptNonce?: string;
 } {
   const headers = new Headers();
   let preserveFileSandboxCSP = false;
+  let scriptNonce: string | undefined;
 
   for (const f of fields) {
     const k = f.name.toLowerCase();
@@ -180,14 +298,30 @@ export function buildSafeResponseHeaders(
   }
 
   const stripCE = opts.stripContentEncoding ?? opts.stripContentLength;
+  const stripEtag = opts.stripEtag ?? opts.stripContentLength;
   for (const f of fields) {
     const k = f.name.toLowerCase();
     if (STRIPPED_FOR_APP_HEADERS.has(k)) continue;
     if (opts.stripContentLength && k === 'content-length') continue;
     if (stripCE && k === 'content-encoding') continue;
+    if (stripEtag && k === 'etag') continue;
+
     if (k === 'content-security-policy') {
-      // Preserve ONLY policies containing a real `sandbox` directive (for `-dir`/`-file`).
-      if (!hasSandboxCspDirective(f.value)) continue;
+      if (hasSandboxCspDirective(f.value)) {
+        headers.append(k, sanitizeResponseHeaderValue(k, f.value));
+      } else {
+        const rewritten = rewriteUpstreamCsp(f.value, {
+          swOrigin: opts.swOrigin,
+          backendOrigin: opts.backendOrigin,
+        });
+        if (rewritten.scriptNonce && !scriptNonce) {
+          scriptNonce = rewritten.scriptNonce;
+        }
+        if (rewritten.policy) {
+          headers.append(k, sanitizeResponseHeaderValue(k, rewritten.policy));
+        }
+      }
+      continue;
     }
 
     const safeVal = sanitizeResponseHeaderValue(k, f.value);
@@ -198,8 +332,7 @@ export function buildSafeResponseHeaders(
     }
   }
 
-  // Enforce `frame-ancestors 'self' <portalOrigin>` on all navigation & HTML responses
-  // (intersects cleanly with static `CSP: sandbox` under CSP Level 3!).
+  // Enforce `frame-ancestors 'self' <portalOrigin>` on all navigation & HTML responses.
   if (opts.frameAncestorsOrigin) {
     headers.append('content-security-policy', `frame-ancestors 'self' ${opts.frameAncestorsOrigin}`);
   }
@@ -213,7 +346,7 @@ export function buildSafeResponseHeaders(
     headers.set('referrer-policy', 'same-origin');
   }
 
-  return { headers, preserveFileSandboxCSP };
+  return { headers, preserveFileSandboxCSP, scriptNonce };
 }
 
 export function shouldBypassGatewayRequest(url: URL, swOrigin: string): boolean {
@@ -225,6 +358,7 @@ export function shouldBypassGatewayRequest(url: URL, swOrigin: string): boolean 
 export interface FetchAuthInput {
   clientId: string;
   resultingClientId: string;
+  replacesClientId?: string;
   mode: string;
   destination: string;
   method: string;
@@ -237,15 +371,32 @@ export type FetchAuthResult =
   | { allowed: false; reason: string };
 
 /**
- * Pure W3C Fetch Anti-CSRF Gate (authorizes exclusively by bound clientId, one-time enterNonce,
- * or verified same-origin single-tab iframe navigation). Exported for deterministic unit testing.
+ * Strict W3C Fetch Anti-CSRF & Sandbox Containment Gate:
+ *  0. Unconditionally rejects `destination === 'document'` BEFORE `getBoundSession`
+ *     (eliminates top-level sandbox escape via `window.open` / `allow-popups-to-escape-sandbox`).
+ *  1. Bound `clientId`, pre-bound `resultingClientId` (from `/__p2p_gw__/enter`), or W3C
+ *     `replacesClientId` (Back/Forward/Reload) -> authorized.
+ *  2. Non-navigate or non-GET/HEAD or non-iframe -> rejected (`403`).
+ *  3. Unbound iframe GET/HEAD -> rejected in proxy `-target` mode (`isStaticMode === false`);
+ *     permitted ONLY in cookie-less read-only static `-dir`/`-file` (`isStaticMode === true`,
+ *     `sessions.size === 1`, `sameOriginClient: false`) where `CSP: sandbox` opaque origins omit
+ *     both `clientId` and `replacesClientId`.
  */
 export function authorizeFetchRequest(
   registry: SessionRegistry,
   input: FetchAuthInput
 ): FetchAuthResult {
-  // 1. Bound clientId or pre-bound resultingClientId (from `/__p2p_gw__/enter` or spawning appFrame -> Worker).
-  const bound = registry.getBoundSession(input.clientId, input.resultingClientId);
+  // 0. Unconditional top-level document block (MUST precede getBoundSession!).
+  if (input.destination === 'document') {
+    return { allowed: false, reason: 'Direct top-level sandbox navigation blocked (use Portal)' };
+  }
+
+  // 1. Bound clientId, pre-bound resultingClientId (from `/__p2p_gw__/enter`), or replacesClientId.
+  const bound = registry.getBoundSession(
+    input.clientId,
+    input.resultingClientId,
+    input.replacesClientId || ''
+  );
   if (bound) {
     return { allowed: true, session: bound, sameOriginClient: true };
   }
@@ -255,56 +406,28 @@ export function authorizeFetchRequest(
     return { allowed: false, reason: 'Cross-site or unbound subresource request blocked' };
   }
 
-  // 3. Unbound navigate requests (without valid one-time enterNonce):
+  // 3. Unbound navigate requests:
   const method = input.method.toUpperCase();
   if (method !== 'GET' && method !== 'HEAD') {
     return { allowed: false, reason: 'Unbound non-GET/HEAD navigation blocked (CSRF protection)' };
-  }
-  if (input.destination === 'document') {
-    return { allowed: false, reason: 'Direct top-level sandbox navigation blocked (use Portal)' };
   }
   if (input.destination !== 'iframe') {
     return { allowed: false, reason: `Unbound navigation destination "${input.destination}" blocked` };
   }
 
-  // Only permit unbound iframe GET/HEAD (e.g. appFrame back/forward/context-reload) when sessions.size === 1!
+  // Only cookie-less read-only static `-dir`/`-file` (`CSP: sandbox` opaque origin) lacks
+  // clientId/replacesClientId on in-iframe directory link clicks. Proxy `-target` mode NEVER falls back!
   const single = registry.getSingleActiveSession();
-  if (!single) {
-    return { allowed: false, reason: 'Ambiguous or missing sandbox session for unbound iframe navigation' };
+  if (!single || !single.meta.isStaticMode) {
+    return {
+      allowed: false,
+      reason: 'Unbound iframe navigation blocked (missing enter token or bound client)',
+    };
   }
-
-  const rawRef = (input.referrer || '').trim();
-  if (rawRef === '' || rawRef === 'about:client') {
-    // P0-2 Fail-Closed Anti-CSRF Gate:
-    // - Proxy mode (`-target`, `isStaticMode === false`): NEVER permit unbound empty-referrer iframes!
-    //   Portal mounts `appFrame` via `/__p2p_gw__/enter` (already bound in step 1); rejecting empty
-    //   referrer eliminates cross-site `<iframe referrerpolicy="no-referrer">` SameSite=Lax CSRF completely!
-    // - Static mode (`-dir`/`-file`, cookie-less, `CSP: sandbox` opaque origin): permit ONLY when
-    //   `sessions.size === 1` AND bind `resultingClientId` so subresources (`<img>`/`<link>`) work!
-    if (!single.meta.isStaticMode) {
-      return {
-        allowed: false,
-        reason: 'Unbound empty-referrer iframe navigation blocked in proxy mode (CSRF protection)',
-      };
-    }
-    if (input.resultingClientId) {
-      registry.bindClient(input.resultingClientId, single.tabId);
-    }
-    return { allowed: true, session: single, sameOriginClient: false };
+  if (input.resultingClientId) {
+    registry.bindClient(input.resultingClientId, single.tabId, false);
   }
-
-  try {
-    const refOrigin = new URL(rawRef).origin;
-    if (refOrigin === input.swOrigin || refOrigin === single.portalOrigin) {
-      if (input.resultingClientId) {
-        registry.bindClient(input.resultingClientId, single.tabId);
-      }
-      return { allowed: true, session: single, sameOriginClient: true };
-    }
-  } catch {
-    // malformed referrer -> reject
-  }
-  return { allowed: false, reason: 'External iframe navigation blocked (CSRF protection)' };
+  return { allowed: true, session: single, sameOriginClient: false };
 }
 
 export function collectRequestHeaders(
@@ -344,7 +467,6 @@ export function collectRequestHeaders(
     out.push({ name: lower, value });
   });
 
-  // Forward same-origin request.referrer ONLY when sameOriginClient is true.
   if (sameOriginClient && !hasReferer && request.referrer && request.referrer !== 'about:client') {
     try {
       const refUrl = new URL(request.referrer);
@@ -362,8 +484,6 @@ export function collectRequestHeaders(
   if (sameOriginClient) {
     fetchCtx |= FetchCtxFlag.SAME_ORIGIN_CLIENT;
   }
-  // Per RFC 6265bis, ONLY top-level document navigations (`destination === 'document'`),
-  // NEVER nested `iframe` navigations, qualify for cross-site SameSite=Lax!
   if (request.mode === 'navigate' && request.destination === 'document') {
     fetchCtx |= FetchCtxFlag.TOP_LEVEL_NAV;
   }
@@ -410,10 +530,26 @@ function isJavaScriptContentType(ct: string): boolean {
 }
 
 /**
- * Reads a Worker script body up to `MAX_WORKER_INJECT_BYTES` (4 MiB).
- * If the script fits within 4 MiB, returns its decoded UTF-8 string for safe bootstrap injection;
- * if larger than 4 MiB, returns a passthrough `ReadableStream<Uint8Array>` with zero OOM!
+ * Evaluates ALL `Content-Encoding` header values (comma-separated or repeated headers)
+ * to determine whether any undecoded encoding remains after optional gzip tunnel decompression.
  */
+export function hasUndecodedContentEncoding(values: string[], decompressGzip: boolean): boolean {
+  const tokens: string[] = [];
+  for (const raw of values) {
+    for (const part of raw.split(',')) {
+      const tok = part.trim().toLowerCase();
+      if (tok && tok !== 'identity') {
+        tokens.push(tok);
+      }
+    }
+  }
+  if (tokens.length === 0) return false;
+  if (!decompressGzip) return true;
+  // When tunnel decompresses a single gzip layer, any additional/different encoding (e.g. `br, gzip`) remains undecoded.
+  if (tokens.length > 1) return true;
+  return tokens[0] !== 'gzip' && tokens[0] !== 'x-gzip';
+}
+
 async function readBoundedWorkerBody(
   stream: ReadableStream<Uint8Array>
 ): Promise<{ kind: 'text'; text: string } | { kind: 'stream'; stream: ReadableStream<Uint8Array> }> {
@@ -486,6 +622,73 @@ function buildSwEvictedResponse(isNavigate: boolean): Response {
   });
 }
 
+/**
+ * Serves SW-synthesized `/__p2p_gw__/boot.js` exclusively to bound sandbox appFrame clients.
+ */
+export async function handleBootScriptRequest(
+  swScope: ServiceWorkerGlobalScope,
+  registry: SessionRegistry,
+  event: FetchEvent
+): Promise<Response> {
+  const req = event.request;
+  const dest = (req.destination || '').toLowerCase();
+  if (
+    req.method.toUpperCase() !== 'GET' ||
+    dest === 'serviceworker' ||
+    dest === 'worker' ||
+    dest === 'sharedworker'
+  ) {
+    return new Response('Forbidden', {
+      status: 403,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'cross-origin-resource-policy': 'same-origin',
+      },
+    });
+  }
+
+  const session = registry.getBoundSession(event.clientId, '');
+  if (!session) {
+    if (event.clientId) {
+      const liveCaller = await registry.isLiveNestedAppClient(swScope, event.clientId);
+      if (liveCaller) {
+        try {
+          liveCaller.postMessage({ type: 'P2P_SW_EVICTED' });
+        } catch {
+          // ignore
+        }
+        return buildSwEvictedResponse(false);
+      }
+    }
+    return new Response('Forbidden: unbound boot script request', {
+      status: 403,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'cross-origin-resource-policy': 'same-origin',
+      },
+    });
+  }
+
+  const body = buildBootScriptPayload({
+    nodeId: session.meta.nodeId,
+    portalOrigin: session.portalOrigin,
+    backendOrigin: session.meta.backendOrigin,
+    pinnedPk: session.meta.pinnedPk,
+    initCookies: session.cookieMirror.snapshot(),
+  });
+  return new Response(body, {
+    status: 200,
+    headers: {
+      'content-type': 'application/javascript; charset=utf-8',
+      'cache-control': 'no-store',
+      'cross-origin-resource-policy': 'same-origin',
+      vary: 'Sec-Fetch-Dest',
+    },
+  });
+}
+
 export async function handleFetchEvent(
   swScope: ServiceWorkerGlobalScope,
   registry: SessionRegistry,
@@ -494,26 +697,13 @@ export async function handleFetchEvent(
   const req = event.request;
   const reqUrl = new URL(req.url);
 
-  // Periodically prune closed clients without blocking hot path.
   event.waitUntil(registry.maybePruneClosedClients(swScope).catch(() => {}));
 
-  // If the Service Worker was terminated while idle (sessions.size === 0), check if the caller is
-  // a live nested appFrame/worker and signal Portal to cleanly re-bootstrap via ephemeral bridgeFrame.
-  if (registry.getActiveSessionCount() === 0 && event.clientId) {
-    const liveCaller = await registry.isLiveNestedAppClient(swScope, event.clientId);
-    if (liveCaller) {
-      try {
-        liveCaller.postMessage({ type: 'P2P_SW_EVICTED' });
-      } catch {
-        // ignore
-      }
-      return buildSwEvictedResponse(req.mode === 'navigate');
-    }
-  }
-
-  const authInput = {
+  const replacesClientId = (event as FetchEvent & { replacesClientId?: string }).replacesClientId || '';
+  const authInput: FetchAuthInput = {
     clientId: event.clientId,
     resultingClientId: event.resultingClientId,
+    replacesClientId,
     mode: req.mode,
     destination: req.destination,
     method: req.method,
@@ -527,11 +717,23 @@ export async function handleFetchEvent(
     req.destination === 'iframe' &&
     registry.getActiveSessionCount() > 1
   ) {
-    // Reap any crashed/reloaded previous Portal tab before rejecting ambiguous multi-tab navigation.
     await registry.pruneDeadSessions(swScope);
     auth = authorizeFetchRequest(registry, authInput);
   }
   if (!auth.allowed) {
+    // Emit per-tab P2P_SW_EVICTED recovery hint whenever an existing live nested appFrame/worker
+    // lost its session binding — even if ANOTHER tab already re-attached (sessions.size > 0)!
+    if (event.clientId && req.destination !== 'document') {
+      const liveCaller = await registry.isLiveNestedAppClient(swScope, event.clientId);
+      if (liveCaller) {
+        try {
+          liveCaller.postMessage({ type: 'P2P_SW_EVICTED' });
+        } catch {
+          // ignore
+        }
+        return buildSwEvictedResponse(req.mode === 'navigate');
+      }
+    }
     return new Response(`Forbidden: ${auth.reason}`, {
       status: 403,
       headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
@@ -555,7 +757,24 @@ export async function handleFetchEvent(
   } = collectRequestHeaders(req, swScope.location.origin, peeked.mutations, auth.sameOriginClient);
 
   const method = req.method.toUpperCase();
-  const hasBody = method !== 'GET' && method !== 'HEAD' && req.body !== null;
+
+  let mutationsCommitted = false;
+  const commitMutationsOnAck = () => {
+    if (mutationsCommitted) return;
+    mutationsCommitted = true;
+    if (auth.sameOriginClient && !credentialsOmit) {
+      if (peeked.mutations.length > 0) {
+        session.cookieMirror.commitPendingMutations(peeked.watermark);
+      }
+      if (inlineMutations.length > 0) {
+        session.cookieMirror.applyClientMutations(inlineMutations, {
+          clientId: event.clientId,
+          seq: inlineMutationSeq,
+          queueForUpstream: false,
+        });
+      }
+    }
+  };
 
   let activeSession = session;
   let tunnelResp;
@@ -567,9 +786,9 @@ export async function handleFetchEvent(
       req,
       target,
       reqHeaders,
-      hasBody,
       fetchCtx,
-      combinedMutations
+      combinedMutations,
+      commitMutationsOnAck
     );
     activeSession = res.session;
     tunnelResp = res.response;
@@ -594,20 +813,8 @@ export async function handleFetchEvent(
     });
   }
 
-  // Commit queued cookie mutations ONLY AFTER the tunnel accepted the request!
-  if (auth.sameOriginClient && !credentialsOmit) {
-    if (peeked.mutations.length > 0) {
-      activeSession.cookieMirror.commitPendingMutations(peeked.watermark);
-    }
-    if (inlineMutations.length > 0) {
-      activeSession.cookieMirror.applyClientMutations(inlineMutations, {
-        clientId: event.clientId,
-        seq: inlineMutationSeq,
-        queueForUpstream: false,
-      });
-    }
-  }
-
+  // Fallback commit if RESP_START arrived without a separate REQ_ACK.
+  commitMutationsOnAck();
   event.waitUntil(tunnelResp.done);
 
   try {
@@ -624,20 +831,20 @@ export async function handleFetchEvent(
 
     let contentType = '';
     let contentDisposition = '';
-    let rawContentEncoding = '';
+    const contentEncodingValues: string[] = [];
     const decompressGzip = (tunnelResp.respFlags & RespFlag.DECOMPRESS_GZIP) !== 0;
     let preserveSandbox = false;
     for (const f of tunnelResp.headers) {
       const k = f.name.toLowerCase();
       if (k === 'content-type') contentType = f.value;
       else if (k === 'content-disposition') contentDisposition = f.value;
-      else if (k === 'content-encoding') rawContentEncoding = f.value.trim().toLowerCase();
+      else if (k === 'content-encoding') contentEncodingValues.push(f.value);
       else if (k === 'content-security-policy' && hasSandboxCspDirective(f.value)) {
         preserveSandbox = true;
       }
     }
 
-    const hasUndecodedEncoding = Boolean(rawContentEncoding && rawContentEncoding !== 'identity' && !decompressGzip);
+    const hasUndecodedEncoding = hasUndecodedContentEncoding(contentEncodingValues, decompressGzip);
     const isAttachment = isAttachmentContentDisposition(contentDisposition);
     const isHtmlDoc =
       !isNullBody &&
@@ -661,18 +868,29 @@ export async function handleFetchEvent(
 
     const isAnyHtmlResponse = contentType.split(';', 1)[0].trim().toLowerCase() === 'text/html';
     const willTransformBody = decompressGzip || isNavigateHtml || isWorkerScript;
-    const { headers } = buildSafeResponseHeaders(tunnelResp.headers, {
+    const { headers, scriptNonce } = buildSafeResponseHeaders(tunnelResp.headers, {
       stripContentLength: willTransformBody,
       stripContentEncoding: decompressGzip,
+      stripEtag: willTransformBody,
       frameAncestorsOrigin:
         req.mode === 'navigate' || isAnyHtmlResponse ? activeSession.portalOrigin : undefined,
       originAgentCluster: Boolean(activeSession.meta.sameSiteMode),
+      swOrigin: swScope.location.origin,
+      backendOrigin: activeSession.meta.backendOrigin,
     });
 
     const deltas = credentialsOmit ? [] : tunnelResp.cookieDeltas;
     if (deltas.length > 0) {
       activeSession.cookieMirror.applyDeltas(deltas);
-      if (!isNavigateHtml) {
+      if (isNavigateHtml) {
+        // Still sync sibling clients (e.g. parent frame when a child iframe navigation sets cookies!).
+        const siblings = Array.from(activeSession.clientIds).filter(
+          (id) => id !== event.resultingClientId
+        );
+        if (siblings.length > 0) {
+          await syncCookieDeltasToClients(swScope, '', siblings, deltas);
+        }
+      } else {
         await syncCookieDeltasToClients(
           swScope,
           event.clientId,
@@ -692,16 +910,10 @@ export async function handleFetchEvent(
     }
 
     if (isNavigateHtml) {
-      const cfg = {
-        nodeId: activeSession.meta.nodeId,
-        portalOrigin: activeSession.portalOrigin,
-        backendOrigin: activeSession.meta.backendOrigin,
-        pinnedPk: activeSession.meta.pinnedPk,
-        initCookies: activeSession.cookieMirror.snapshot(),
-      };
       body = body.pipeThrough(
-        createHtmlInjectorTransform(swScope.location.origin, cfg, {
+        createHtmlInjectorTransform(swScope.location.origin, {
           hasHttpCharset: hasExplicitHttpCharset(contentType),
+          scriptNonce,
         })
       );
     } else if (isWorkerScript) {

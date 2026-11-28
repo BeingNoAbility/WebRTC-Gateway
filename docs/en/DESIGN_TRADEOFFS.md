@@ -38,7 +38,7 @@ The following five decisions reflect **engineering bets under today's browser AP
 
 ### 1. Single-Connection Ordered Channel Pool vs Multi-PC Trunking or Cross-Channel Splitting
 
-- **Current choice**: Combine one control channel, a fixed pre-negotiated ordered HTTP channel pool, and dynamic dedicated WebSocket channels over a single `RTCPeerConnection`, relying on native SCTP channel ordering to avoid cross-stream head-of-line blocking and orphan reassembly.
+- **Current choice**: Combine one chunked control channel with a fixed set of pre-negotiated ordered multiplexed data lanes (carrying both HTTP and streaming WebSocket by monotonic stream ID) over a single `RTCPeerConnection`, relying on native SCTP channel ordering to avoid cross-stream head-of-line blocking, dynamic DCEP races, and orphan reassembly.
 - **Why not multi-PC or split control/data today**: Distinct SCTP channels lack causal order; splitting headers from data or managing parallel PCs introduces orphan queues, complex teardown choreography, ordering races, and memory amplification.
 - **Revisit via RFC when**: Standardized browser P2P transports with native lightweight multiplexed streams (such as P2P WebTransport / QUIC streams) achieve broad cross-browser support, or reproducible workloads demonstrate single-connection saturation that cannot be resolved within one connection.
 

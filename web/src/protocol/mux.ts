@@ -1,26 +1,33 @@
 /**
- * P2PMux V7 DC-Pool Multiplexer (TypeScript Browser Side)
- * Unified `MuxStreamCore` eliminates PoolStream/WSStream duplication while preserving:
- *   - 1 Control DC (id=0, "p2pctrl"): SETTINGS / AUTH / CAP / PING / GOAWAY
- *   - 32 Pre-Negotiated Reusable HTTP Pool DCs (id=1..32, "p2p_01".."p2p_32")
- *   - Dynamic Dedicated WebSocket DCs ("p2pws", DCEP ordered, Gen === 1)
+ * P2PMux V8 TypeScript Multiplexer
+ *
+ * Unified single-framing multiplexer over:
+ *   - 1 chunked control DataChannel (`p2pctrl`, id=0, streamId === 0)
+ *   - N pre-negotiated ordered reliable data lanes (`p2p_01`..`p2p_12`) multiplexing both
+ *     HTTP (PoolStream) and WebSocket (WSStream) streams by strictly monotonic streamId >= 1.
+ *
+ * Eliminates:
+ *   - C-4: slot reuse Gen collisions (monotonic streamId is never reused)
+ *   - C-5: 64B overhead / 8192-chunk wire credit deadlock (pure payload-byte CREDIT + chunk cadence)
+ *   - H-5: WSStream preservePendingMessages drop & sessionInboundBytes leak
+ *   - M-10: spurious onEnd after onReset & waiter timeout resets
  */
 
 import {
   DEFAULT_CHUNK_SIZE,
-  DEFAULT_MAX_WS_CONNS,
   DEFAULT_POOL_SIZE,
   ErrorCode,
   FrameFlag,
   FrameType,
   HEADER_SIZE,
-  MAX_CONTINUATION_FRAMES,
+  MAX_CONTROL_CHUNKS,
   MAX_CONTROL_JSON_SIZE,
+  MAX_HEADER_CHUNKS,
+  MAX_POOL_SIZE,
   MAX_TOTAL_HEADERS_SIZE,
   MAX_WS_MESSAGE_BYTES,
   MIN_CHUNK_SIZE,
   MIN_NEGOTIATED_MAX_MSG_SIZE,
-  decodeCreditPayload,
   decodeFrame,
   decodeGoAwayPayload,
   decodeResetPayload,
@@ -31,61 +38,61 @@ import {
   encodeResetPayload,
   encodeWSClosePayload,
   isControlFrameType,
-  isPoolDataFrameType,
-  isWSDataFrameType,
+  isControlJsonFrameType,
+  isStreamFrameType,
   type Frame,
 } from './frame';
 
-export const DEFAULT_STREAM_WINDOW_SIZE = 2 * 1024 * 1024; // 2 MiB
-export const MAX_STREAM_INBOUND_BYTES = 4 * 1024 * 1024; // 4 MiB
-export const MAX_SESSION_INBOUND_BYTES = 32 * 1024 * 1024; // 32 MiB
-export const PER_CHUNK_MEM_OVERHEAD = 64;
-export const MAX_INBOUND_QUEUE_LEN = 4096;
-export const MAX_WS_INBOUND_CHUNKS = 16384; // Supports 16 MiB WS even at 1 KiB chunks / 4096B MMS
-export const HEADER_ASSEMBLY_TIMEOUT_MS = 5_000;
-export const POOL_ACQUIRE_TIMEOUT_MS = 30_000;
-export const SEND_WINDOW_TIMEOUT_MS = 30_000;
-export const DC_HIGH_WATER_MARK = 512 * 1024;
-export const DC_LOW_WATER_MARK = 128 * 1024;
-export const GOAWAY_GEN_THRESHOLD = 0xffff0000;
+export const DEFAULT_STREAM_WINDOW = 512 * 1024;
+export const MAX_STREAM_INBOUND_BYTES = 2 * 1024 * 1024;
+export const CREDIT_THRESHOLD_BYTES = 128 * 1024;
+export const CREDIT_THRESHOLD_CHUNKS = 256;
+export const DEFAULT_SESSION_MEMORY_BUDGET = 32 * 1024 * 1024;
+export const SCTP_HIGH_WATER = 512 * 1024;
+export const SCTP_LOW_WATER = 128 * 1024;
+export const WINDOW_WAIT_TIMEOUT_MS = 30_000;
+export const MAX_CONCURRENT_STREAMS = 256;
+const INBOUND_CHUNK_OVERHEAD = 64;
 
-type RxState = 'IDLE' | 'RECEIVING_HEADERS' | 'OPEN' | 'HALF_CLOSED' | 'CLOSED';
+const utf8Enc = new TextEncoder();
+const utf8Dec = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 export interface DataChannelLike {
-  readonly readyState: string;
-  readonly bufferedAmount: number;
+  readyState: string;
+  bufferedAmount: number;
   bufferedAmountLowThreshold: number;
   binaryType?: string;
-  send(data: Uint8Array | ArrayBuffer): void;
+  send(data: ArrayBuffer | ArrayBufferView | Uint8Array): void;
   close(): void;
-  addEventListener(type: string, listener: (ev: Event) => void): void;
-  removeEventListener(type: string, listener: (ev: Event) => void): void;
+  onmessage: ((ev: { data: unknown }) => void) | null;
+  onopen: ((ev?: unknown) => void) | null;
+  onclose: ((ev?: unknown) => void) | null;
+  onerror: ((ev?: unknown) => void) | null;
+  onbufferedamountlow: ((ev?: unknown) => void) | null;
 }
 
 export interface PoolMuxCallbacks {
   onControlFrame?: (frame: Frame) => void;
   onGoAway?: (code: number) => void;
+  onProtocolError?: (err: Error) => void;
 }
 
-interface Waiter {
-  resolve: () => void;
-  reject: (err: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
-interface SlotWaiter {
-  resolve: (slot: PoolSlot) => void;
-  reject: (err: Error) => void;
-  cleanup: () => void;
-}
-
-interface PoolSlot {
-  readonly slotIdx: number;
+interface DataLane {
+  id: number;
   dc: DataChannelLike | null;
-  localGen: number;
-  active: PoolStream | null;
-  closed: boolean;
-  detachListeners: (() => void) | null;
+  streams: Map<number, ManagedStream>;
+  lowWaiters: Array<() => void>;
+}
+
+interface ManagedStream {
+  readonly streamId: number;
+  onInboundHeaders(flags: number, payload: Uint8Array): void;
+  onInboundData(flags: number, payload: Uint8Array): void;
+  onInboundWSChunk(op: number, fin: boolean, payload: Uint8Array): void;
+  onInboundWSClose(payload: Uint8Array): void;
+  onInboundCredit(delta: number): void;
+  onPeerReset(code: number): void;
+  abortLocal(reason: Error): void;
 }
 
 function toUint8Array(data: unknown): Uint8Array | null {
@@ -97,1226 +104,785 @@ function toUint8Array(data: unknown): Uint8Array | null {
   return null;
 }
 
-async function waitForDCBackpressure(dc: DataChannelLike, isCancelled: () => boolean): Promise<void> {
-  while (dc.bufferedAmount >= DC_HIGH_WATER_MARK) {
-    if (isCancelled() || dc.readyState !== 'open') {
-      throw new Error('DataChannel closed during backpressure wait');
-    }
-    dc.bufferedAmountLowThreshold = DC_LOW_WATER_MARK;
-    await new Promise<void>((resolve) => {
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        dc.removeEventListener('bufferedamountlow', finish);
-        dc.removeEventListener('close', finish);
-        clearTimeout(t);
-        resolve();
-      };
-      const t = setTimeout(finish, 25);
-      dc.addEventListener('bufferedamountlow', finish);
-      dc.addEventListener('close', finish);
-    });
+function concatChunks(chunks: Uint8Array[], totalLen: number): Uint8Array {
+  if (chunks.length === 1) return chunks[0];
+  const out = new Uint8Array(totalLen);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
   }
+  return out;
 }
 
 /**
- * Shared flow-control, header-assembly, and timeout core for both PoolStream and WSStream.
+ * Common flow-controlled stream base shared by HTTP (PoolStream) and WebSocket (WSStream).
  */
-abstract class MuxStreamCore {
+abstract class BaseStream implements ManagedStream {
+  readonly streamId: number;
   protected readonly mux: PoolMux;
-  protected sendWindow = DEFAULT_STREAM_WINDOW_SIZE;
-  protected recvWindowRem = DEFAULT_STREAM_WINDOW_SIZE;
-  protected sendWaiters: Waiter[] = [];
+  protected readonly lane: DataLane;
 
-  protected rxState: RxState = 'IDLE';
-  protected headerTimer: ReturnType<typeof setTimeout> | null = null;
-  protected headerChunks: Uint8Array[] = [];
-  protected headerBytes = 0;
-  protected headerReservedBytes = 0;
+  protected hdrChunks: Uint8Array[] = [];
+  protected hdrBytes = 0;
+  protected hdrComplete = false;
+  protected hdrResolve: ((raw: Uint8Array) => void) | null = null;
+  protected hdrReject: ((err: Error) => void) | null = null;
+  protected hdrResult: Uint8Array | null = null;
+  protected hdrError: Error | null = null;
 
-  protected headersHandler: ((raw: Uint8Array) => void) | null = null;
-  protected pendingHeaders: Uint8Array | null = null;
-  protected resetHandler: ((code: number) => void) | null = null;
-  protected pendingResetCode: number | null = null;
+  protected sendWindow = DEFAULT_STREAM_WINDOW;
+  protected winWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
 
-  constructor(mux: PoolMux) {
+  protected localFin = false;
+  protected remoteFin = false;
+  protected headerHadFin = false;
+  protected terminated = false;
+  protected abortReason: Error | null = null;
+  protected detached = false;
+
+  constructor(mux: PoolMux, lane: DataLane, streamId: number) {
     this.mux = mux;
-  }
-
-  protected abstract isSendStopped(): boolean;
-  protected abstract isTerminated(): boolean;
-  protected abstract getDC(): DataChannelLike | null;
-  protected abstract sendWireFrame(type: number, flags: number, payload: Uint8Array): void;
-  protected abstract failInternal(code: number): void;
-
-  onHeaders(cb: (raw: Uint8Array) => void): void {
-    this.headersHandler = cb;
-    if (this.pendingHeaders) {
-      const h = this.pendingHeaders;
-      this.pendingHeaders = null;
-      cb(h);
-    }
-  }
-
-  onReset(cb: (code: number) => void): void {
-    if (this.pendingResetCode !== null) {
-      const code = this.pendingResetCode;
-      this.pendingResetCode = null;
-      cb(code);
-      return;
-    }
-    this.resetHandler = cb;
-  }
-
-  protected startHeaderTimer(): void {
-    this.clearHeaderTimer();
-    this.headerTimer = setTimeout(() => {
-      this.headerTimer = null;
-      if (!this.isTerminated() && this.rxState === 'RECEIVING_HEADERS') {
-        this.failInternal(ErrorCode.PROTOCOL_ERROR);
-      }
-    }, HEADER_ASSEMBLY_TIMEOUT_MS);
-  }
-
-  protected clearHeaderTimer(): void {
-    if (this.headerTimer) {
-      clearTimeout(this.headerTimer);
-      this.headerTimer = null;
-    }
-  }
-
-  protected releaseHeaderAssembly(): void {
-    this.clearHeaderTimer();
-    if (this.headerReservedBytes > 0) {
-      this.mux._releaseSessionBytes(this.headerReservedBytes);
-      this.headerReservedBytes = 0;
-    }
-    this.headerChunks = [];
-    this.headerBytes = 0;
-  }
-
-  protected appendHeaderBytes(chunk: Uint8Array, more: boolean): Uint8Array | null {
-    if (
-      this.headerBytes + chunk.byteLength > MAX_TOTAL_HEADERS_SIZE ||
-      this.headerChunks.length >= 1 + MAX_CONTINUATION_FRAMES
-    ) {
-      this.failInternal(ErrorCode.FRAME_SIZE_ERROR);
-      return null;
-    }
-    const cost = chunk.byteLength + PER_CHUNK_MEM_OVERHEAD;
-    if (!this.mux._tryReserveSessionBytes(cost)) {
-      this.failInternal(ErrorCode.REFUSED_STREAM);
-      return null;
-    }
-    const cp = new Uint8Array(chunk.byteLength);
-    cp.set(chunk);
-    this.headerChunks.push(cp);
-    this.headerBytes += cp.byteLength;
-    this.headerReservedBytes += cost;
-    if (more) return null;
-
-    const assembled = new Uint8Array(this.headerBytes);
-    let off = 0;
-    for (const c of this.headerChunks) {
-      assembled.set(c, off);
-      off += c.byteLength;
-    }
-    this.releaseHeaderAssembly();
-    return assembled;
-  }
-
-  protected async sendSegmentedHeaders(tlv: Uint8Array, fin: boolean): Promise<void> {
-    if (tlv.byteLength > MAX_TOTAL_HEADERS_SIZE) {
-      throw new RangeError('HEADERS exceeds 64 KiB');
-    }
-    if (this.isSendStopped()) {
-      throw new Error('stream write closed');
-    }
-    const dc = this.getDC();
-    if (!dc || dc.readyState !== 'open') {
-      throw new Error('DataChannel not open');
-    }
-    const chunkSize = this.mux.effectiveChunkSize();
-    const totalChunks = Math.max(1, Math.ceil(tlv.byteLength / chunkSize));
-    if (totalChunks - 1 > MAX_CONTINUATION_FRAMES) {
-      throw new RangeError('HEADERS exceeds max continuation frame count');
-    }
-    if (totalChunks === 1) {
-      await waitForDCBackpressure(dc, () => this.isSendStopped());
-      this.sendWireFrame(FrameType.HEADERS, fin ? FrameFlag.FIN : FrameFlag.NONE, tlv);
-      return;
-    }
-    let off = 0;
-    for (let i = 0; i < totalChunks; i++) {
-      await waitForDCBackpressure(dc, () => this.isSendStopped());
-      const end = Math.min(tlv.byteLength, off + chunkSize);
-      const isFirst = i === 0;
-      const isLast = i === totalChunks - 1;
-      let flags = FrameFlag.NONE;
-      if (isFirst && fin) flags |= FrameFlag.FIN;
-      if (!isLast) flags |= FrameFlag.MORE_HEADERS;
-      this.sendWireFrame(isFirst ? FrameType.HEADERS : FrameType.CONTINUATION, flags, tlv.subarray(off, end));
-      off = end;
-    }
-  }
-
-  protected handleCreditFrame(payload: Uint8Array): void {
-    const delta = decodeCreditPayload(payload);
-    if (this.sendWindow + delta > 0x7fffffff) {
-      this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
-      return;
-    }
-    this.sendWindow += delta;
-    this.wakeSendWaiters();
-  }
-
-  protected async consumeSendWindow(want: number, allowZeroPayload: boolean): Promise<number> {
-    const minNeeded = allowZeroPayload ? PER_CHUNK_MEM_OVERHEAD : PER_CHUNK_MEM_OVERHEAD + 1;
-    while (this.sendWindow < minNeeded) {
-      if (this.isSendStopped()) {
-        throw new Error('stream closed waiting for credit');
-      }
-      await new Promise<void>((resolve, reject) => {
-        const waiter: Waiter = {
-          resolve,
-          reject,
-          timer: setTimeout(() => {
-            const idx = this.sendWaiters.indexOf(waiter);
-            if (idx >= 0) this.sendWaiters.splice(idx, 1);
-            this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
-            reject(new Error('flow control send window timeout'));
-          }, SEND_WINDOW_TIMEOUT_MS),
-        };
-        this.sendWaiters.push(waiter);
-      });
-    }
-    const take = Math.min(want, this.sendWindow - PER_CHUNK_MEM_OVERHEAD);
-    this.sendWindow -= take + PER_CHUNK_MEM_OVERHEAD;
-    return take;
-  }
-
-  protected wakeSendWaiters(): void {
-    while (this.sendWindow >= PER_CHUNK_MEM_OVERHEAD && this.sendWaiters.length > 0) {
-      const w = this.sendWaiters.shift()!;
-      clearTimeout(w.timer);
-      w.resolve();
-    }
-  }
-
-  protected failSendWaiters(err: Error): void {
-    const list = this.sendWaiters.splice(0);
-    for (const w of list) {
-      clearTimeout(w.timer);
-      w.reject(err);
-    }
-  }
-
-  protected emitReset(code: number): void {
-    const rh = this.resetHandler;
-    this.resetHandler = null;
-    if (rh) {
-      rh(code);
-    } else {
-      this.pendingResetCode = code;
-    }
-  }
-}
-
-/**
- * Reusable-pool HTTP Stream bound to a single ordered DataChannel slot + monotonic generation.
- */
-export class PoolStream extends MuxStreamCore {
-  readonly gen: number;
-  readonly slotIdx: number;
-  private readonly slot: PoolSlot;
-  private readonly manualFlowControl: boolean;
-
-  private respHeadersHadFin = false;
-  private inboundChunks: Uint8Array[] = [];
-  private inboundBytes = 0;
-
-  // O(1) amortized head-pointer queue for unacknowledged chunk lengths (prevents O(N^2) Array.shift()).
-  private unackedDeliveredBytes = 0;
-  private unackedChunkLens: number[] = [];
-  private unackedHead = 0;
-  private consumedForCredit = 0;
-
-  private localClosed = false;
-  private remoteClosed = false;
-  private terminated = false;
-  private detached = false;
-
-  private dataHandler: ((chunk: Uint8Array) => void) | null = null;
-  private endHandler: (() => void) | null = null;
-
-  constructor(mux: PoolMux, slot: PoolSlot, gen: number, manualFlowControl: boolean) {
-    super(mux);
-    this.slot = slot;
-    this.slotIdx = slot.slotIdx;
-    this.gen = gen;
-    this.manualFlowControl = manualFlowControl;
+    this.lane = lane;
+    this.streamId = streamId;
   }
 
   get isClosed(): boolean {
-    return this.terminated;
+    return this.terminated || this.detached;
   }
 
   get hasResponseBody(): boolean {
-    return !this.respHeadersHadFin;
+    return !this.headerHadFin;
   }
 
-  protected isSendStopped(): boolean {
-    return this.terminated || this.localClosed;
+  waitResponseHeaders(): Promise<Uint8Array> {
+    if (this.hdrResult) return Promise.resolve(this.hdrResult);
+    if (this.hdrError) return Promise.reject(this.hdrError);
+    return new Promise<Uint8Array>((resolve, reject) => {
+      this.hdrResolve = resolve;
+      this.hdrReject = reject;
+    });
   }
 
-  protected isTerminated(): boolean {
-    return this.terminated;
-  }
-
-  protected getDC(): DataChannelLike | null {
-    return this.slot.dc;
-  }
-
-  protected sendWireFrame(type: number, flags: number, payload: Uint8Array): void {
-    const dc = this.slot.dc;
-    if (!dc || dc.readyState !== 'open' || this.slot.active !== this) {
-      throw new Error('pool DataChannel not open or stream detached');
+  onInboundHeaders(flags: number, payload: Uint8Array): void {
+    if (this.terminated || this.hdrComplete) {
+      this.reset(ErrorCode.PROTOCOL_ERROR);
+      return;
     }
-    dc.send(encodeFrame(this.gen, type, flags, payload));
+    this.hdrBytes += payload.byteLength;
+    if (this.hdrChunks.length + 1 > MAX_HEADER_CHUNKS || this.hdrBytes > MAX_TOTAL_HEADERS_SIZE) {
+      this.reset(ErrorCode.FRAME_SIZE_ERROR);
+      return;
+    }
+    this.hdrChunks.push(new Uint8Array(payload));
+    if ((flags & FrameFlag.MORE) !== 0) {
+      return;
+    }
+    this.hdrComplete = true;
+    const assembled = concatChunks(this.hdrChunks, this.hdrBytes);
+    this.hdrChunks = [];
+    this.hdrResult = assembled;
+    if ((flags & FrameFlag.FIN) !== 0) {
+      this.headerHadFin = true;
+      this.onHeaderFin();
+    }
+    const res = this.hdrResolve;
+    this.hdrResolve = null;
+    this.hdrReject = null;
+    if (res) res(assembled);
   }
 
-  protected failInternal(code: number): void {
+  protected abstract onHeaderFin(): void;
+  abstract onInboundData(flags: number, payload: Uint8Array): void;
+  abstract onInboundWSChunk(op: number, fin: boolean, payload: Uint8Array): void;
+  abstract onInboundWSClose(payload: Uint8Array): void;
+
+  onInboundCredit(delta: number): void {
     if (this.terminated) return;
-    try {
-      this.sendWireFrame(FrameType.RESET, FrameFlag.NONE, encodeResetPayload(code));
-    } catch {
-      // ignore send failure during teardown
+    if (this.sendWindow + delta > 0x7fffffff) {
+      this.reset(ErrorCode.FLOW_CONTROL_ERROR);
+      return;
     }
-    this.terminate(code, true);
+    this.sendWindow += delta;
+    this.wakeWindowWaiters();
+  }
+
+  protected wakeWindowWaiters(): void {
+    const list = this.winWaiters;
+    this.winWaiters = [];
+    for (const w of list) w.resolve();
+  }
+
+  protected failWindowWaiters(err: Error): void {
+    const list = this.winWaiters;
+    this.winWaiters = [];
+    for (const w of list) w.reject(err);
+  }
+
+  protected async acquireSendWindow(want: number): Promise<number> {
+    if (want <= 0) return 0;
+    const deadline = Date.now() + WINDOW_WAIT_TIMEOUT_MS;
+    while (!this.terminated && !this.localFin) {
+      if (this.sendWindow > 0) {
+        const grant = Math.min(want, this.sendWindow);
+        this.sendWindow -= grant;
+        return grant;
+      }
+      const rem = deadline - Date.now();
+      if (rem <= 0) {
+        this.reset(ErrorCode.FLOW_CONTROL_ERROR);
+        throw new Error('P2P stream send window timeout');
+      }
+      await new Promise<void>((resolve, reject) => {
+        const entry = {
+          resolve: () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          reject: (e: Error) => {
+            clearTimeout(timer);
+            reject(e);
+          },
+        };
+        const timer = setTimeout(() => {
+          const idx = this.winWaiters.indexOf(entry);
+          if (idx >= 0) this.winWaiters.splice(idx, 1);
+          reject(new Error('P2P stream send window timeout'));
+        }, rem);
+        this.winWaiters.push(entry);
+      });
+    }
+    throw new Error('P2P stream closed');
+  }
+
+  protected async sendRawHeaders(raw: Uint8Array, fin: boolean): Promise<void> {
+    const cs = this.mux.chunkSize;
+    for (let off = 0; off < raw.byteLength; off += cs) {
+      // Wait for SCTP writability only on subsequent chunks (caller already ensured writability before
+      // allocating streamId so the opening HEADERS frame always hits dc.send() in strict streamId order!).
+      if (off > 0) {
+        await this.mux.waitLaneWritable(this.lane);
+        if (this.terminated) throw new Error('P2P stream aborted');
+      }
+      const end = Math.min(off + cs, raw.byteLength);
+      const isLast = end >= raw.byteLength;
+      let flags: number = isLast ? FrameFlag.NONE : FrameFlag.MORE;
+      if (isLast && fin) flags |= FrameFlag.FIN;
+      this.mux.sendLaneFrame(this.lane, this.streamId, FrameType.HEADERS, flags, raw.subarray(off, end));
+    }
+    if (fin) {
+      this.localFin = true;
+      this.maybeDetach();
+    }
+  }
+
+  protected sendCredit(delta: number): void {
+    if (delta <= 0 || this.terminated || this.remoteFin) return;
+    try {
+      this.mux.sendLaneFrame(this.lane, this.streamId, FrameType.CREDIT, FrameFlag.NONE, encodeCreditPayload(delta));
+    } catch {
+      // ignore if lane already closed
+    }
+  }
+
+  protected maybeDetach(): void {
+    if (this.localFin && this.remoteFin) {
+      this.detach();
+    }
+  }
+
+  protected detach(): void {
+    if (this.detached) return;
+    this.detached = true;
+    this.mux.detachStream(this.lane, this.streamId, this);
+  }
+
+  reset(code: number = ErrorCode.CANCEL): void {
+    if (this.terminated) return;
+    const err = new Error(`P2P stream reset (${code})`);
+    try {
+      this.mux.sendLaneFrame(this.lane, this.streamId, FrameType.RESET, FrameFlag.NONE, encodeResetPayload(code));
+    } catch {
+      // ignore
+    }
+    this.abortLocal(err);
+  }
+
+  onPeerReset(code: number): void {
+    this.abortLocal(new Error(`P2P stream reset (${code})`));
+  }
+
+  abortLocal(reason: Error): void {
+    if (this.terminated) return;
+    this.terminated = true;
+    this.abortReason = reason;
+    this.localFin = true;
+    this.remoteFin = true;
+    if (!this.hdrComplete) {
+      this.hdrError = reason;
+      const rej = this.hdrReject;
+      this.hdrResolve = null;
+      this.hdrReject = null;
+      if (rej) rej(reason);
+    }
+    this.failWindowWaiters(reason);
+    this.cleanupInbound();
+    this.detach();
+    this.notifyAbort(reason);
+  }
+
+  protected abstract cleanupInbound(): void;
+  protected abstract notifyAbort(reason: Error): void;
+}
+
+/**
+ * HTTP full-duplex stream over a V8 multiplexed lane with pure payload-byte flow control.
+ */
+export class PoolStream extends BaseStream {
+  private dataCb: ((chunk: Uint8Array) => void) | null = null;
+  private endCb: (() => void) | null = null;
+  private resetCb: ((err: Error) => void) | null = null;
+
+  private pendingChunks: Array<{ data: Uint8Array; memCost: number }> = [];
+  private pendingEnd = false;
+  private recvInFlightPayload = 0;
+  private deliveredUnackedBytes = 0;
+  private deliveredUnackedChunks = 0;
+  private pendingCreditBytes = 0;
+  private pendingCreditChunks = 0;
+
+  async openWithHeaders(headersRaw: Uint8Array, hasBody: boolean): Promise<void> {
+    await this.sendRawHeaders(headersRaw, !hasBody);
   }
 
   onData(cb: (chunk: Uint8Array) => void): void {
-    this.dataHandler = cb;
-    if (this.inboundChunks.length > 0) {
-      const queued = this.inboundChunks;
-      const queuedBudget = this.inboundBytes;
-      this.inboundChunks = [];
-      this.inboundBytes = 0;
-      this.mux._releaseSessionBytes(queuedBudget);
-      let payloadSum = 0;
-      for (const ch of queued) {
-        if (this.terminated) return;
-        this.unackedDeliveredBytes += ch.byteLength;
-        this.unackedChunkLens.push(ch.byteLength);
-        payloadSum += ch.byteLength;
-        cb(ch);
-      }
-      if (this.terminated) return;
-      if (!this.manualFlowControl) {
-        this.ackConsumed(payloadSum);
-      }
-    }
-    if (this.remoteClosed && !this.terminated && this.pendingResetCode === null) {
-      this.finishRemoteIfComplete();
-    }
+    this.dataCb = cb;
+    this.drainPending();
   }
 
   onEnd(cb: () => void): void {
-    if (this.remoteClosed && this.inboundChunks.length === 0 && this.pendingResetCode === null) {
+    this.endCb = cb;
+    if (this.pendingEnd && this.pendingChunks.length === 0 && !this.terminated) {
+      this.pendingEnd = false;
       cb();
-      return;
-    }
-    this.endHandler = cb;
-  }
-
-  ackConsumed(bytes: number): void {
-    if (this.terminated || this.remoteClosed || bytes <= 0 || !Number.isFinite(bytes)) return;
-    let rem = Math.min(Math.floor(bytes), this.unackedDeliveredBytes);
-    if (rem <= 0) return;
-    this.unackedDeliveredBytes -= rem;
-    let creditCost = rem;
-    while (rem > 0 && this.unackedHead < this.unackedChunkLens.length) {
-      const headLen = this.unackedChunkLens[this.unackedHead];
-      if (rem >= headLen) {
-        rem -= headLen;
-        this.unackedHead++;
-        creditCost += PER_CHUNK_MEM_OVERHEAD;
-      } else {
-        this.unackedChunkLens[this.unackedHead] = headLen - rem;
-        rem = 0;
-      }
-    }
-    if (this.unackedHead >= 1024 && this.unackedHead * 2 >= this.unackedChunkLens.length) {
-      this.unackedChunkLens = this.unackedChunkLens.slice(this.unackedHead);
-      this.unackedHead = 0;
-    }
-    this.consumedForCredit += creditCost;
-    if (this.consumedForCredit >= DEFAULT_STREAM_WINDOW_SIZE / 4) {
-      const delta = this.consumedForCredit;
-      this.consumedForCredit = 0;
-      this.recvWindowRem += delta;
-      try {
-        this.sendWireFrame(FrameType.CREDIT, FrameFlag.NONE, encodeCreditPayload(delta));
-      } catch {
-        this.terminate(ErrorCode.CANCEL, true);
-      }
     }
   }
 
-  async sendHeaders(tlv: Uint8Array, fin: boolean): Promise<void> {
-    await this.sendSegmentedHeaders(tlv, fin);
-    if (fin) {
-      this.localClosed = true;
-      this.checkFullClose();
+  onReset(cb: (err: Error) => void): void {
+    this.resetCb = cb;
+    if (this.terminated) {
+      cb(this.abortReason ?? new Error('P2P stream reset'));
     }
   }
 
-  async sendData(payload: Uint8Array, fin = false): Promise<void> {
-    if (this.isSendStopped()) {
-      throw new Error('stream write closed');
+  /**
+   * Consumer acknowledges payload bytes read (pure payload bytes ONLY — fixes C-5!).
+   * Replenishes wire CREDIT every 128 KiB OR 256 chunks so tiny 13B SSE tokens never stall or reset.
+   */
+  ackConsumed(payloadBytes: number, chunkCount = 1): void {
+    if (this.terminated || this.remoteFin || payloadBytes <= 0) return;
+    const ackBytes = Math.min(payloadBytes, this.deliveredUnackedBytes);
+    if (ackBytes <= 0) return;
+    this.deliveredUnackedBytes -= ackBytes;
+    this.deliveredUnackedChunks = Math.max(0, this.deliveredUnackedChunks - chunkCount);
+    this.pendingCreditBytes += ackBytes;
+    this.pendingCreditChunks += chunkCount;
+    if (
+      this.pendingCreditBytes >= CREDIT_THRESHOLD_BYTES ||
+      this.pendingCreditChunks >= CREDIT_THRESHOLD_CHUNKS
+    ) {
+      const delta = this.pendingCreditBytes;
+      this.pendingCreditBytes = 0;
+      this.pendingCreditChunks = 0;
+      this.sendCredit(delta);
     }
-    const dc = this.slot.dc;
-    if (!dc || dc.readyState !== 'open') {
-      throw new Error('pool DataChannel not open');
-    }
+  }
+
+  async writeBody(data: Uint8Array): Promise<void> {
+    if (data.byteLength === 0) return;
     let off = 0;
-    while (off < payload.byteLength) {
-      await waitForDCBackpressure(dc, () => this.isSendStopped());
-      const chunkMax = this.mux.effectiveChunkSize();
-      const want = Math.min(payload.byteLength - off, chunkMax);
-      const grant = await this.consumeSendWindow(want, false);
-      const end = off + grant;
-      const isLastAndFin = fin && end === payload.byteLength;
-      this.sendWireFrame(FrameType.DATA, isLastAndFin ? FrameFlag.FIN : FrameFlag.NONE, payload.subarray(off, end));
-      off = end;
-    }
-    if (fin && payload.byteLength === 0) {
-      this.sendWireFrame(FrameType.DATA, FrameFlag.FIN, new Uint8Array(0));
-    }
-    if (fin) {
-      this.localClosed = true;
-      this.checkFullClose();
+    while (off < data.byteLength) {
+      if (this.terminated || this.localFin) throw new Error('P2P stream closed');
+      await this.mux.waitLaneWritable(this.lane);
+      const want = Math.min(this.mux.chunkSize, data.byteLength - off);
+      const grant = await this.acquireSendWindow(want);
+      if (this.terminated || this.localFin) throw new Error('P2P stream closed');
+      this.mux.sendLaneFrame(
+        this.lane,
+        this.streamId,
+        FrameType.DATA,
+        FrameFlag.NONE,
+        data.subarray(off, off + grant)
+      );
+      off += grant;
     }
   }
 
   async finishWrite(): Promise<void> {
-    if (this.isSendStopped()) return;
-    await this.sendData(new Uint8Array(0), true);
+    if (this.terminated || this.localFin) return;
+    await this.mux.waitLaneWritable(this.lane);
+    if (this.terminated || this.localFin) return;
+    this.localFin = true;
+    this.mux.sendLaneFrame(this.lane, this.streamId, FrameType.DATA, FrameFlag.FIN, new Uint8Array(0));
+    this.maybeDetach();
   }
 
-  // External caller-initiated reset (caller already owns teardown, so notifyReset = false).
-  reset(code: number = ErrorCode.CANCEL): void {
-    if (this.terminated) return;
-    try {
-      this.sendWireFrame(FrameType.RESET, FrameFlag.NONE, encodeResetPayload(code));
-    } catch {
-      // ignore send failure during teardown
-    }
-    this.terminate(code, false);
-  }
-
-  /** @internal */
-  _handleFrame(f: Frame): void {
-    if (this.terminated || f.gen !== this.gen) return;
-    switch (f.type) {
-      case FrameType.HEADERS:
-        if (this.rxState !== 'IDLE') {
-          this.failInternal(ErrorCode.PROTOCOL_ERROR);
-          return;
-        }
-        this.rxState = 'RECEIVING_HEADERS';
-        this.respHeadersHadFin = (f.flags & FrameFlag.FIN) !== 0;
-        this.startHeaderTimer();
-        this.handleHeaderChunk(f.payload, (f.flags & FrameFlag.MORE_HEADERS) !== 0);
-        break;
-      case FrameType.CONTINUATION:
-        if (this.rxState !== 'RECEIVING_HEADERS') {
-          this.failInternal(ErrorCode.PROTOCOL_ERROR);
-          return;
-        }
-        if (f.payload.byteLength === 0 && (f.flags & FrameFlag.MORE_HEADERS) !== 0) {
-          this.failInternal(ErrorCode.PROTOCOL_ERROR);
-          return;
-        }
-        this.handleHeaderChunk(f.payload, (f.flags & FrameFlag.MORE_HEADERS) !== 0);
-        break;
-      case FrameType.DATA:
-        if (this.rxState !== 'OPEN') {
-          this.failInternal(ErrorCode.PROTOCOL_ERROR);
-          return;
-        }
-        this.handleData(f.payload, (f.flags & FrameFlag.FIN) !== 0);
-        break;
-      case FrameType.CREDIT:
-        this.handleCreditFrame(f.payload);
-        break;
-      case FrameType.RESET: {
-        const code = decodeResetPayload(f.payload);
-        this.terminate(code, true);
-        break;
-      }
-    }
-  }
-
-  /** @internal */
-  _failProtocol(code: number): void {
-    this.failInternal(code);
-  }
-
-  /** @internal */
-  _terminateFromMux(code: number): void {
-    this.terminate(code, true);
-  }
-
-  private handleHeaderChunk(chunk: Uint8Array, more: boolean): void {
-    const assembled = this.appendHeaderBytes(chunk, more);
-    if (!assembled) return;
-
-    // Transition FSM state BEFORE invoking user callbacks so reentrant closeBoth() observes
-    // isClosed === true on clean bidirectional FIN (zero spurious RESET(CANCEL) on wire!).
-    if (this.respHeadersHadFin) {
-      this.remoteClosed = true;
-      this.rxState = this.localClosed ? 'CLOSED' : 'HALF_CLOSED';
-      if (this.localClosed && this.inboundChunks.length === 0) {
-        this.terminated = true;
-      }
+  protected onHeaderFin(): void {
+    this.remoteFin = true;
+    this.maybeDetach();
+    if (this.endCb && !this.terminated) {
+      this.endCb();
     } else {
-      this.rxState = 'OPEN';
-    }
-
-    if (this.headersHandler) {
-      this.headersHandler(assembled);
-    } else {
-      this.pendingHeaders = assembled;
-    }
-
-    if (this.respHeadersHadFin) {
-      if (this.pendingResetCode === null && this.inboundChunks.length === 0 && this.endHandler) {
-        const eh = this.endHandler;
-        this.endHandler = null;
-        eh();
-      }
-      if (this.terminated) {
-        this.purgeInbound();
-        this.detach();
-      } else {
-        this.checkFullClose();
-      }
+      this.pendingEnd = true;
     }
   }
 
-  private handleData(payload: Uint8Array, fin: boolean): void {
-    if (this.remoteClosed) {
-      this.failInternal(ErrorCode.PROTOCOL_ERROR);
+  onInboundData(flags: number, payload: Uint8Array): void {
+    if (this.terminated || this.remoteFin || !this.hdrComplete) {
+      if (!this.hdrComplete && !this.terminated) this.reset(ErrorCode.PROTOCOL_ERROR);
       return;
     }
-    const len = payload.byteLength;
-    if (len === 0 && !fin) {
-      this.failInternal(ErrorCode.PROTOCOL_ERROR);
-      return;
-    }
-    if (len > 0) {
-      const cost = len + PER_CHUNK_MEM_OVERHEAD;
-      if (cost > this.recvWindowRem) {
-        this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
+    const fin = (flags & FrameFlag.FIN) !== 0;
+    const plen = payload.byteLength;
+    if (plen > 0) {
+      if (this.recvInFlightPayload + plen > MAX_STREAM_INBOUND_BYTES) {
+        this.reset(ErrorCode.FLOW_CONTROL_ERROR);
         return;
       }
-      this.recvWindowRem -= cost;
-      const cp = new Uint8Array(len);
-      cp.set(payload);
-
-      if (this.dataHandler) {
-        if (this.unackedChunkLens.length - this.unackedHead >= MAX_INBOUND_QUEUE_LEN * 2) {
-          this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
-          return;
-        }
-        this.unackedDeliveredBytes += len;
-        this.unackedChunkLens.push(len);
-        this.dataHandler(cp);
-        if (this.terminated) return; // Guard against reentrant reset() inside dataHandler!
-        if (!this.manualFlowControl) {
-          this.ackConsumed(len);
-        }
+      const memCost = plen + INBOUND_CHUNK_OVERHEAD;
+      if (!this.mux.reserveSessionBytes(memCost)) {
+        this.reset(ErrorCode.FLOW_CONTROL_ERROR);
+        return;
+      }
+      const copy = new Uint8Array(plen);
+      copy.set(payload);
+      if (this.dataCb) {
+        this.mux.releaseSessionBytes(memCost);
+        this.deliveredUnackedBytes += plen;
+        this.deliveredUnackedChunks++;
+        this.dataCb(copy);
       } else {
-        if (
-          this.inboundChunks.length >= MAX_INBOUND_QUEUE_LEN ||
-          this.inboundBytes + cost > MAX_STREAM_INBOUND_BYTES ||
-          !this.mux._tryReserveSessionBytes(cost)
-        ) {
-          this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
-          return;
-        }
-        this.inboundChunks.push(cp);
-        this.inboundBytes += cost;
+        this.recvInFlightPayload += plen;
+        this.pendingChunks.push({ data: copy, memCost });
       }
     }
     if (fin) {
-      if (this.terminated) return;
-      this.remoteClosed = true;
-      this.finishRemoteIfComplete();
+      this.remoteFin = true;
+      this.maybeDetach();
+      if (this.dataCb && this.pendingChunks.length === 0) {
+        if (this.endCb && !this.terminated) {
+          this.endCb();
+        } else {
+          this.pendingEnd = true;
+        }
+      } else {
+        this.pendingEnd = true;
+      }
     }
   }
 
-  private finishRemoteIfComplete(): void {
-    const fullyDone = this.localClosed && this.inboundChunks.length === 0;
-    this.rxState = fullyDone ? 'CLOSED' : 'HALF_CLOSED';
-    if (fullyDone) {
-      this.terminated = true;
+  onInboundWSChunk(): void {
+    this.reset(ErrorCode.PROTOCOL_ERROR);
+  }
+
+  onInboundWSClose(): void {
+    this.reset(ErrorCode.PROTOCOL_ERROR);
+  }
+
+  private drainPending(): void {
+    if (!this.dataCb || this.terminated) return;
+    while (this.pendingChunks.length > 0 && !this.terminated) {
+      const item = this.pendingChunks.shift()!;
+      this.recvInFlightPayload = Math.max(0, this.recvInFlightPayload - item.data.byteLength);
+      this.mux.releaseSessionBytes(item.memCost);
+      this.deliveredUnackedBytes += item.data.byteLength;
+      this.deliveredUnackedChunks++;
+      this.dataCb(item.data);
     }
-    if (this.inboundChunks.length === 0 && this.endHandler) {
-      const eh = this.endHandler;
-      this.endHandler = null;
-      eh();
-    }
-    if (this.terminated) {
-      this.purgeInbound();
-      this.detach();
-    } else {
-      this.checkFullClose();
+    if (this.pendingEnd && this.pendingChunks.length === 0 && !this.terminated && this.endCb) {
+      this.pendingEnd = false;
+      this.endCb();
     }
   }
 
-  private checkFullClose(): void {
-    if (this.localClosed && this.remoteClosed && this.inboundChunks.length === 0) {
-      this.terminated = true;
-      this.rxState = 'CLOSED';
-      this.purgeInbound();
-      this.detach();
+  protected cleanupInbound(): void {
+    let freed = 0;
+    for (const item of this.pendingChunks) {
+      freed += item.memCost;
     }
+    this.pendingChunks = [];
+    this.recvInFlightPayload = 0;
+    this.deliveredUnackedBytes = 0;
+    this.deliveredUnackedChunks = 0;
+    this.pendingCreditBytes = 0;
+    this.pendingCreditChunks = 0;
+    if (freed > 0) this.mux.releaseSessionBytes(freed);
   }
 
-  private terminate(code: number, notifyReset: boolean): void {
-    if (this.terminated) return;
-    this.terminated = true;
-    this.localClosed = true;
-    this.remoteClosed = true;
-    this.rxState = 'CLOSED';
-    this.purgeInbound();
-    this.failSendWaiters(new Error(`stream reset (${code})`));
-    this.detach();
-    if (notifyReset) {
-      this.emitReset(code);
-    }
-  }
-
-  private purgeInbound(): void {
-    this.releaseHeaderAssembly();
-    if (this.inboundBytes > 0) {
-      this.mux._releaseSessionBytes(this.inboundBytes);
-      this.inboundBytes = 0;
-    }
-    this.inboundChunks = [];
-  }
-
-  private detach(): void {
-    if (this.detached) return;
-    this.detached = true;
-    this.mux._releasePoolSlot(this.slot, this);
+  protected notifyAbort(reason: Error): void {
+    // M-10: Never fire onEnd after onReset.
+    this.pendingEnd = false;
+    this.resetCb?.(reason);
   }
 }
 
+export type WSDeliveredMessage = { isBinary: boolean; data: string | Uint8Array };
+
 /**
- * Dedicated WebSocket Stream bound to its own dynamic DCEP DataChannel ("p2pws", Gen === 1).
+ * Streaming WebSocket over a V8 multiplexed lane (zero dynamic DCEP channel, fixes H-5!).
  */
-export class WSStream extends MuxStreamCore {
-  readonly gen = 1;
-  private readonly dc: DataChannelLike;
+export class WSStream extends BaseStream {
+  private msgCb: ((msg: WSDeliveredMessage) => void) | null = null;
+  private closeCb: ((code: number, reason: string, wasClean: boolean) => void) | null = null;
 
-  private wsChunks: Uint8Array[] = [];
-  private wsBytes = 0;
-  private wsReservedBytes = 0;
-  private wsCreditedBytes = 0;
-  private wsIsBinary = false;
-  private wsInProgress = false;
-  private pendingMessages: Array<{ isBinary: boolean; payload: Uint8Array; reserved: number; uncredited: number }> = [];
-  private pendingMessagesReserved = 0;
-  private consumedForCredit = 0;
+  private asmOp = 0;
+  private asmChunks: Uint8Array[] = [];
+  private asmBytes = 0;
+  private asmMemCost = 0;
 
-  private closed = false;
-  private localCloseSent = false;
-  private msgHandler: ((isBinary: boolean, payload: Uint8Array) => void) | null = null;
-  private closeHandler: ((code: number, reason: string) => void) | null = null;
-  private pendingClose: { code: number; reason: string } | null = null;
+  private pendingMsgs: Array<{ msg: WSDeliveredMessage; memCost: number }> = [];
+  private pendingClose: { code: number; reason: string; wasClean: boolean } | null = null;
+  private remoteCloseReceived = false;
+  private consumedBytes = 0;
+  private consumedChunks = 0;
 
-  constructor(mux: PoolMux, dc: DataChannelLike) {
-    super(mux);
-    this.dc = dc;
-    dc.binaryType = 'arraybuffer';
-    dc.addEventListener('message', this.onDCMessage);
-    dc.addEventListener('close', this.onDCClose);
-    dc.addEventListener('error', this.onDCClose);
+  async openWithHeaders(headersRaw: Uint8Array): Promise<void> {
+    await this.sendRawHeaders(headersRaw, false);
   }
 
-  get isClosed(): boolean {
-    return this.closed;
-  }
-
-  protected isSendStopped(): boolean {
-    return this.closed || this.localCloseSent;
-  }
-
-  protected isTerminated(): boolean {
-    return this.closed;
-  }
-
-  protected getDC(): DataChannelLike | null {
-    return this.dc;
-  }
-
-  protected sendWireFrame(type: number, flags: number, payload: Uint8Array): void {
-    if (this.dc.readyState !== 'open') {
-      throw new Error('WS DataChannel not open');
+  onMessage(cb: (msg: WSDeliveredMessage) => void): void {
+    this.msgCb = cb;
+    // H-5a: Drain ALL queued messages even if remoteCloseReceived === true (only stop if hard-destroyed!).
+    while (this.pendingMsgs.length > 0 && !this.terminated) {
+      const item = this.pendingMsgs.shift()!;
+      this.mux.releaseSessionBytes(item.memCost);
+      cb(item.msg);
     }
-    this.dc.send(encodeFrame(this.gen, type, flags, payload));
-  }
-
-  protected failInternal(code: number): void {
-    if (this.closed) return;
-    try {
-      this.sendWireFrame(FrameType.RESET, FrameFlag.NONE, encodeResetPayload(code));
-    } catch {
-      // ignore send failure during teardown
-    }
-    this.cleanup(code);
-  }
-
-  onMessage(cb: (isBinary: boolean, payload: Uint8Array) => void): void {
-    this.msgHandler = cb;
-    if (this.pendingMessages.length > 0) {
-      const queued = this.pendingMessages.splice(0);
-      const totalReserved = this.pendingMessagesReserved;
-      this.pendingMessagesReserved = 0;
-      if (totalReserved > 0) {
-        this.mux._releaseSessionBytes(totalReserved);
-      }
-      for (const item of queued) {
-        cb(item.isBinary, item.payload);
-        if (this.closed) break;
-        this.creditConsumed(item.uncredited);
-      }
-    }
-    if (this.pendingClose && this.closeHandler) {
-      const pc = this.pendingClose;
+    if (this.pendingClose && this.pendingMsgs.length === 0 && !this.terminated) {
+      const cl = this.pendingClose;
       this.pendingClose = null;
-      const ch = this.closeHandler;
-      this.closeHandler = null;
-      ch(pc.code, pc.reason);
+      this.finishAfterCloseDelivery(cl.code, cl.reason, cl.wasClean);
     }
   }
 
-  onClose(cb: (code: number, reason: string) => void): void {
-    if (this.pendingClose && this.pendingMessages.length === 0) {
-      const pc = this.pendingClose;
-      this.pendingClose = null;
-      cb(pc.code, pc.reason);
+  onClose(cb: (code: number, reason: string, wasClean: boolean) => void): void {
+    this.closeCb = cb;
+    if (this.terminated) {
+      cb(1006, this.abortReason?.message || 'P2P stream reset', false);
       return;
     }
-    this.closeHandler = cb;
-  }
-
-  async sendHeaders(tlv: Uint8Array): Promise<void> {
-    await this.sendSegmentedHeaders(tlv, false);
-  }
-
-  async sendWSMessage(isBinary: boolean, payload: Uint8Array): Promise<void> {
-    if (this.isSendStopped()) throw new Error('WS stream closed');
-    if (payload.byteLength > MAX_WS_MESSAGE_BYTES) {
-      throw new RangeError('WS message exceeds 16 MiB limit');
+    if (this.pendingClose && this.pendingMsgs.length === 0) {
+      const cl = this.pendingClose;
+      this.pendingClose = null;
+      this.finishAfterCloseDelivery(cl.code, cl.reason, cl.wasClean);
     }
-    const firstOp = isBinary ? FrameType.WS_BINARY : FrameType.WS_TEXT;
-    if (payload.byteLength === 0) {
-      await this.consumeSendWindow(0, true);
-      if (this.isSendStopped()) throw new Error('WS stream closed');
-      this.sendWireFrame(firstOp, FrameFlag.MSG_FIN, payload);
+  }
+
+  async sendMessage(data: string | Uint8Array): Promise<void> {
+    if (this.terminated || this.localFin) throw new Error('WebSocket stream closed');
+    const isBinary = data instanceof Uint8Array;
+    const raw = isBinary ? data : utf8Enc.encode(data);
+    if (raw.byteLength > MAX_WS_MESSAGE_BYTES) {
+      throw new RangeError('WebSocket message exceeds 16 MiB');
+    }
+    const op = isBinary ? FrameType.WS_BINARY : FrameType.WS_TEXT;
+    if (raw.byteLength === 0) {
+      await this.mux.waitLaneWritable(this.lane);
+      if (this.terminated || this.localFin) throw new Error('WebSocket stream closed');
+      this.mux.sendLaneFrame(this.lane, this.streamId, op, FrameFlag.MSG_FIN, raw);
       return;
     }
+
     let off = 0;
-    let first = true;
-    while (off < payload.byteLength) {
-      await waitForDCBackpressure(this.dc, () => this.isSendStopped());
-      if (this.isSendStopped()) throw new Error('WS stream closed');
-      const chunkMax = this.mux.effectiveChunkSize();
-      const want = Math.min(payload.byteLength - off, chunkMax);
-      const grant = await this.consumeSendWindow(want, false);
-      if (this.isSendStopped()) throw new Error('WS stream closed');
-      const end = off + grant;
-      const op = first ? firstOp : FrameType.WS_CONT;
-      first = false;
-      const flags = end === payload.byteLength ? FrameFlag.MSG_FIN : FrameFlag.NONE;
-      this.sendWireFrame(op, flags, payload.subarray(off, end));
-      off = end;
+    while (off < raw.byteLength) {
+      if (this.terminated || this.localFin) throw new Error('WebSocket stream closed');
+      await this.mux.waitLaneWritable(this.lane);
+      const want = Math.min(this.mux.chunkSize, raw.byteLength - off);
+      const grant = await this.acquireSendWindow(want);
+      if (this.terminated || this.localFin) throw new Error('WebSocket stream closed');
+      const isLast = off + grant >= raw.byteLength;
+      this.mux.sendLaneFrame(
+        this.lane,
+        this.streamId,
+        op,
+        isLast ? FrameFlag.MSG_FIN : FrameFlag.NONE,
+        raw.subarray(off, off + grant)
+      );
+      off += grant;
     }
   }
 
-  sendWSClose(code = 1000, reason = '', immediateCleanup = false): void {
-    if (this.closed || this.localCloseSent) return;
-    this.localCloseSent = true;
+  close(code = 1000, reason = ''): void {
+    if (this.terminated || this.localFin) return;
+    this.localFin = true;
     try {
-      this.sendWireFrame(FrameType.WS_CLOSE, FrameFlag.NONE, encodeWSClosePayload(code, reason));
-    } catch {
-      this.cleanup(null);
-      return;
-    }
-    if (immediateCleanup) {
-      this.cleanup(null);
-    }
-  }
-
-  reset(code: number = ErrorCode.CANCEL): void {
-    if (this.closed) return;
-    try {
-      this.sendWireFrame(FrameType.RESET, FrameFlag.NONE, encodeResetPayload(code));
-    } catch {
-      // ignore send failure during reset
-    }
-    this.cleanup(null);
-  }
-
-  /** @internal */
-  _closeFromMux(code: number): void {
-    this.cleanup(code);
-  }
-
-  private readonly onDCMessage = (ev: Event): void => {
-    if (this.closed) return;
-    const raw = toUint8Array((ev as MessageEvent).data);
-    if (!raw) return;
-    let f: Frame;
-    try {
-      f = decodeFrame(raw);
-    } catch {
-      this.failInternal(ErrorCode.PROTOCOL_ERROR);
-      return;
-    }
-    if (f.gen !== this.gen || !isWSDataFrameType(f.type)) {
-      this.failInternal(ErrorCode.PROTOCOL_ERROR);
-      return;
-    }
-
-    switch (f.type) {
-      case FrameType.HEADERS: {
-        if (this.rxState !== 'IDLE') {
-          this.failInternal(ErrorCode.PROTOCOL_ERROR);
-          return;
-        }
-        this.rxState = 'RECEIVING_HEADERS';
-        this.startHeaderTimer();
-        const assembled = this.appendHeaderBytes(f.payload, (f.flags & FrameFlag.MORE_HEADERS) !== 0);
-        if (assembled) this.finishWSHeaders(assembled);
-        break;
-      }
-      case FrameType.CONTINUATION: {
-        if (this.rxState !== 'RECEIVING_HEADERS') {
-          this.failInternal(ErrorCode.PROTOCOL_ERROR);
-          return;
-        }
-        if (f.payload.byteLength === 0 && (f.flags & FrameFlag.MORE_HEADERS) !== 0) {
-          this.failInternal(ErrorCode.PROTOCOL_ERROR);
-          return;
-        }
-        const assembled = this.appendHeaderBytes(f.payload, (f.flags & FrameFlag.MORE_HEADERS) !== 0);
-        if (assembled) this.finishWSHeaders(assembled);
-        break;
-      }
-      case FrameType.CREDIT:
-        this.handleCreditFrame(f.payload);
-        break;
-      case FrameType.RESET: {
-        const code = decodeResetPayload(f.payload);
-        this.cleanup(code);
-        break;
-      }
-      case FrameType.WS_TEXT:
-      case FrameType.WS_BINARY:
-      case FrameType.WS_CONT:
-        if (this.rxState !== 'OPEN') {
-          this.failInternal(ErrorCode.PROTOCOL_ERROR);
-          return;
-        }
-        this.handleWSChunk(f);
-        break;
-      case FrameType.WS_CLOSE: {
-        if (this.rxState !== 'OPEN') {
-          this.failInternal(ErrorCode.PROTOCOL_ERROR);
-          return;
-        }
-        let closeInfo: { code: number; reason: string };
-        try {
-          closeInfo = decodeWSClosePayload(f.payload);
-        } catch {
-          this.failInternal(ErrorCode.PROTOCOL_ERROR);
-          return;
-        }
-        const preservedPending = this.pendingMessages.length > 0;
-        const ch = this.closeHandler;
-        if (!preservedPending) {
-          this.closeHandler = null;
-        }
-        this.cleanup(null, preservedPending);
-        if (preservedPending) {
-          this.pendingClose = closeInfo;
-        } else if (ch) {
-          ch(closeInfo.code, closeInfo.reason);
-        } else {
-          this.pendingClose = closeInfo;
-        }
-        break;
-      }
-    }
-  };
-
-  private readonly onDCClose = (): void => {
-    if (!this.closed) {
-      this.cleanup(ErrorCode.CANCEL);
-    }
-  };
-
-  private finishWSHeaders(assembled: Uint8Array): void {
-    this.rxState = 'OPEN';
-    if (this.headersHandler) {
-      this.headersHandler(assembled);
-    } else {
-      this.pendingHeaders = assembled;
-    }
-  }
-
-  private creditConsumed(cost: number): void {
-    if (this.closed || cost <= 0) return;
-    this.consumedForCredit += cost;
-    if (this.consumedForCredit >= DEFAULT_STREAM_WINDOW_SIZE / 8) {
-      const delta = this.consumedForCredit;
-      this.consumedForCredit = 0;
-      this.recvWindowRem += delta;
-      try {
-        this.sendWireFrame(FrameType.CREDIT, FrameFlag.NONE, encodeCreditPayload(delta));
-      } catch {
-        this.cleanup(ErrorCode.CANCEL);
-      }
-    }
-  }
-
-  private handleWSChunk(f: Frame): void {
-    const len = f.payload.byteLength;
-    const cost = len + PER_CHUNK_MEM_OVERHEAD;
-    if (cost > this.recvWindowRem) {
-      this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
-      return;
-    }
-    this.recvWindowRem -= cost;
-
-    if (f.type === FrameType.WS_TEXT || f.type === FrameType.WS_BINARY) {
-      if (this.wsInProgress) {
-        this.failInternal(ErrorCode.PROTOCOL_ERROR);
-        return;
-      }
-      this.wsInProgress = true;
-      this.wsIsBinary = f.type === FrameType.WS_BINARY;
-      this.wsChunks = [];
-      this.wsBytes = 0;
-      this.wsReservedBytes = 0;
-      this.wsCreditedBytes = 0;
-    } else if (!this.wsInProgress) {
-      this.failInternal(ErrorCode.PROTOCOL_ERROR);
-      return;
-    }
-
-    if (this.wsChunks.length >= MAX_WS_INBOUND_CHUNKS) {
-      this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
-      return;
-    }
-    if (this.wsBytes + len > MAX_WS_MESSAGE_BYTES) {
-      const ch = this.closeHandler;
-      this.closeHandler = null;
-      this.sendWSClose(1009, 'Message Too Big', true);
-      if (ch) {
-        ch(1009, 'Message Too Big');
-      } else {
-        this.pendingClose = { code: 1009, reason: 'Message Too Big' };
-      }
-      return;
-    }
-    if (!this.mux._tryReserveSessionBytes(cost)) {
-      this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
-      return;
-    }
-    this.wsReservedBytes += cost;
-    if (len > 0) {
-      const cp = new Uint8Array(len);
-      cp.set(f.payload);
-      this.wsChunks.push(cp);
-      this.wsBytes += len;
-    }
-
-    const isFin = (f.flags & FrameFlag.MSG_FIN) !== 0;
-    if (!isFin) {
-      if (this.msgHandler) {
-        this.wsCreditedBytes += cost;
-        this.creditConsumed(cost);
-      }
-      return;
-    }
-
-    let full: Uint8Array;
-    if (this.wsChunks.length === 0) {
-      full = new Uint8Array(0);
-    } else if (this.wsChunks.length === 1) {
-      full = this.wsChunks[0];
-    } else {
-      full = new Uint8Array(this.wsBytes);
-      let off = 0;
-      for (const c of this.wsChunks) {
-        full.set(c, off);
-        off += c.byteLength;
-      }
-    }
-    const isBin = this.wsIsBinary;
-    const totalReserved = this.wsReservedBytes;
-    const uncredited = Math.max(0, totalReserved - this.wsCreditedBytes);
-    this.wsChunks = [];
-    this.wsBytes = 0;
-    this.wsReservedBytes = 0;
-    this.wsCreditedBytes = 0;
-    this.wsInProgress = false;
-
-    if (this.msgHandler) {
-      this.mux._releaseSessionBytes(totalReserved);
-      this.msgHandler(isBin, full);
-      if (!this.closed) {
-        this.creditConsumed(uncredited);
-      }
-    } else {
-      if (this.pendingMessages.length >= MAX_INBOUND_QUEUE_LEN) {
-        this.mux._releaseSessionBytes(totalReserved);
-        this.failInternal(ErrorCode.FLOW_CONTROL_ERROR);
-        return;
-      }
-      this.pendingMessages.push({ isBinary: isBin, payload: full, reserved: totalReserved, uncredited });
-      this.pendingMessagesReserved += totalReserved;
-    }
-  }
-
-  private cleanup(resetCode: number | null, preservePendingMessages = false): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.rxState = 'CLOSED';
-    this.releaseHeaderAssembly();
-    let toRelease = this.wsReservedBytes;
-    this.wsReservedBytes = 0;
-    if (!preservePendingMessages) {
-      toRelease += this.pendingMessagesReserved;
-      this.pendingMessagesReserved = 0;
-      this.pendingMessages = [];
-    }
-    if (toRelease > 0) {
-      this.mux._releaseSessionBytes(toRelease);
-    }
-    this.wsChunks = [];
-    this.wsBytes = 0;
-
-    this.failSendWaiters(new Error('WS stream closed'));
-    this.dc.removeEventListener('message', this.onDCMessage);
-    this.dc.removeEventListener('close', this.onDCClose);
-    this.dc.removeEventListener('error', this.onDCClose);
-    try {
-      this.dc.close();
+      this.mux.sendLaneFrame(
+        this.lane,
+        this.streamId,
+        FrameType.WS_CLOSE,
+        FrameFlag.NONE,
+        encodeWSClosePayload(code, reason)
+      );
     } catch {
       // ignore
     }
-    this.mux._unregisterWSStream(this);
-    if (resetCode !== null) {
-      this.emitReset(resetCode);
+    this.maybeDetach();
+  }
+
+  protected onHeaderFin(): void {
+    // Non-101 WS error response with FlagFin.
+    this.remoteFin = true;
+    this.remoteCloseReceived = true;
+    this.maybeDetach();
+  }
+
+  onInboundData(): void {
+    this.reset(ErrorCode.PROTOCOL_ERROR);
+  }
+
+  onInboundWSChunk(op: number, fin: boolean, payload: Uint8Array): void {
+    if (this.terminated || this.remoteCloseReceived || !this.hdrComplete) {
+      if (!this.hdrComplete && !this.terminated) this.reset(ErrorCode.PROTOCOL_ERROR);
+      return;
+    }
+    if (this.asmOp !== 0 && this.asmOp !== op) {
+      this.reset(ErrorCode.PROTOCOL_ERROR);
+      return;
+    }
+    const plen = payload.byteLength;
+    if (this.asmBytes + plen > MAX_WS_MESSAGE_BYTES) {
+      // H-5c: Unconditionally send 1009 and clean up regardless of localFin!
+      if (!this.localFin) {
+        this.close(1009, 'message exceeds 16 MiB');
+      }
+      this.abortLocal(new Error('WebSocket message exceeds 16 MiB'));
+      return;
+    }
+    const memCost = plen + INBOUND_CHUNK_OVERHEAD;
+    if (!this.mux.reserveSessionBytes(memCost)) {
+      this.reset(ErrorCode.FLOW_CONTROL_ERROR);
+      return;
+    }
+    this.asmOp = op;
+    if (plen > 0) {
+      const copy = new Uint8Array(plen);
+      copy.set(payload);
+      this.asmChunks.push(copy);
+      this.asmBytes += plen;
+    }
+    this.asmMemCost += memCost;
+
+    // Replenish pure payload-byte CREDIT smoothly during streaming large messages.
+    if (plen > 0) {
+      this.consumedBytes += plen;
+      this.consumedChunks++;
+      if (this.consumedBytes >= CREDIT_THRESHOLD_BYTES || this.consumedChunks >= CREDIT_THRESHOLD_CHUNKS) {
+        const delta = this.consumedBytes;
+        this.consumedBytes = 0;
+        this.consumedChunks = 0;
+        this.sendCredit(delta);
+      }
+    }
+
+    if (!fin) return;
+
+    const assembled = concatChunks(this.asmChunks, this.asmBytes);
+    const totalMemCost = this.asmMemCost;
+    const isBinary = this.asmOp === FrameType.WS_BINARY;
+    this.asmOp = 0;
+    this.asmChunks = [];
+    this.asmBytes = 0;
+    this.asmMemCost = 0;
+
+    let msg: WSDeliveredMessage;
+    if (isBinary) {
+      msg = { isBinary: true, data: assembled };
+    } else {
+      try {
+        msg = { isBinary: false, data: utf8Dec.decode(assembled) };
+      } catch {
+        this.mux.releaseSessionBytes(totalMemCost);
+        this.reset(ErrorCode.PROTOCOL_ERROR);
+        return;
+      }
+    }
+
+    if (this.msgCb) {
+      this.mux.releaseSessionBytes(totalMemCost);
+      this.msgCb(msg);
+    } else {
+      this.pendingMsgs.push({ msg, memCost: totalMemCost });
     }
   }
-}
 
-function waitForDataChannelOpen(dc: DataChannelLike, timeoutMs = 10_000): Promise<void> {
-  if (dc.readyState === 'open') return Promise.resolve();
-  if (dc.readyState === 'closed' || dc.readyState === 'closing') {
-    return Promise.reject(new Error('DataChannel already closed'));
+  onInboundWSClose(payload: Uint8Array): void {
+    if (this.terminated || this.remoteCloseReceived) return;
+    let code = 1000;
+    let reason = '';
+    try {
+      const dec = decodeWSClosePayload(payload);
+      code = dec.code;
+      reason = dec.reason;
+    } catch {
+      this.reset(ErrorCode.PROTOCOL_ERROR);
+      return;
+    }
+    this.remoteCloseReceived = true;
+    this.remoteFin = true;
+    // Free any half-assembled incomplete message immediately.
+    if (this.asmMemCost > 0) {
+      this.mux.releaseSessionBytes(this.asmMemCost);
+      this.asmOp = 0;
+      this.asmChunks = [];
+      this.asmBytes = 0;
+      this.asmMemCost = 0;
+    }
+    this.maybeDetach();
+
+    if (this.pendingMsgs.length === 0 && this.closeCb) {
+      this.finishAfterCloseDelivery(code, reason, true);
+    } else {
+      this.pendingClose = { code, reason, wasClean: true };
+    }
   }
-  return new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const cleanup = () => {
-      dc.removeEventListener('open', onOpen);
-      dc.removeEventListener('close', onFail);
-      dc.removeEventListener('error', onFail);
-      clearTimeout(timer);
-    };
-    const onOpen = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve();
-    };
-    const onFail = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(new Error('DataChannel closed before opening'));
-    };
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(new Error('Timed out waiting for DataChannel to open'));
-    }, timeoutMs);
-    dc.addEventListener('open', onOpen);
-    dc.addEventListener('close', onFail);
-    dc.addEventListener('error', onFail);
-  });
+
+  private finishAfterCloseDelivery(code: number, reason: string, wasClean: boolean): void {
+    if (this.terminated) return;
+    this.terminated = true;
+    this.cleanupInbound();
+    this.detach();
+    this.closeCb?.(code, reason, wasClean);
+  }
+
+  protected cleanupInbound(): void {
+    let freed = this.asmMemCost;
+    this.asmOp = 0;
+    this.asmChunks = [];
+    this.asmBytes = 0;
+    this.asmMemCost = 0;
+    for (const item of this.pendingMsgs) {
+      freed += item.memCost;
+    }
+    this.pendingMsgs = [];
+    this.pendingClose = null;
+    if (freed > 0) this.mux.releaseSessionBytes(freed);
+  }
+
+  protected notifyAbort(reason: Error): void {
+    this.closeCb?.(1006, reason.message, false);
+  }
 }
 
 export class PoolMux {
-  private readonly callbacks: PoolMuxCallbacks;
-  private readonly poolSize: number;
-  private readonly maxWSConns: number;
+  readonly poolSize: number;
   private ctrlDC: DataChannelLike | null = null;
-  private ctrlDetach: (() => void) | null = null;
-  private readonly poolSlots: PoolSlot[] = [];
-  private readonly idleSlots: PoolSlot[] = [];
-  private readonly slotWaiters: SlotWaiter[] = [];
-  private readonly wsStreams = new Set<WSStream>();
-  private readonly pingWaiters = new Map<
-    string,
-    { resolve: (alive: boolean) => void; timer: ReturnType<typeof setTimeout> }
-  >();
-  private pingSeq = 0;
+  private ctrlAsmType = 0;
+  private ctrlAsmChunks: Uint8Array[] = [];
+  private ctrlAsmBytes = 0;
 
-  private chunkSize = DEFAULT_CHUNK_SIZE;
+  private lanes: DataLane[] = [];
+  private nextStreamId = 1;
+  private activeStreams = 0;
   private sessionInboundBytes = 0;
-  private activeHTTPCount = 0;
-  private goAwaySent = false;
+  private _chunkSize = DEFAULT_CHUNK_SIZE;
   private closed = false;
+  private callbacks: PoolMuxCallbacks;
+  private pingSeq = 1;
+  private pingWaiters = new Map<string, { resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }>();
 
-  constructor(
-    callbacks: PoolMuxCallbacks = {},
-    poolSize = DEFAULT_POOL_SIZE,
-    maxWSConns = DEFAULT_MAX_WS_CONNS
-  ) {
+  constructor(poolSize: number = DEFAULT_POOL_SIZE, callbacks: PoolMuxCallbacks = {}) {
+    this.poolSize = Math.max(1, Math.min(poolSize, MAX_POOL_SIZE));
     this.callbacks = callbacks;
-    this.poolSize = Math.max(1, poolSize);
-    this.maxWSConns = Math.max(1, maxWSConns);
     for (let i = 0; i < this.poolSize; i++) {
-      this.poolSlots.push({
-        slotIdx: i,
-        dc: null,
-        localGen: 0,
-        active: null,
-        closed: false,
-        detachListeners: null,
-      });
+      this.lanes.push({ id: i, dc: null, streams: new Map(), lowWaiters: [] });
     }
   }
 
-  getActiveStreamCount(): number {
-    return this.activeHTTPCount + this.wsStreams.size;
+  get chunkSize(): number {
+    return this._chunkSize;
   }
 
-  getPoolSize(): number {
-    return this.poolSize;
-  }
-
-  getSessionInboundBytes(): number {
+  get sessionMemUsed(): number {
     return this.sessionInboundBytes;
   }
 
-  effectiveChunkSize(): number {
-    return this.chunkSize;
+  get activeStreamCount(): number {
+    return this.activeStreams;
   }
 
-  /**
-   * Clamps frame payload size strictly DOWNWARD (ignores invalid values < MIN_NEGOTIATED_MAX_MSG_SIZE).
-   */
-  setMaxMessageSize(maxMsg: number): void {
-    if (!Number.isFinite(maxMsg) || maxMsg < MIN_NEGOTIATED_MAX_MSG_SIZE) return;
-    const candidate = Math.max(MIN_CHUNK_SIZE, Math.min(DEFAULT_CHUNK_SIZE, Math.floor(maxMsg) - HEADER_SIZE));
-    if (candidate < this.chunkSize) {
-      this.chunkSize = candidate;
+  setMaxMessageSize(mms: number): void {
+    if (!Number.isFinite(mms) || mms < MIN_NEGOTIATED_MAX_MSG_SIZE) return;
+    const nextChunk = Math.max(MIN_CHUNK_SIZE, Math.min(DEFAULT_CHUNK_SIZE, Math.floor(mms) - HEADER_SIZE));
+    if (nextChunk < this._chunkSize) {
+      this._chunkSize = nextChunk;
     }
+  }
+
+  reserveSessionBytes(n: number): boolean {
+    if (n <= 0) return true;
+    if (this.sessionInboundBytes + n > DEFAULT_SESSION_MEMORY_BUDGET) {
+      return false;
+    }
+    this.sessionInboundBytes += n;
+    return true;
+  }
+
+  releaseSessionBytes(n: number): void {
+    if (n <= 0) return;
+    this.sessionInboundBytes = Math.max(0, this.sessionInboundBytes - n);
   }
 
   attachControlDC(dc: DataChannelLike): void {
-    this.ctrlDetach?.();
     this.ctrlDC = dc;
     dc.binaryType = 'arraybuffer';
-    const onMsg = (ev: Event) => {
-      if (this.closed) return;
-      const raw = toUint8Array((ev as MessageEvent).data);
-      if (!raw) return;
-      this.handleControlBytes(raw);
+    dc.onmessage = (ev) => {
+      const bytes = toUint8Array(ev.data);
+      if (bytes) this.handleControlMessage(bytes);
     };
-    dc.addEventListener('message', onMsg);
-    this.ctrlDetach = () => dc.removeEventListener('message', onMsg);
   }
 
-  attachPoolDC(slotIdx: number, dc: DataChannelLike): void {
-    if (slotIdx < 0 || slotIdx >= this.poolSize) return;
-    const slot = this.poolSlots[slotIdx];
-    slot.detachListeners?.();
-    slot.dc = dc;
+  attachLaneDC(laneIdx: number, dc: DataChannelLike): void {
+    const lane = this.lanes[laneIdx];
+    if (!lane) return;
+    lane.dc = dc;
     dc.binaryType = 'arraybuffer';
-
-    if (dc.readyState === 'closed' || dc.readyState === 'closing') {
-      slot.closed = true;
-      this.rejectWaitersIfAllSlotsDead();
-      return;
-    }
-
-    const onMsg = (ev: Event) => {
-      if (this.closed || slot.closed) return;
-      const raw = toUint8Array((ev as MessageEvent).data);
-      if (!raw) return;
-      this.handlePoolBytes(slot, raw);
+    dc.bufferedAmountLowThreshold = SCTP_LOW_WATER;
+    dc.onbufferedamountlow = () => {
+      const waiters = lane.lowWaiters;
+      lane.lowWaiters = [];
+      for (const fn of waiters) fn();
     };
-    const onClose = () => {
-      slot.closed = true;
-      const idx = this.idleSlots.indexOf(slot);
-      if (idx >= 0) this.idleSlots.splice(idx, 1);
-      if (slot.active) {
-        slot.active._terminateFromMux(ErrorCode.CANCEL);
-      }
-      this.rejectWaitersIfAllSlotsDead();
+    dc.onmessage = (ev) => {
+      const bytes = toUint8Array(ev.data);
+      if (bytes) this.handleLaneMessage(laneIdx, bytes);
     };
-    const onOpen = () => {
-      if (!this.closed && !slot.closed && slot.dc === dc && slot.active === null) {
-        this.makeSlotAvailable(slot);
-      }
-    };
-
-    dc.addEventListener('message', onMsg);
-    dc.addEventListener('close', onClose);
-    dc.addEventListener('error', onClose);
-    if (dc.readyState === 'open') {
-      this.makeSlotAvailable(slot);
-    } else {
-      dc.addEventListener('open', onOpen);
-    }
-    slot.detachListeners = () => {
-      dc.removeEventListener('message', onMsg);
-      dc.removeEventListener('close', onClose);
-      dc.removeEventListener('error', onClose);
-      dc.removeEventListener('open', onOpen);
+    dc.onclose = () => {
+      this.handleLaneClose(laneIdx);
     };
   }
 
-  sendControlFrame(type: number, payload: Uint8Array = new Uint8Array(0)): void {
+  sendControlFrame(type: number, payload: Uint8Array): void {
     if (this.closed || !this.ctrlDC || this.ctrlDC.readyState !== 'open') {
       throw new Error('control channel not open');
     }
     if (!isControlFrameType(type)) {
       throw new Error(`invalid control frame type: 0x${type.toString(16)}`);
     }
-    const maxCtrl = Math.min(this.chunkSize, MAX_CONTROL_JSON_SIZE);
-    if (payload.byteLength > maxCtrl) {
-      throw new RangeError(`control frame payload exceeds limit (${payload.byteLength} > ${maxCtrl})`);
+    if (isControlJsonFrameType(type) && payload.byteLength > MAX_CONTROL_JSON_SIZE) {
+      throw new RangeError('control JSON payload exceeds 128 KiB');
     }
-    this.ctrlDC.send(encodeFrame(0, type, FrameFlag.NONE, payload));
+    if (!isControlJsonFrameType(type) || payload.byteLength <= this._chunkSize) {
+      this.ctrlDC.send(encodeFrame(0, type, FrameFlag.NONE, payload));
+      return;
+    }
+    for (let off = 0; off < payload.byteLength; off += this._chunkSize) {
+      const end = Math.min(off + this._chunkSize, payload.byteLength);
+      const flags = end < payload.byteLength ? FrameFlag.MORE : FrameFlag.NONE;
+      this.ctrlDC.send(encodeFrame(0, type, flags, payload.subarray(off, end)));
+    }
   }
 
-  sendGoAway(code: number = ErrorCode.GOING_AWAY): void {
-    if (this.goAwaySent || this.closed || !this.ctrlDC || this.ctrlDC.readyState !== 'open') return;
-    this.goAwaySent = true;
+  sendGoAway(code: number): void {
     try {
       this.sendControlFrame(FrameType.GOAWAY, encodeGoAwayPayload(code));
     } catch {
@@ -1324,24 +890,26 @@ export class PoolMux {
     }
   }
 
-  ping(timeoutMs = 1_500): Promise<boolean> {
+  /**
+   * Sends an 8-byte PING frame and verifies an exact 8-byte PONG echo within timeoutMs.
+   * Immediately resolves false if mux closes while in flight.
+   */
+  ping(timeoutMs = 5_000): Promise<boolean> {
     if (this.closed || !this.ctrlDC || this.ctrlDC.readyState !== 'open') {
       return Promise.resolve(false);
     }
-    const seqHi = Date.now() >>> 0;
-    this.pingSeq = (this.pingSeq + 1) >>> 0;
-    const seqLo = this.pingSeq;
-    const key = `${seqHi}:${seqLo}`;
+    const seq = this.pingSeq++;
     const payload = new Uint8Array(8);
-    const view = new DataView(payload.buffer);
-    view.setUint32(0, seqHi, false);
-    view.setUint32(4, seqLo, false);
+    const dv = new DataView(payload.buffer);
+    dv.setUint32(0, Math.floor(seq / 0x100000000) >>> 0, false);
+    dv.setUint32(4, seq >>> 0, false);
+    const key = Array.from(payload).join(',');
 
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         this.pingWaiters.delete(key);
         resolve(false);
-      }, Math.max(1, timeoutMs));
+      }, timeoutMs);
       this.pingWaiters.set(key, { resolve, timer });
       try {
         this.sendControlFrame(FrameType.PING, payload);
@@ -1353,242 +921,20 @@ export class PoolMux {
     });
   }
 
-  async openHTTPStream(
-    headersTlv: Uint8Array,
-    fin = false,
-    manualFlowControl = false,
-    signal?: AbortSignal
-  ): Promise<PoolStream> {
-    if (this.closed) throw new Error('mux closed');
-    if (headersTlv.byteLength > MAX_TOTAL_HEADERS_SIZE) {
-      throw new RangeError('HEADERS exceeds 64 KiB');
-    }
-    const slot = await this.acquirePoolSlot(signal);
-    if (this.closed || slot.closed || !slot.dc || slot.dc.readyState !== 'open') {
-      throw new Error('mux or pool slot closed');
-    }
-    slot.localGen = (slot.localGen + 1) >>> 0;
-    if (slot.localGen === 0) slot.localGen = 1;
-    if (slot.localGen >= GOAWAY_GEN_THRESHOLD && !this.goAwaySent) {
-      this.sendGoAway(ErrorCode.GOING_AWAY);
-      this.callbacks.onGoAway?.(ErrorCode.GOING_AWAY);
-    }
-    const stream = new PoolStream(this, slot, slot.localGen, manualFlowControl);
-    slot.active = stream;
-    this.activeHTTPCount++;
-    try {
-      await stream.sendHeaders(headersTlv, fin);
-    } catch (err) {
-      stream.reset(ErrorCode.INTERNAL_ERROR);
-      throw err;
-    }
-    return stream;
-  }
-
-  async openWSStream(wsDC: DataChannelLike, headersTlv: Uint8Array): Promise<WSStream> {
-    const closeQuiet = () => {
-      try {
-        wsDC.close();
-      } catch {
-        // ignore
-      }
-    };
-    if (this.closed) {
-      closeQuiet();
-      throw new Error('mux closed');
-    }
-    if (headersTlv.byteLength > MAX_TOTAL_HEADERS_SIZE) {
-      closeQuiet();
-      throw new RangeError('WS HEADERS exceeds 64 KiB');
-    }
-    if (this.wsStreams.size >= this.maxWSConns) {
-      closeQuiet();
-      throw new Error('max concurrent WebSocket streams reached');
-    }
-    const stream = new WSStream(this, wsDC);
-    this.wsStreams.add(stream);
-    try {
-      await waitForDataChannelOpen(wsDC);
-      if (this.closed || stream.isClosed) {
-        throw new Error('WS stream closed before open');
-      }
-      await stream.sendHeaders(headersTlv);
-    } catch (err) {
-      stream.reset(ErrorCode.INTERNAL_ERROR);
-      throw err;
-    }
-    return stream;
-  }
-
-  close(): void {
+  handleControlMessage(raw: Uint8Array): void {
     if (this.closed) return;
-    this.closed = true;
-    this.ctrlDetach?.();
-    this.ctrlDetach = null;
-    const waiters = this.slotWaiters.splice(0);
-    for (const w of waiters) {
-      w.cleanup();
-      w.reject(new Error('mux closed'));
-    }
-    for (const [, pw] of this.pingWaiters) {
-      clearTimeout(pw.timer);
-      pw.resolve(false);
-    }
-    this.pingWaiters.clear();
-    this.idleSlots.length = 0;
-    for (const slot of this.poolSlots) {
-      slot.closed = true;
-      slot.detachListeners?.();
-      slot.detachListeners = null;
-      if (slot.active) {
-        slot.active._terminateFromMux(ErrorCode.GOING_AWAY);
-      }
-      try {
-        slot.dc?.close();
-      } catch {
-        // ignore
-      }
-    }
-    for (const ws of Array.from(this.wsStreams)) {
-      ws._closeFromMux(ErrorCode.GOING_AWAY);
-    }
-    try {
-      this.ctrlDC?.close();
-    } catch {
-      // ignore
-    }
-  }
-
-  /** @internal */
-  _tryReserveSessionBytes(n: number): boolean {
-    if (this.sessionInboundBytes + n > MAX_SESSION_INBOUND_BYTES) return false;
-    this.sessionInboundBytes += n;
-    return true;
-  }
-
-  /** @internal */
-  _releaseSessionBytes(n: number): void {
-    this.sessionInboundBytes = Math.max(0, this.sessionInboundBytes - n);
-  }
-
-  /** @internal */
-  _releasePoolSlot(slot: PoolSlot, stream: PoolStream): void {
-    if (slot.active === stream) {
-      slot.active = null;
-      this.activeHTTPCount = Math.max(0, this.activeHTTPCount - 1);
-      if (!this.closed && !slot.closed && slot.dc?.readyState === 'open') {
-        this.makeSlotAvailable(slot);
-      } else {
-        this.rejectWaitersIfAllSlotsDead();
-      }
-    }
-  }
-
-  /** @internal */
-  _unregisterWSStream(ws: WSStream): void {
-    this.wsStreams.delete(ws);
-  }
-
-  private hasAnyUsablePoolSlot(): boolean {
-    for (const sl of this.poolSlots) {
-      if (!sl.closed && sl.dc && (sl.dc.readyState === 'open' || sl.dc.readyState === 'connecting')) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private rejectWaitersIfAllSlotsDead(): void {
-    if (this.slotWaiters.length === 0) return;
-    if (!this.hasAnyUsablePoolSlot()) {
-      const list = this.slotWaiters.splice(0);
-      for (const w of list) {
-        w.cleanup();
-        w.reject(new Error('all HTTP pool DataChannels closed'));
-      }
-    }
-  }
-
-  private makeSlotAvailable(slot: PoolSlot): void {
-    while (this.slotWaiters.length > 0) {
-      const waiter = this.slotWaiters.shift()!;
-      waiter.cleanup();
-      waiter.resolve(slot);
-      return;
-    }
-    if (!this.idleSlots.includes(slot)) {
-      this.idleSlots.push(slot);
-    }
-  }
-
-  private async acquirePoolSlot(signal?: AbortSignal): Promise<PoolSlot> {
-    if (signal?.aborted) {
-      throw new Error('aborted while acquiring HTTP pool slot');
-    }
-    while (this.idleSlots.length > 0) {
-      const slot = this.idleSlots.shift()!;
-      if (!slot.closed && slot.dc?.readyState === 'open' && slot.active === null) {
-        return slot;
-      }
-    }
-    if (this.closed) {
-      throw new Error('mux closed');
-    }
-    if (!this.hasAnyUsablePoolSlot()) {
-      throw new Error('all HTTP pool DataChannels closed');
-    }
-    return await new Promise<PoolSlot>((resolve, reject) => {
-      let settled = false;
-      const removeWaiter = () => {
-        const idx = this.slotWaiters.indexOf(waiter);
-        if (idx >= 0) this.slotWaiters.splice(idx, 1);
-      };
-      const onAbort = () => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        removeWaiter();
-        reject(new Error('aborted while waiting for HTTP pool slot'));
-      };
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        removeWaiter();
-        reject(new Error('timed out waiting for available HTTP pool slot'));
-      }, POOL_ACQUIRE_TIMEOUT_MS);
-      const cleanup = () => {
-        clearTimeout(timer);
-        if (signal) signal.removeEventListener('abort', onAbort);
-      };
-      const waiter: SlotWaiter = {
-        resolve: (sl) => {
-          if (settled) return;
-          settled = true;
-          resolve(sl);
-        },
-        reject: (err) => {
-          if (settled) return;
-          settled = true;
-          reject(err);
-        },
-        cleanup,
-      };
-      if (signal) {
-        signal.addEventListener('abort', onAbort, { once: true });
-      }
-      this.slotWaiters.push(waiter);
-    });
-  }
-
-  private handleControlBytes(raw: Uint8Array): void {
     let f: Frame;
     try {
       f = decodeFrame(raw);
-    } catch {
+    } catch (err) {
+      this.callbacks.onProtocolError?.(err instanceof Error ? err : new Error(String(err)));
       return;
     }
-    if (!isControlFrameType(f.type)) return;
+    if (f.streamId !== 0 || !isControlFrameType(f.type)) {
+      this.callbacks.onProtocolError?.(new Error('non-control frame on p2pctrl'));
+      return;
+    }
+
     if (f.type === FrameType.PING) {
       try {
         this.sendControlFrame(FrameType.PONG, f.payload);
@@ -1598,45 +944,256 @@ export class PoolMux {
       return;
     }
     if (f.type === FrameType.PONG) {
-      if (f.payload.byteLength === 8) {
-        const view = new DataView(f.payload.buffer, f.payload.byteOffset, 8);
-        const key = `${view.getUint32(0, false)}:${view.getUint32(4, false)}`;
-        const pw = this.pingWaiters.get(key);
-        if (pw) {
-          this.pingWaiters.delete(key);
-          clearTimeout(pw.timer);
-          pw.resolve(true);
-        }
+      const key = Array.from(f.payload).join(',');
+      const waiter = this.pingWaiters.get(key);
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        this.pingWaiters.delete(key);
+        waiter.resolve(true);
       }
       return;
     }
     if (f.type === FrameType.GOAWAY) {
-      const code = decodeGoAwayPayload(f.payload);
-      this.callbacks.onGoAway?.(code);
+      try {
+        this.callbacks.onGoAway?.(decodeGoAwayPayload(f.payload));
+      } catch (err) {
+        this.callbacks.onProtocolError?.(err instanceof Error ? err : new Error(String(err)));
+      }
       return;
     }
-    this.callbacks.onControlFrame?.(f);
+
+    const hasMore = (f.flags & FrameFlag.MORE) !== 0;
+    if (this.ctrlAsmType === 0) {
+      if (!hasMore) {
+        if (f.payload.byteLength > MAX_CONTROL_JSON_SIZE) {
+          this.callbacks.onProtocolError?.(new Error('control frame exceeds 128 KiB'));
+          return;
+        }
+        this.callbacks.onControlFrame?.(f);
+        return;
+      }
+      this.ctrlAsmType = f.type;
+      this.ctrlAsmChunks = [new Uint8Array(f.payload)];
+      this.ctrlAsmBytes = f.payload.byteLength;
+      return;
+    }
+
+    if (f.type !== this.ctrlAsmType) {
+      this.resetCtrlAsm();
+      this.callbacks.onProtocolError?.(new Error('interleaved control JSON frame'));
+      return;
+    }
+    this.ctrlAsmChunks.push(new Uint8Array(f.payload));
+    this.ctrlAsmBytes += f.payload.byteLength;
+    if (this.ctrlAsmChunks.length > MAX_CONTROL_CHUNKS || this.ctrlAsmBytes > MAX_CONTROL_JSON_SIZE) {
+      this.resetCtrlAsm();
+      this.callbacks.onProtocolError?.(new Error('assembled control JSON exceeds limit'));
+      return;
+    }
+    if (hasMore) return;
+
+    const assembled = concatChunks(this.ctrlAsmChunks, this.ctrlAsmBytes);
+    const type = this.ctrlAsmType;
+    this.resetCtrlAsm();
+    this.callbacks.onControlFrame?.({ streamId: 0, type, flags: FrameFlag.NONE, payload: assembled });
   }
 
-  private handlePoolBytes(slot: PoolSlot, raw: Uint8Array): void {
+  private resetCtrlAsm(): void {
+    this.ctrlAsmType = 0;
+    this.ctrlAsmChunks = [];
+    this.ctrlAsmBytes = 0;
+  }
+
+  handleLaneMessage(laneIdx: number, raw: Uint8Array): void {
+    if (this.closed) return;
+    const lane = this.lanes[laneIdx];
+    if (!lane) return;
     let f: Frame;
     try {
       f = decodeFrame(raw);
-    } catch {
-      if (slot.active) {
-        slot.active._failProtocol(ErrorCode.PROTOCOL_ERROR);
+    } catch (err) {
+      this.callbacks.onProtocolError?.(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+    if (f.streamId === 0 || !isStreamFrameType(f.type)) {
+      this.callbacks.onProtocolError?.(new Error('invalid stream frame on data lane'));
+      return;
+    }
+
+    const st = lane.streams.get(f.streamId);
+    if (!st) return; // Silently ignore late frames for already-closed streams (HTTP/2 semantics).
+
+    switch (f.type) {
+      case FrameType.HEADERS:
+        st.onInboundHeaders(f.flags, f.payload);
+        break;
+      case FrameType.DATA:
+        st.onInboundData(f.flags, f.payload);
+        break;
+      case FrameType.WS_TEXT:
+      case FrameType.WS_BINARY:
+        st.onInboundWSChunk(f.type, (f.flags & FrameFlag.MSG_FIN) !== 0, f.payload);
+        break;
+      case FrameType.WS_CLOSE:
+        st.onInboundWSClose(f.payload);
+        break;
+      case FrameType.CREDIT:
+        st.onInboundCredit(new DataView(f.payload.buffer, f.payload.byteOffset, 4).getUint32(0, false));
+        break;
+      case FrameType.RESET:
+        st.onPeerReset(decodeResetPayload(f.payload));
+        break;
+    }
+  }
+
+  handleLaneClose(laneIdx: number): void {
+    const lane = this.lanes[laneIdx];
+    if (!lane) return;
+    lane.dc = null;
+    const waiters = lane.lowWaiters;
+    lane.lowWaiters = [];
+    for (const fn of waiters) fn();
+
+    const victims = Array.from(lane.streams.values());
+    lane.streams.clear();
+    for (const st of victims) {
+      st.abortLocal(new Error('data lane closed'));
+    }
+  }
+
+  private pickLane(): DataLane {
+    let best: DataLane | null = null;
+    let bestLoad = Infinity;
+    let bestBuf = Infinity;
+    for (const lane of this.lanes) {
+      if (!lane.dc || lane.dc.readyState !== 'open') continue;
+      const load = lane.streams.size;
+      const buf = lane.dc.bufferedAmount;
+      if (load < bestLoad || (load === bestLoad && buf < bestBuf)) {
+        bestLoad = load;
+        bestBuf = buf;
+        best = lane;
+        if (load === 0 && buf === 0) break;
       }
-      return;
     }
-    if (!isPoolDataFrameType(f.type)) {
-      if (slot.active) {
-        slot.active._failProtocol(ErrorCode.PROTOCOL_ERROR);
+    if (!best) throw new Error('No open P2P data lane available');
+    return best;
+  }
+
+  async waitLaneWritable(lane: DataLane): Promise<void> {
+    if (this.closed || !lane.dc || lane.dc.readyState !== 'open') {
+      throw new Error('data lane not open');
+    }
+    if (lane.dc.bufferedAmount < SCTP_HIGH_WATER) return;
+    const deadline = Date.now() + WINDOW_WAIT_TIMEOUT_MS;
+    while (!this.closed && lane.dc && lane.dc.readyState === 'open' && lane.dc.bufferedAmount > SCTP_LOW_WATER) {
+      const rem = deadline - Date.now();
+      if (rem <= 0) throw new Error('SCTP backpressure write timeout');
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          const idx = lane.lowWaiters.indexOf(done);
+          if (idx >= 0) lane.lowWaiters.splice(idx, 1);
+          resolve();
+        }, Math.min(25, rem));
+        lane.lowWaiters.push(done);
+      });
+    }
+  }
+
+  sendLaneFrame(lane: DataLane, streamId: number, type: number, flags: number, payload: Uint8Array): void {
+    if (this.closed || !lane.dc || lane.dc.readyState !== 'open') {
+      throw new Error('data lane not open');
+    }
+    lane.dc.send(encodeFrame(streamId, type, flags, payload));
+  }
+
+  detachStream(lane: DataLane, streamId: number, st: ManagedStream): void {
+    if (lane.streams.get(streamId) === st) {
+      lane.streams.delete(streamId);
+    }
+    this.activeStreams = Math.max(0, this.activeStreams - 1);
+  }
+
+  private allocateStreamId(): number {
+    if (this.nextStreamId >= 0xfffffff0) {
+      throw new Error('stream ID space exhausted; reconnect required');
+    }
+    return this.nextStreamId++;
+  }
+
+  async openHTTPStream(headersRaw: Uint8Array, hasBody: boolean): Promise<PoolStream> {
+    if (this.closed) throw new Error('PoolMux is closed');
+    if (this.activeStreams >= MAX_CONCURRENT_STREAMS) {
+      throw new Error('max concurrent P2P streams reached');
+    }
+    const lane = this.pickLane();
+    await this.waitLaneWritable(lane);
+    if (this.closed) throw new Error('PoolMux is closed');
+    const streamId = this.allocateStreamId();
+    const st = new PoolStream(this, lane, streamId);
+    lane.streams.set(streamId, st);
+    this.activeStreams++;
+    try {
+      await st.openWithHeaders(headersRaw, hasBody);
+      return st;
+    } catch (err) {
+      st.abortLocal(err instanceof Error ? err : new Error(String(err)));
+      throw err;
+    }
+  }
+
+  async openWSStream(headersRaw: Uint8Array): Promise<WSStream> {
+    if (this.closed) throw new Error('PoolMux is closed');
+    if (this.activeStreams >= MAX_CONCURRENT_STREAMS) {
+      throw new Error('max concurrent P2P streams reached');
+    }
+    const lane = this.pickLane();
+    await this.waitLaneWritable(lane);
+    if (this.closed) throw new Error('PoolMux is closed');
+    const streamId = this.allocateStreamId();
+    const st = new WSStream(this, lane, streamId);
+    lane.streams.set(streamId, st);
+    this.activeStreams++;
+    try {
+      await st.openWithHeaders(headersRaw);
+      return st;
+    } catch (err) {
+      st.abortLocal(err instanceof Error ? err : new Error(String(err)));
+      throw err;
+    }
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.resetCtrlAsm();
+    for (const [, w] of this.pingWaiters) {
+      clearTimeout(w.timer);
+      w.resolve(false);
+    }
+    this.pingWaiters.clear();
+    if (this.ctrlDC) {
+      try {
+        this.ctrlDC.close();
+      } catch {
+        // ignore
       }
-      return;
+      this.ctrlDC = null;
     }
-    if (!slot.active || slot.active.gen !== f.gen) {
-      return;
+    for (let i = 0; i < this.lanes.length; i++) {
+      const dc = this.lanes[i].dc;
+      this.handleLaneClose(i);
+      if (dc) {
+        try {
+          dc.close();
+        } catch {
+          // ignore
+        }
+      }
     }
-    slot.active._handleFrame(f);
   }
 }

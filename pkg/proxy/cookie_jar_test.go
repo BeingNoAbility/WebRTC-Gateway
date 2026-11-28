@@ -116,18 +116,37 @@ func TestCookieJarSplitPoolInjectionAndEvictionBlocked(t *testing.T) {
 		}
 		jar.ApplyClientMutations(httpsURL, muts)
 	}
+	// HttpOnly `sid` is structurally immune to JS mutation/deletion/shadowing.
+	// On a secure HTTPS origin, non-HttpOnly Secure `csrf_sec` CAN be updated by JS per RFC 6265bis
+	// (eliminating CookieMirror split-brain, H-18), while on a non-secure origin it remains protected.
 	jar.ApplyClientMutations(httpsURL, []ClientCookieMutation{
 		{Op: "set", Name: "sid", Value: "pwned", Path: "/app"},
 		{Op: "del", Name: "sid", Path: "/"},
-		{Op: "set", Name: "csrf_sec", Value: "downgraded", Path: "/"},
-		{Op: "del", Name: "csrf_sec", Path: "/"},
 	})
 	afterFlood := jar.BuildCookieHeaderWithContext(httpsURL, CookieRequestContext{Method: "GET", SameOriginClient: true})
 	if !strings.Contains(afterFlood, "sid=real-admin") || !strings.Contains(afterFlood, "csrf_sec=real-csrf") {
 		t.Fatalf("JS flood evicted or altered serverCookies: got %q", afterFlood)
 	}
-	if strings.Contains(afterFlood, "pwned") || strings.Contains(afterFlood, "downgraded") {
-		t.Fatalf("JS overwrote/downgraded server cookie: got %q", afterFlood)
+	if strings.Contains(afterFlood, "pwned") {
+		t.Fatalf("JS overwrote HttpOnly server cookie: got %q", afterFlood)
+	}
+	// Verify non-secure origin still protects Secure non-HttpOnly `csrf_sec` ("Leave Secure Cookies Alone").
+	nonSecureURL, _ := url.Parse("http://app.example.com/app/page")
+	jar.ApplyClientMutations(nonSecureURL, []ClientCookieMutation{
+		{Op: "set", Name: "csrf_sec", Value: "downgraded", Path: "/"},
+		{Op: "del", Name: "csrf_sec", Path: "/"},
+	})
+	afterNonSec := jar.BuildCookieHeaderWithContext(httpsURL, CookieRequestContext{Method: "GET", SameOriginClient: true})
+	if !strings.Contains(afterNonSec, "csrf_sec=real-csrf") || strings.Contains(afterNonSec, "downgraded") {
+		t.Fatalf("non-secure JS mutated Secure cookie: got %q", afterNonSec)
+	}
+	// Verify HTTPS JS CAN update non-HttpOnly Secure `csrf_sec` cleanly (no split-brain).
+	jar.ApplyClientMutations(httpsURL, []ClientCookieMutation{
+		{Op: "set", Name: "csrf_sec", Value: "updated-by-js", Path: "/"},
+	})
+	afterHTTPSJS := jar.BuildCookieHeaderWithContext(httpsURL, CookieRequestContext{Method: "GET", SameOriginClient: true})
+	if !strings.Contains(afterHTTPSJS, "csrf_sec=updated-by-js") {
+		t.Fatalf("HTTPS JS update to non-HttpOnly Secure cookie failed (split-brain): got %q", afterHTTPSJS)
 	}
 
 	// 4. __Host- with explicit Domain attribute must be rejected even on IP host.

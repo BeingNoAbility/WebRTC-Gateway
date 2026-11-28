@@ -3,22 +3,21 @@ package protocol
 import "testing"
 
 func FuzzDecodeFrame(f *testing.F) {
-	validPing, _ := (&Frame{Gen: 0, Type: TypePing, Flags: FlagNone, Payload: EncodePingPayload(42)}).Encode()
-	validData, _ := (&Frame{Gen: 1, Type: TypeData, Flags: FlagFin, Payload: []byte("hello")}).Encode()
-	validClose, _ := (&Frame{Gen: 1, Type: TypeWSClose, Flags: FlagNone, Payload: EncodeWSClosePayload(1000, "bye")}).Encode()
+	validPing, _ := (&Frame{StreamID: 0, Type: TypePing, Flags: FlagNone, Payload: EncodePingPayload(42)}).Encode()
+	validData, _ := (&Frame{StreamID: 1, Type: TypeData, Flags: FlagFin, Payload: []byte("hello")}).Encode()
+	validClose, _ := (&Frame{StreamID: 1, Type: TypeWSClose, Flags: FlagNone, Payload: EncodeWSClosePayload(1000, "bye")}).Encode()
 	f.Add(validPing)
 	f.Add(validData)
 	f.Add(validClose)
 	f.Add([]byte{})
-	f.Add([]byte{0, 0, 0, 1, TypeContinuation, FlagMoreHeaders, 0, 0})
-	f.Add([]byte{0, 0, 0, 1, TypeWSCont, 0, 0, 0})
+	f.Add([]byte{0, 0, 0, 1, TypeHeaders, FlagMore, 0, 0})
+	f.Add([]byte{0, 0, 0, 1, TypeWSText, 0, 0, 0})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		frame, err := Decode(data)
 		if err != nil {
 			return
 		}
-		// Any frame accepted by Decode MUST round-trip identically via Encode!
 		reencoded, err := frame.Encode()
 		if err != nil {
 			t.Fatalf("Decode succeeded but Encode failed: %v", err)

@@ -1,7 +1,7 @@
 /**
  * Strictly Typed IPC Schemas (zero `any`)
- * Shared across Portal, Hidden Bridge iframe, Service Worker, and ws_patch.
- * Synchronizes non-HttpOnly target cookies in memory via structured CookieDelta / ClientCookieMutation.
+ * Shared across Portal, Hidden Bridge iframe, Service Worker, and compatibility patch.
+ * Uses native Transferable ReadableStreams over MessagePort for HTTP bodies (zero manual IPC credit loops).
  */
 
 import type { HeaderField } from '../protocol/tlv';
@@ -31,7 +31,7 @@ export interface BackendMeta {
   initialCookies?: CookieDelta[];
 }
 
-// SW -> Portal over bridgePort (with per-request MessagePort in ports[0])
+// SW -> Portal over bridgePort (with per-request MessagePort in ports[0], plus optional transferred bodyStream)
 export interface TunnelFetchRequestMsg {
   type: 'TUNNEL_FETCH_REQUEST';
   reqId: string;
@@ -40,6 +40,7 @@ export interface TunnelFetchRequestMsg {
   target: string;
   headers: HeaderField[];
   hasBody: boolean;
+  bodyStream?: ReadableStream<Uint8Array>;
   fetchCtx?: number;
   cookieMutations?: ClientCookieMutation[];
 }
@@ -58,7 +59,6 @@ export interface TunnelWsOpenMsg {
 // Portal -> SW over per-request MessagePort
 export type RequestPortDownMsg =
   | { type: 'REQ_ACK'; reqId: string }
-  | { type: 'REQ_BODY_CREDIT'; bytes: number }
   | {
       type: 'RESP_START';
       status: number;
@@ -66,22 +66,13 @@ export type RequestPortDownMsg =
       headers: HeaderField[];
       cookieDeltas?: CookieDelta[];
       hasBody: boolean;
+      bodyStream?: ReadableStream<Uint8Array>;
     }
-  | {
-      type: 'RESP_CHUNK';
-      buffer: ArrayBuffer;
-      offset: number;
-      length: number;
-    }
-  | { type: 'RESP_END' }
+  | { type: 'RESP_DONE' }
   | { type: 'RESP_ERROR'; status: number; message: string };
 
 // SW -> Portal over per-request MessagePort
-export type RequestPortUpMsg =
-  | { type: 'REQ_BODY_CHUNK'; buffer: ArrayBuffer; offset: number; length: number }
-  | { type: 'REQ_BODY_END' }
-  | { type: 'RESP_BODY_CREDIT'; bytes: number }
-  | { type: 'RESP_CANCEL' };
+export type RequestPortUpMsg = { type: 'RESP_CANCEL' };
 
 // WebSocket MessagePort messages (App/Worker <-> Portal)
 export type WsPortToPortalMsg =

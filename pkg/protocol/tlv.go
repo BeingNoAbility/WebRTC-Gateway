@@ -17,6 +17,8 @@ const (
 	MaxRequestCookieMutations = 32
 	MaxResponseCookieDeltas   = 64
 	MaxCookieNameLen          = 255
+	// MaxSafeExpiresMs matches JavaScript Number.MAX_SAFE_INTEGER (2^53 - 1) for Go<->TS wire parity (H-6).
+	MaxSafeExpiresMs int64 = (1 << 53) - 1
 )
 
 // V7 FetchCtx bitfield (RequestHeaders).
@@ -213,7 +215,7 @@ func validateCookieEntry(e CookieEntry) error {
 	if len(e.Path) > 0xFFFF || !isValidHeaderValue(e.Path) {
 		return ErrTLVInvalidCookie
 	}
-	if e.ExpiresMs < 0 {
+	if e.ExpiresMs < 0 || e.ExpiresMs > MaxSafeExpiresMs {
 		return ErrTLVInvalidCookie
 	}
 	return nil
@@ -266,6 +268,9 @@ func EncodeRequestHeaders(req *RequestHeaders) ([]byte, error) {
 	}
 
 	total := 1 + 1 + 1 + len(method) + 2 + len(req.Target) + 2 + 2
+	if total > MaxTotalHeadersSize {
+		return nil, ErrTLVTooLarge
+	}
 	normNames := make([]string, len(req.Headers))
 	for i, h := range req.Headers {
 		if len(h.Name) == 0 || len(h.Name) > 0xFFFF || !isValidRFC9110Token(h.Name) || len(h.Value) > 0xFFFF || !isValidHeaderValue(h.Value) {
@@ -597,7 +602,7 @@ func decodeCookieEntries(raw []byte, pos, maxCount int) ([]CookieEntry, int, err
 
 		rawExp := binary.BigEndian.Uint64(raw[pos:])
 		pos += 8
-		if rawExp > math.MaxInt64 {
+		if rawExp > uint64(MaxSafeExpiresMs) {
 			return nil, pos, ErrTLVInvalidCookie
 		}
 		exp := int64(rawExp)

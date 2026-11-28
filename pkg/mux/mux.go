@@ -2,6 +2,8 @@ package mux
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,986 +12,701 @@ import (
 )
 
 const (
-	DefaultMaxGlobalStreams  = 512
-	DefaultStreamIdleTimeout = 60 * time.Second
-	GoAwayGenThreshold       = uint32(0xFFFF0000)
+	DefaultStreamWindow       int64 = 512 * 1024
+	MaxStreamInboundBytes     int64 = 2 * 1024 * 1024
+	CreditThresholdBytes      int64 = 128 * 1024
+	CreditThresholdChunks           = 256
+	inboundChunkOverhead      int64 = 64
+	DefaultMaxSessionStreams        = 256
+	DefaultStreamIdleTimeout        = 150 * time.Second
+	DefaultSCTPWriteTimeout         = 30 * time.Second
+	SCTPBackpressureHighWater       = 512 * 1024
+	SCTPBackpressureLowWater        = 128 * 1024
+	acceptQueueSize                 = 256
+	frameSendPoolBufSize            = protocol.HeaderSize + protocol.DefaultChunkSize
 )
 
-// Config configures a P2PMux V7 DC-Pool Mux.
+var (
+	ErrMuxClosed       = errors.New("mux: closed")
+	ErrStreamReset     = errors.New("mux: stream reset")
+	ErrStreamClosed    = errors.New("mux: stream closed")
+	ErrInvalidLane     = errors.New("mux: invalid data lane")
+	ErrSCTPWriteTimout = errors.New("mux: sctp backpressure write timeout")
+)
+
+// DataChannel is the minimal SCTP DataChannel abstraction (satisfied by *webrtc.DataChannel).
+type DataChannel interface {
+	Send(data []byte) error
+	BufferedAmount() uint64
+	Close() error
+}
+
+// bufferedLowAwareDC is implemented by *webrtc.DataChannel for event-driven SCTP backpressure wakeup.
+type bufferedLowAwareDC interface {
+	SetBufferedAmountLowThreshold(uint64)
+	OnBufferedAmountLow(func())
+}
+
+// Config configures a P2PMux V8 multiplexer session.
 type Config struct {
 	PoolSize            int
-	MaxWSConns          int
 	MaxGlobalStreams    int
-	SessionMemLimit     int64
+	MaxSessionStreams   int
+	SessionBudget       *MemoryBudget
 	GlobalBudget        *MemoryBudget
 	GlobalActiveStreams *atomic.Int64
 	StreamIdleTimeout   time.Duration
+	SCTPWriteTimeout    time.Duration
 	OnControlFrame      func(f *protocol.Frame)
 	OnGoAway            func(code protocol.ErrorCode)
+	OnProtocolError     func(err error)
 }
 
-// dcSlot represents one ordered reliable DataChannel (either an HTTP pool slot 0..31 or a dynamic "p2pws" DC).
-type dcSlot struct {
-	mux       *Mux
-	isWS      bool
-	createdAt time.Time
-	onWSClose func()
-	lowNotify chan struct{}
+type dataLane struct {
+	id int
 
-	sendMu sync.Mutex // serializes wire frames on this DC and protects gen transition ordering
+	openMu sync.Mutex // serializes local StreamID allocation + initial HEADERS send on this ordered lane
+	sendMu sync.Mutex
+	dc     DataChannel
+	lowCh  chan struct{}
 
-	mu            sync.Mutex
-	dc            DataChannel
-	active        *Stream
-	lastRemoteGen uint32
-	localGen      uint32
-	closed        bool
+	mu               sync.Mutex
+	lastPeerStreamID uint32
+	streams          map[uint32]*Stream
 }
 
-func (sl *dcSlot) wireLowWatermark(dc DataChannel) {
+func (l *dataLane) signalLow() {
+	select {
+	case l.lowCh <- struct{}{}:
+	default:
+	}
+}
+
+func (l *dataLane) sendRaw(packet []byte) error {
+	l.sendMu.Lock()
+	dc := l.dc
 	if dc == nil {
-		return
-	}
-	if n, ok := dc.(BufferedAmountLowNotifier); ok {
-		n.SetBufferedAmountLowThreshold(sctpLowWaterMark)
-		n.OnBufferedAmountLow(func() {
-			select {
-			case sl.lowNotify <- struct{}{}:
-			default:
-			}
-		})
-	}
-}
-
-func (sl *dcSlot) sendForStream(s *Stream, wire []byte) error {
-	sl.sendMu.Lock()
-	defer sl.sendMu.Unlock()
-	sl.mu.Lock()
-	if sl.closed || sl.active != s {
-		sl.mu.Unlock()
-		return ErrStreamClosed
-	}
-	dc := sl.dc
-	sl.mu.Unlock()
-	if dc == nil {
+		l.sendMu.Unlock()
 		return ErrMuxClosed
 	}
-	return dc.Send(wire)
+	err := dc.Send(packet)
+	l.sendMu.Unlock()
+	return err
 }
 
-func (sl *dcSlot) sendResetAndDetach(s *Stream, wire []byte) bool {
-	sl.sendMu.Lock()
-	sl.mu.Lock()
-	wasActive := sl.active == s
-	if !wasActive {
-		sl.mu.Unlock()
-		sl.sendMu.Unlock()
-		return false
+func (l *dataLane) sendFrame(streamID uint32, frameType, flags uint8, payload []byte) error {
+	total := protocol.HeaderSize + len(payload)
+	var buf []byte
+	var pooled *[]byte
+	if total <= frameSendPoolBufSize {
+		pooled = sendBufPool.Get().(*[]byte)
+		buf = *pooled
+		defer sendBufPool.Put(pooled)
+	} else {
+		buf = make([]byte, total)
 	}
-	sl.active = nil
-	closed := sl.closed
-	isWS := sl.isWS
-	dc := sl.dc
-	sl.mu.Unlock()
-
-	if !closed && dc != nil && len(wire) > 0 {
-		_ = dc.Send(wire)
+	pkt, err := protocol.EncodeInto(buf, streamID, frameType, flags, payload)
+	if err != nil {
+		return err
 	}
-	sl.sendMu.Unlock()
-
-	if !isWS && !closed {
-		sl.mux.returnIdlePoolSlot(sl)
-	}
-	if isWS {
-		if sl.onWSClose != nil {
-			sl.onWSClose()
-		} else if dc != nil {
-			_ = dc.Close()
-		}
-	}
-	return true
+	return l.sendRaw(pkt)
 }
 
-func (sl *dcSlot) detachStream(s *Stream) {
-	sl.mu.Lock()
-	wasActive := sl.active == s
-	if wasActive {
-		sl.active = nil
-	}
-	closed := sl.closed
-	isWS := sl.isWS
-	dc := sl.dc
-	sl.mu.Unlock()
-
-	if wasActive && !isWS && !closed {
-		sl.mux.returnIdlePoolSlot(sl)
-	}
-	if wasActive && isWS {
-		if sl.onWSClose != nil {
-			sl.onWSClose()
-		} else if dc != nil {
-			_ = dc.Close()
-		}
-	}
+var sendBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, frameSendPoolBufSize)
+		return &b
+	},
 }
 
-func (sl *dcSlot) closeAndResetActive() {
-	sl.mu.Lock()
-	sl.closed = true
-	active := sl.active
-	sl.active = nil
-	dc := sl.dc
-	sl.mu.Unlock()
-
-	if active != nil {
-		active.markRemoteReset()
-	}
-	if dc != nil {
-		_ = dc.Close()
-	}
-}
-
-func isMonotonicRemoteGen(gen, last uint32, isWS bool) bool {
-	if gen == 0 {
-		return false
-	}
-	if isWS {
-		return gen == 1 && last == 0
-	}
-	if last == 0 {
-		return true
-	}
-	if gen == last {
-		return false
-	}
-	// RFC 1982 serial number arithmetic over [1..0xFFFFFFFF] (skipping 0):
-	// tolerates skipped generations across wrap-around while rejecting stale late frames.
-	delta := gen - last
-	if gen < last {
-		delta--
-	}
-	return delta > 0 && delta < 0x80000000
-}
-
-// Mux manages 1 Control DC + 32 Reusable Pre-Negotiated HTTP Pool DCs + Dynamic Dedicated WS DCs.
+// Mux implements P2PMux V8: 1 chunked control DC (p2pctrl, id=0) + N pre-negotiated ordered
+// reliable data lanes (p2p_01..N, default 12) multiplexing arbitrary HTTP & WebSocket streams
+// by strictly monotonic StreamID >= 1 (zero slot reuse races, zero DCEP WS negotiation).
 type Mux struct {
 	cfg           Config
-	ctx           context.Context
-	cancel        context.CancelFunc
 	sessionBudget *MemoryBudget
 	globalBudget  *MemoryBudget
-	globalActive  *atomic.Int64
-	localActive   atomic.Int64
-	activeWS      atomic.Int64
+	globalStreams *atomic.Int64
 
-	chunkSize atomic.Int32 // strictly clamped downward via SetMaxMessageSize!
+	chunkSize     atomic.Int32
+	authenticated atomic.Bool
+	nextStreamID  atomic.Uint32
+	activeStreams atomic.Int32
 
-	ctrlMu sync.Mutex
-	ctrlDC DataChannel
+	ctrlSendMu sync.Mutex
+	ctrlDC     DataChannel
 
-	poolSlots []*dcSlot
-	idleSlots chan *dcSlot
+	ctrlAsmMu     sync.Mutex
+	ctrlAsmType   uint8
+	ctrlAsmBuf    []byte
+	ctrlAsmChunks int
 
-	wsMu    sync.Mutex
-	wsSlots map[*dcSlot]struct{}
+	lanes []*dataLane
 
-	// acceptCh is NEVER closed (ctx.Done() wakes AcceptStream) -> zero send-on-closed-channel panic!
-	acceptCh   chan *Stream
-	goAwayOnce sync.Once
-	closeOnce  sync.Once
+	acceptCh  chan *Stream
+	closedCh  chan struct{}
+	closed    atomic.Bool
+	closeOnce sync.Once
 }
 
 func New(cfg Config) *Mux {
 	if cfg.PoolSize <= 0 {
 		cfg.PoolSize = protocol.DefaultPoolSize
 	}
-	if cfg.MaxWSConns <= 0 {
-		cfg.MaxWSConns = protocol.DefaultMaxWSConns
+	if cfg.PoolSize > protocol.MaxPoolSize {
+		cfg.PoolSize = protocol.MaxPoolSize
 	}
-	if cfg.MaxGlobalStreams <= 0 {
-		cfg.MaxGlobalStreams = DefaultMaxGlobalStreams
-	}
-	if cfg.SessionMemLimit <= 0 {
-		cfg.SessionMemLimit = DefaultSessionMemoryBudget
+	if cfg.MaxSessionStreams <= 0 {
+		cfg.MaxSessionStreams = DefaultMaxSessionStreams
 	}
 	if cfg.StreamIdleTimeout <= 0 {
 		cfg.StreamIdleTimeout = DefaultStreamIdleTimeout
 	}
+	if cfg.SCTPWriteTimeout <= 0 {
+		cfg.SCTPWriteTimeout = DefaultSCTPWriteTimeout
+	}
+	sessBudget := cfg.SessionBudget
+	if sessBudget == nil {
+		sessBudget = NewMemoryBudget(DefaultSessionMemoryBudget)
+	}
 
-	ctx, cancel := context.WithCancel(context.Background())
 	m := &Mux{
 		cfg:           cfg,
-		ctx:           ctx,
-		cancel:        cancel,
-		sessionBudget: NewMemoryBudget(cfg.SessionMemLimit),
+		sessionBudget: sessBudget,
 		globalBudget:  cfg.GlobalBudget,
-		globalActive:  cfg.GlobalActiveStreams,
-		poolSlots:     make([]*dcSlot, cfg.PoolSize),
-		idleSlots:     make(chan *dcSlot, cfg.PoolSize),
-		wsSlots:       make(map[*dcSlot]struct{}),
-		acceptCh:      make(chan *Stream, cfg.PoolSize+cfg.MaxWSConns),
+		globalStreams: cfg.GlobalActiveStreams,
+		lanes:         make([]*dataLane, cfg.PoolSize),
+		acceptCh:      make(chan *Stream, acceptQueueSize),
+		closedCh:      make(chan struct{}),
 	}
 	m.chunkSize.Store(protocol.DefaultChunkSize)
 	for i := 0; i < cfg.PoolSize; i++ {
-		m.poolSlots[i] = &dcSlot{
-			mux:       m,
-			lowNotify: make(chan struct{}, 1),
+		m.lanes[i] = &dataLane{
+			id:      i,
+			lowCh:   make(chan struct{}, 1),
+			streams: make(map[uint32]*Stream),
 		}
 	}
-	go m.reaperLoop()
+	go m.idleReaperLoop()
 	return m
 }
 
-func (m *Mux) SessionMemUsed() int64 { return m.sessionBudget.Used() }
+func (m *Mux) SetAuthenticated(ok bool) { m.authenticated.Store(ok) }
+func (m *Mux) Done() <-chan struct{}    { return m.closedCh }
+func (m *Mux) SessionMemUsed() int64    { return m.sessionBudget.Used() }
+func (m *Mux) ActiveStreamCount() int   { return int(m.activeStreams.Load()) }
 
-func (m *Mux) effectiveChunkSize() int {
-	n := int(m.chunkSize.Load())
-	if n < protocol.MinChunkSize {
+// SetMaxMessageSize updates the maximum wire frame payload size from negotiated SCTP MMS.
+func (m *Mux) SetMaxMessageSize(mms int) {
+	if mms < protocol.MinNegotiatedMaxMsgSize {
+		mms = protocol.MinNegotiatedMaxMsgSize
+	}
+	cs := mms - protocol.HeaderSize
+	if cs > protocol.DefaultChunkSize {
+		cs = protocol.DefaultChunkSize
+	}
+	if cs < protocol.MinChunkSize {
+		cs = protocol.MinChunkSize
+	}
+	m.chunkSize.Store(int32(cs)) // #nosec G115 -- clamped to [MinChunkSize, DefaultChunkSize]
+}
+
+func (m *Mux) ChunkSize() int {
+	cs := int(m.chunkSize.Load())
+	if cs < protocol.MinChunkSize {
 		return protocol.MinChunkSize
 	}
-	if n > protocol.DefaultChunkSize {
-		return protocol.DefaultChunkSize
-	}
-	return n
-}
-
-// MaxControlPayloadSize returns the maximum single control-plane JSON payload allowed right now.
-func (m *Mux) MaxControlPayloadSize() int {
-	maxCtrl := m.effectiveChunkSize()
-	if maxCtrl > protocol.MaxControlJSONSize {
-		maxCtrl = protocol.MaxControlJSONSize
-	}
-	return maxCtrl
-}
-
-// SetMaxMessageSize strictly clamps the frame payload ceiling DOWNWARD based on the negotiated
-// SCTP maxMessageSize or peer SETTINGS (ignoring values below MinNegotiatedMaxMsgSize = 4096).
-func (m *Mux) SetMaxMessageSize(maxMsg int) {
-	if maxMsg < protocol.MinNegotiatedMaxMsgSize {
-		return
-	}
-	candInt := maxMsg - protocol.HeaderSize
-	if candInt < protocol.MinChunkSize {
-		candInt = protocol.MinChunkSize
-	}
-	if candInt > protocol.DefaultChunkSize {
-		candInt = protocol.DefaultChunkSize
-	}
-	candidate := int32(candInt) // #nosec G115 -- clamped to [MinChunkSize, DefaultChunkSize]
-	for {
-		cur := m.chunkSize.Load()
-		if candidate >= cur {
-			return
-		}
-		if m.chunkSize.CompareAndSwap(cur, candidate) {
-			return
-		}
-	}
+	return cs
 }
 
 func (m *Mux) AttachControlDC(dc DataChannel) {
-	m.ctrlMu.Lock()
+	m.ctrlSendMu.Lock()
 	m.ctrlDC = dc
-	m.ctrlMu.Unlock()
+	m.ctrlSendMu.Unlock()
 }
 
-func (m *Mux) AttachPoolDC(slotIdx int, dc DataChannel) {
-	if slotIdx < 0 || slotIdx >= len(m.poolSlots) {
+func (m *Mux) AttachLaneDC(laneIdx int, dc DataChannel) {
+	if laneIdx < 0 || laneIdx >= len(m.lanes) {
 		return
 	}
-	sl := m.poolSlots[slotIdx]
-	sl.mu.Lock()
-	wasNil := sl.dc == nil
-	sl.dc = dc
-	closed := sl.closed
-	sl.mu.Unlock()
-	sl.wireLowWatermark(dc)
-	if wasNil && !closed {
-		m.returnIdlePoolSlot(sl)
-	}
-}
-
-// HandlePoolClose marks a single HTTP pool DataChannel closed and immediately resets any
-// active stream (including long-lived SSE/NDJSON streams) so slots and goroutines never leak.
-func (m *Mux) HandlePoolClose(slotIdx int) {
-	if slotIdx < 0 || slotIdx >= len(m.poolSlots) {
-		return
-	}
-	m.poolSlots[slotIdx].closeAndResetActive()
-}
-
-func (m *Mux) returnIdlePoolSlot(sl *dcSlot) {
-	select {
-	case m.idleSlots <- sl:
-	default:
-	}
-}
-
-// AttachDynamicWSDC registers an incoming browser-opened "p2pws" DataChannel and returns
-// its message and close handlers. Enforces MaxWSConns cleanly and tracks createdAt so idle
-// DCs that never send HEADERS are reaped after HeaderAssemblyTimeout (5s).
-func (m *Mux) AttachDynamicWSDC(dc DataChannel) (onMessage func([]byte), onClose func(), err error) {
-	if m.ctx.Err() != nil {
-		return nil, nil, ErrMuxClosed
-	}
-	if m.activeWS.Add(1) > int64(m.cfg.MaxWSConns) {
-		m.activeWS.Add(-1)
-		_ = dc.Close()
-		return nil, nil, ErrTooManyStreams
-	}
-	sl := &dcSlot{
-		mux:       m,
-		isWS:      true,
-		createdAt: time.Now(),
-		dc:        dc,
-		lowNotify: make(chan struct{}, 1),
-	}
-	var cleanupOnce sync.Once
-	onClose = func() {
-		cleanupOnce.Do(func() {
-			m.wsMu.Lock()
-			delete(m.wsSlots, sl)
-			m.wsMu.Unlock()
-			sl.closeAndResetActive()
-			m.activeWS.Add(-1)
+	lane := m.lanes[laneIdx]
+	if lowDC, ok := dc.(bufferedLowAwareDC); ok {
+		lowDC.SetBufferedAmountLowThreshold(SCTPBackpressureLowWater)
+		lowDC.OnBufferedAmountLow(func() {
+			lane.signalLow()
 		})
 	}
-	sl.onWSClose = onClose
-	sl.wireLowWatermark(dc)
-
-	m.wsMu.Lock()
-	if m.ctx.Err() != nil {
-		m.wsMu.Unlock()
-		m.activeWS.Add(-1)
-		_ = dc.Close()
-		return nil, nil, ErrMuxClosed
-	}
-	m.wsSlots[sl] = struct{}{}
-	m.wsMu.Unlock()
-
-	onMessage = func(raw []byte) {
-		m.handleSlotMessage(sl, raw)
-	}
-	return onMessage, onClose, nil
+	lane.sendMu.Lock()
+	lane.dc = dc
+	lane.sendMu.Unlock()
 }
 
-// SendControlFrame encodes and sends a Gen==0 control frame on p2pctrl, bounded by
-// min(effectiveChunkSize, MaxControlJSONSize).
+// SendControlFrame sends a control-plane message on p2pctrl (id=0).
+// JSON control types automatically chunk across ChunkSize using FlagMore so large AUTH_RESULT /
+// CAP_RESP payloads never require truncation even at 4 KiB SCTP MMS.
 func (m *Mux) SendControlFrame(frameType uint8, payload []byte) error {
+	if m.closed.Load() {
+		return ErrMuxClosed
+	}
 	if !protocol.IsControlFrameType(frameType) {
 		return protocol.ErrInvalidFrameType
 	}
-	maxCtrl := m.effectiveChunkSize()
-	if maxCtrl > protocol.MaxControlJSONSize {
-		maxCtrl = protocol.MaxControlJSONSize
-	}
-	if len(payload) > maxCtrl {
+	if protocol.IsControlJSONFrameType(frameType) && len(payload) > protocol.MaxControlJSONSize {
 		return protocol.ErrInvalidPayloadSize
 	}
-	f := &protocol.Frame{Gen: 0, Type: frameType, Flags: protocol.FlagNone, Payload: payload}
-	wire, err := f.Encode()
-	if err != nil {
-		return err
-	}
-	m.ctrlMu.Lock()
-	dc := m.ctrlDC
-	m.ctrlMu.Unlock()
-	if dc == nil {
+
+	m.ctrlSendMu.Lock()
+	defer m.ctrlSendMu.Unlock()
+	if m.ctrlDC == nil || m.closed.Load() {
 		return ErrMuxClosed
 	}
-	return dc.Send(wire)
+
+	cs := m.ChunkSize()
+	if !protocol.IsControlJSONFrameType(frameType) || len(payload) <= cs {
+		pkt, err := (&protocol.Frame{StreamID: 0, Type: frameType, Flags: protocol.FlagNone, Payload: payload}).Encode()
+		if err != nil {
+			return err
+		}
+		return m.ctrlDC.Send(pkt)
+	}
+
+	for off := 0; off < len(payload); off += cs {
+		end := off + cs
+		flags := protocol.FlagMore
+		if end >= len(payload) {
+			end = len(payload)
+			flags = protocol.FlagNone
+		}
+		pkt, err := (&protocol.Frame{StreamID: 0, Type: frameType, Flags: flags, Payload: payload[off:end]}).Encode()
+		if err != nil {
+			return err
+		}
+		if err := m.ctrlDC.Send(pkt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Mux) SendPing(seq uint64) error {
+	return m.SendControlFrame(protocol.TypePing, protocol.EncodePingPayload(seq))
 }
 
 func (m *Mux) SendGoAway(code protocol.ErrorCode) error {
-	var err error
-	m.goAwayOnce.Do(func() {
-		err = m.SendControlFrame(protocol.TypeGoAway, protocol.EncodeGoAwayPayload(code))
-	})
-	return err
+	return m.SendControlFrame(protocol.TypeGoAway, protocol.EncodeGoAwayPayload(code))
 }
 
+func (m *Mux) reportProtocolError(err error) {
+	if m.cfg.OnProtocolError != nil {
+		m.cfg.OnProtocolError(err)
+	}
+}
+
+// HandleControlMessage processes inbound frames on p2pctrl (id=0).
 func (m *Mux) HandleControlMessage(raw []byte) {
-	if m.ctx.Err() != nil {
+	if m.closed.Load() {
 		return
 	}
 	f, err := protocol.Decode(raw)
-	if err != nil || !protocol.IsControlFrameType(f.Type) {
+	if err != nil || f.StreamID != 0 || !protocol.IsControlFrameType(f.Type) {
+		m.reportProtocolError(protocol.ErrInvalidFrameType)
 		return
 	}
+
 	switch f.Type {
 	case protocol.TypePing:
+		// M-9: Drop unauthenticated PING reflection to prevent pre-auth amplification.
+		if !m.authenticated.Load() {
+			return
+		}
 		_ = m.SendControlFrame(protocol.TypePong, f.Payload)
+		return
 	case protocol.TypePong:
+		return
 	case protocol.TypeGoAway:
-		if code, derr := protocol.DecodeGoAwayPayload(f.Payload); derr == nil {
-			if m.cfg.OnGoAway != nil {
-				m.cfg.OnGoAway(code)
-			}
+		code, derr := protocol.DecodeGoAwayPayload(f.Payload)
+		if derr != nil {
+			m.reportProtocolError(derr)
+			return
 		}
-	default:
-		if m.cfg.OnControlFrame != nil {
-			m.cfg.OnControlFrame(f)
+		if m.cfg.OnGoAway != nil {
+			m.cfg.OnGoAway(code)
 		}
-	}
-}
-
-func (m *Mux) HandlePoolMessage(slotIdx int, raw []byte) {
-	if slotIdx < 0 || slotIdx >= len(m.poolSlots) {
 		return
 	}
-	m.handleSlotMessage(m.poolSlots[slotIdx], raw)
+
+	// Chunked JSON control message reassembly (supports FlagMore up to MaxControlJSONSize).
+	m.ctrlAsmMu.Lock()
+	hasMore := (f.Flags & protocol.FlagMore) != 0
+	if m.ctrlAsmType == 0 {
+		if !hasMore {
+			m.ctrlAsmMu.Unlock()
+			if len(f.Payload) > protocol.MaxControlJSONSize {
+				m.reportProtocolError(protocol.ErrInvalidPayloadSize)
+				return
+			}
+			if m.cfg.OnControlFrame != nil {
+				m.cfg.OnControlFrame(f)
+			}
+			return
+		}
+		m.ctrlAsmType = f.Type
+		m.ctrlAsmChunks = 1
+		m.ctrlAsmBuf = append(m.ctrlAsmBuf[:0], f.Payload...)
+		if len(m.ctrlAsmBuf) > protocol.MaxControlJSONSize {
+			m.ctrlAsmType = 0
+			m.ctrlAsmBuf = nil
+			m.ctrlAsmChunks = 0
+			m.ctrlAsmMu.Unlock()
+			m.reportProtocolError(protocol.ErrInvalidPayloadSize)
+			return
+		}
+		m.ctrlAsmMu.Unlock()
+		return
+	}
+
+	if f.Type != m.ctrlAsmType {
+		m.ctrlAsmType = 0
+		m.ctrlAsmBuf = nil
+		m.ctrlAsmChunks = 0
+		m.ctrlAsmMu.Unlock()
+		m.reportProtocolError(protocol.ErrInvalidFrameType)
+		return
+	}
+	m.ctrlAsmChunks++
+	if m.ctrlAsmChunks > protocol.MaxControlChunks || len(m.ctrlAsmBuf)+len(f.Payload) > protocol.MaxControlJSONSize {
+		m.ctrlAsmType = 0
+		m.ctrlAsmBuf = nil
+		m.ctrlAsmChunks = 0
+		m.ctrlAsmMu.Unlock()
+		m.reportProtocolError(protocol.ErrInvalidPayloadSize)
+		return
+	}
+	m.ctrlAsmBuf = append(m.ctrlAsmBuf, f.Payload...)
+	if hasMore {
+		m.ctrlAsmMu.Unlock()
+		return
+	}
+	assembled := append([]byte(nil), m.ctrlAsmBuf...)
+	msgType := m.ctrlAsmType
+	m.ctrlAsmType = 0
+	m.ctrlAsmBuf = nil
+	m.ctrlAsmChunks = 0
+	m.ctrlAsmMu.Unlock()
+
+	if m.cfg.OnControlFrame != nil {
+		m.cfg.OnControlFrame(&protocol.Frame{
+			StreamID: 0,
+			Type:     msgType,
+			Flags:    protocol.FlagNone,
+			Payload:  assembled,
+		})
+	}
 }
 
-func (m *Mux) handleSlotMessage(sl *dcSlot, raw []byte) {
-	if m.ctx.Err() != nil {
+// HandleLaneMessage dispatches an inbound frame on ordered data lane laneIdx.
+func (m *Mux) HandleLaneMessage(laneIdx int, raw []byte) {
+	if m.closed.Load() || laneIdx < 0 || laneIdx >= len(m.lanes) {
 		return
 	}
 	f, err := protocol.Decode(raw)
-	if err != nil {
-		sl.mu.Lock()
-		active := sl.active
-		sl.mu.Unlock()
-		if active != nil {
-			active.Reset(protocol.ErrCodeProtocolError)
-		} else if sl.isWS && sl.onWSClose != nil {
-			sl.onWSClose()
-		}
+	if err != nil || f.StreamID == 0 || !protocol.IsStreamFrameType(f.Type) {
+		m.reportProtocolError(protocol.ErrInvalidFrameType)
 		return
 	}
-	if sl.isWS {
-		if f.Gen != 1 || !protocol.IsWSDataFrameType(f.Type) {
-			sl.mu.Lock()
-			active := sl.active
-			sl.mu.Unlock()
-			if active != nil {
-				active.Reset(protocol.ErrCodeProtocolError)
-			} else {
-				if f.Gen != 0 {
-					_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeProtocolError)
-				}
-				if sl.onWSClose != nil {
-					sl.onWSClose()
-				}
-			}
-			return
-		}
-	} else {
-		if !protocol.IsPoolDataFrameType(f.Type) {
-			sl.mu.Lock()
-			active := sl.active
-			sl.mu.Unlock()
-			if active != nil {
-				active.Reset(protocol.ErrCodeProtocolError)
-			} else if f.Gen != 0 {
-				_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeProtocolError)
-			}
-			return
-		}
-	}
 
+	lane := m.lanes[laneIdx]
 	switch f.Type {
 	case protocol.TypeHeaders:
-		m.handleSlotHeaders(sl, f)
-	case protocol.TypeContinuation:
-		m.handleSlotContinuation(sl, f)
+		m.handleLaneHeaders(lane, f)
 	case protocol.TypeData:
-		sl.mu.Lock()
-		active := sl.active
-		sl.mu.Unlock()
-		if active == nil || active.gen != f.Gen {
-			return // Stale frame from prior generation: O(1) drop.
-		}
-		_ = active.deliverData(f.Payload, f.Flags&protocol.FlagFin != 0)
+		m.handleLaneData(lane, f)
+	case protocol.TypeWSText, protocol.TypeWSBinary:
+		m.handleLaneWSChunk(lane, f)
+	case protocol.TypeWSClose:
+		m.handleLaneWSClose(lane, f)
 	case protocol.TypeCredit:
-		delta, derr := protocol.DecodeCreditPayload(f.Payload)
-		if derr != nil {
-			return
-		}
-		sl.mu.Lock()
-		active := sl.active
-		sl.mu.Unlock()
-		if active == nil || active.gen != f.Gen {
-			return
-		}
-		if err := active.addSendCredit(delta); err != nil {
-			active.Reset(protocol.ErrCodeFlowControlError)
-		}
+		m.handleLaneCredit(lane, f)
 	case protocol.TypeReset:
-		_, _ = protocol.DecodeResetPayload(f.Payload)
-		sl.mu.Lock()
-		active := sl.active
-		sl.mu.Unlock()
-		if active == nil || active.gen != f.Gen {
-			return
-		}
-		active.markRemoteReset()
-	case protocol.TypeWSText, protocol.TypeWSBinary, protocol.TypeWSCont, protocol.TypeWSClose:
-		sl.mu.Lock()
-		active := sl.active
-		sl.mu.Unlock()
-		if active == nil || active.gen != f.Gen || !active.isWS {
-			if sl.isWS && active == nil {
-				_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeProtocolError)
-				if sl.onWSClose != nil {
-					sl.onWSClose()
-				}
-			}
-			return
-		}
-		_ = active.deliverWSChunk(f.Type, f.Flags&protocol.FlagMsgFin != 0, f.Payload)
-	}
-}
-
-func (m *Mux) handleSlotHeaders(sl *dcSlot, f *protocol.Frame) {
-	sl.mu.Lock()
-	if sl.closed {
-		sl.mu.Unlock()
-		return
-	}
-
-	if sl.active != nil {
-		active := sl.active
-		if active.gen == f.Gen && active.isLocal {
-			active.inboundMu.Lock()
-			state := active.rxState
-			if state == rxIdle {
-				active.rxState = rxReceivingHeaders
-				active.headerStart = time.Now()
-				active.respHeadersHadFin = (f.Flags&protocol.FlagFin != 0)
-			}
-			active.inboundMu.Unlock()
-			sl.mu.Unlock()
-
-			if state != rxIdle {
-				// Duplicate HEADERS in RECEIVING_HEADERS / OPEN / HALF_CLOSED -> PROTOCOL_ERROR!
-				active.Reset(protocol.ErrCodeProtocolError)
-				return
-			}
-			m.appendHeaderChunk(active, f, true)
-			return
-		}
-		if active.gen == f.Gen {
-			// Duplicate HEADERS for same remote stream -> PROTOCOL_ERROR!
-			sl.mu.Unlock()
-			active.Reset(protocol.ErrCodeProtocolError)
-			return
-		}
-		// V7 strict single-slot FSM: NEVER preempt an active stream on a newer Gen!
-		canReject := isMonotonicRemoteGen(f.Gen, sl.lastRemoteGen, sl.isWS)
-		sl.mu.Unlock()
-		if canReject {
-			_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeProtocolError)
-		}
-		return
-	}
-
-	// Slot is IDLE: enforce strictly monotonic remote gen (and Gen == 1 on p2pws).
-	if !isMonotonicRemoteGen(f.Gen, sl.lastRemoteGen, sl.isWS) {
-		sl.mu.Unlock()
-		if sl.isWS && sl.onWSClose != nil {
-			sl.onWSClose()
-		}
-		return
-	}
-	if sl.isWS && f.Flags&protocol.FlagFin != 0 {
-		sl.mu.Unlock()
-		_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeProtocolError)
-		if sl.onWSClose != nil {
-			sl.onWSClose()
-		}
-		return
-	}
-	if !m.tryAcquireStreamSlot() {
-		sl.mu.Unlock()
-		_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeRefusedStream)
-		if sl.isWS && sl.onWSClose != nil {
-			sl.onWSClose()
-		}
-		return
-	}
-	s := newStream(m, sl, f.Gen, sl.isWS, false, f.Flags&protocol.FlagFin != 0)
-	sl.lastRemoteGen = f.Gen
-	sl.active = s
-	sl.mu.Unlock()
-
-	m.appendHeaderChunk(s, f, false)
-}
-
-func (m *Mux) handleSlotContinuation(sl *dcSlot, f *protocol.Frame) {
-	sl.mu.Lock()
-	active := sl.active
-	lastGen := sl.lastRemoteGen
-	sl.mu.Unlock()
-
-	if active == nil || active.gen != f.Gen {
-		if isMonotonicRemoteGen(f.Gen, lastGen, sl.isWS) {
-			_ = sl.sendDirectReset(f.Gen, protocol.ErrCodeProtocolError)
-		}
-		return
-	}
-
-	active.inboundMu.Lock()
-	state := active.rxState
-	active.inboundMu.Unlock()
-	if state != rxReceivingHeaders {
-		// Orphan CONTINUATION outside RECEIVING_HEADERS -> PROTOCOL_ERROR!
-		active.Reset(protocol.ErrCodeProtocolError)
-		return
-	}
-
-	m.appendHeaderChunk(active, f, active.isLocal)
-}
-
-func (m *Mux) appendHeaderChunk(s *Stream, f *protocol.Frame, isResponse bool) {
-	s.touch()
-	now := time.Now()
-	cost := int64(len(f.Payload)) + PerChunkMemOverhead
-
-	s.inboundMu.Lock()
-	if s.purged || s.rxState != rxReceivingHeaders {
-		s.inboundMu.Unlock()
-		return
-	}
-	if !s.headerStart.IsZero() && now.Sub(s.headerStart) > HeaderAssemblyTimeout {
-		s.inboundMu.Unlock()
-		s.Reset(protocol.ErrCodeProtocolError)
-		return
-	}
-	// Max 1 HEADERS + MaxContinuationFrames (16) = 17 chunks total; total payload <= 64 KiB.
-	if s.headerBytes+len(f.Payload) > protocol.MaxTotalHeadersSize || len(s.headerChunks) >= 1+protocol.MaxContinuationFrames {
-		s.inboundMu.Unlock()
-		s.Reset(protocol.ErrCodeFrameSizeError)
-		return
-	}
-	if s.inboundBytes+cost > MaxStreamInboundBytes {
-		s.inboundMu.Unlock()
-		s.Reset(protocol.ErrCodeFrameSizeError)
-		return
-	}
-	if !m.tryReserveMemory(cost) {
-		s.inboundMu.Unlock()
-		s.Reset(protocol.ErrCodeRefusedStream)
-		return
-	}
-	cp := make([]byte, len(f.Payload))
-	copy(cp, f.Payload)
-	s.headerChunks = append(s.headerChunks, cp)
-	s.headerBytes += len(cp)
-	s.inboundBytes += cost
-	s.reservedBudget += cost
-
-	if f.Flags&protocol.FlagMoreHeaders != 0 {
-		s.inboundMu.Unlock()
-		return
-	}
-
-	assembled := make([]byte, 0, s.headerBytes)
-	for _, ch := range s.headerChunks {
-		assembled = append(assembled, ch...)
-	}
-	headerReserved := int64(s.headerBytes) + int64(len(s.headerChunks))*PerChunkMemOverhead
-	s.headerChunks = nil
-	s.headerBytes = 0
-	// Release temporary chunk assembly budget once assembled into a single compact slice;
-	// reserve only the assembled size + 64B until stream closes if server-side request headers.
-	releaseNow := headerReserved
-	if !isResponse {
-		s.reqHeadersRaw = assembled
-		keep := int64(len(assembled)) + PerChunkMemOverhead
-		if keep < headerReserved {
-			releaseNow = headerReserved - keep
-		} else {
-			releaseNow = 0
-		}
-	}
-	s.inboundBytes -= releaseNow
-	s.reservedBudget -= releaseNow
-
-	if isResponse {
-		if s.respHeadersHadFin {
-			s.readClosed = true
-			s.rxState = rxHalfClosed
-		} else {
-			s.rxState = rxOpen
-		}
-	} else {
-		if s.headersHadFin {
-			s.readClosed = true
-			s.rxState = rxHalfClosed
-		} else {
-			s.rxState = rxOpen
-		}
-	}
-	s.inboundMu.Unlock()
-
-	if releaseNow > 0 {
-		m.releaseMemory(releaseNow)
-	}
-
-	if isResponse {
-		s.deliverResponseHeaders(assembled)
-		if s.respHeadersHadFin {
-			s.signalRead()
-		}
-		return
-	}
-
-	// Non-blocking delivery to acceptCh so DC receive goroutine NEVER stalls!
-	select {
-	case m.acceptCh <- s:
-	default:
-		s.Reset(protocol.ErrCodeRefusedStream)
-	}
-}
-
-func (sl *dcSlot) sendDirectReset(gen uint32, code protocol.ErrorCode) error {
-	f := &protocol.Frame{Gen: gen, Type: protocol.TypeReset, Flags: protocol.FlagNone, Payload: protocol.EncodeResetPayload(code)}
-	wire, err := f.Encode()
-	if err != nil {
-		return err
-	}
-	sl.sendMu.Lock()
-	defer sl.sendMu.Unlock()
-	sl.mu.Lock()
-	dc := sl.dc
-	sl.mu.Unlock()
-	if dc == nil {
-		return ErrMuxClosed
-	}
-	return dc.Send(wire)
-}
-
-// AcceptStream waits for the next peer-initiated HTTP or WS stream.
-func (m *Mux) AcceptStream(ctx context.Context) (*Stream, error) {
-	select {
-	case s := <-m.acceptCh:
-		return s, nil
-	case <-m.ctx.Done():
-		return nil, ErrMuxClosed
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-// OpenHTTPStream acquires an idle HTTP pool DC, starts a new generation, and sends HEADERS.
-func (m *Mux) OpenHTTPStream(ctx context.Context, headerTLV []byte, fin bool) (*Stream, error) {
-	if len(headerTLV) > protocol.MaxTotalHeadersSize {
-		return nil, protocol.ErrTLVTooLarge
-	}
-	var sl *dcSlot
-	select {
-	case sl = <-m.idleSlots:
-	case <-m.ctx.Done():
-		return nil, ErrMuxClosed
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
-	if !m.tryAcquireStreamSlot() {
-		m.returnIdlePoolSlot(sl)
-		return nil, ErrTooManyStreams
-	}
-
-	sl.mu.Lock()
-	if sl.closed || sl.dc == nil {
-		sl.mu.Unlock()
-		m.releaseStreamSlot()
-		return nil, ErrMuxClosed
-	}
-	sl.localGen++
-	if sl.localGen == 0 {
-		sl.localGen = 1
-	}
-	gen := sl.localGen
-	s := newStream(m, sl, gen, false, true, false)
-	sl.active = s
-	sl.mu.Unlock()
-
-	if gen >= GoAwayGenThreshold {
-		go func() { _ = m.SendGoAway(protocol.ErrCodeGoingAway) }()
-	}
-
-	if err := s.WriteHeaders(headerTLV, fin); err != nil {
-		s.Reset(protocol.ErrCodeInternalError)
-		return nil, err
-	}
-	return s, nil
-}
-
-// OpenWSStream binds a client-opened dedicated WS DataChannel and sends its upgrade HEADERS.
-// Enforces MaxWSConns identically to AttachDynamicWSDC.
-func (m *Mux) OpenWSStream(ctx context.Context, wsDC DataChannel, headerTLV []byte) (*Stream, func([]byte), func(), error) {
-	if ctx != nil && ctx.Err() != nil {
-		return nil, nil, nil, ctx.Err()
-	}
-	if m.ctx.Err() != nil {
-		return nil, nil, nil, ErrMuxClosed
-	}
-	if len(headerTLV) > protocol.MaxTotalHeadersSize {
-		return nil, nil, nil, protocol.ErrTLVTooLarge
-	}
-	if m.activeWS.Add(1) > int64(m.cfg.MaxWSConns) {
-		m.activeWS.Add(-1)
-		return nil, nil, nil, ErrTooManyStreams
-	}
-	if !m.tryAcquireStreamSlot() {
-		m.activeWS.Add(-1)
-		return nil, nil, nil, ErrTooManyStreams
-	}
-	sl := &dcSlot{
-		mux:       m,
-		isWS:      true,
-		dc:        wsDC,
-		localGen:  1,
-		lowNotify: make(chan struct{}, 1),
-	}
-	sl.wireLowWatermark(wsDC)
-	s := newStream(m, sl, 1, true, true, false)
-	sl.active = s
-
-	m.wsMu.Lock()
-	if m.ctx.Err() != nil {
-		m.wsMu.Unlock()
-		m.releaseStreamSlot()
-		m.activeWS.Add(-1)
-		return nil, nil, nil, ErrMuxClosed
-	}
-	m.wsSlots[sl] = struct{}{}
-	m.wsMu.Unlock()
-
-	var once sync.Once
-	onClose := func() {
-		once.Do(func() {
-			m.wsMu.Lock()
-			delete(m.wsSlots, sl)
-			m.wsMu.Unlock()
-			sl.closeAndResetActive()
-			m.activeWS.Add(-1)
-		})
-	}
-	onMsg := func(raw []byte) {
-		m.handleSlotMessage(sl, raw)
-	}
-	if err := s.WriteHeaders(headerTLV, false); err != nil {
-		s.Reset(protocol.ErrCodeInternalError)
-		onClose()
-		return nil, nil, nil, err
-	}
-	return s, onMsg, onClose, nil
-}
-
-func (m *Mux) tryReserveMemory(n int64) bool {
-	if !m.sessionBudget.TryReserve(n) {
-		return false
-	}
-	if m.globalBudget != nil && !m.globalBudget.TryReserve(n) {
-		m.sessionBudget.Release(n)
-		return false
-	}
-	return true
-}
-
-func (m *Mux) releaseMemory(n int64) {
-	m.sessionBudget.Release(n)
-	if m.globalBudget != nil {
-		m.globalBudget.Release(n)
+		m.handleLaneReset(lane, f)
 	}
 }
 
 func (m *Mux) tryAcquireStreamSlot() bool {
-	if m.globalActive != nil {
-		if m.globalActive.Add(1) > int64(m.cfg.MaxGlobalStreams) {
-			m.globalActive.Add(-1)
+	if m.activeStreams.Add(1) > int32(m.cfg.MaxSessionStreams) { // #nosec G115 -- MaxSessionStreams bounded
+		m.activeStreams.Add(-1)
+		return false
+	}
+	if m.globalStreams != nil && m.cfg.MaxGlobalStreams > 0 {
+		if m.globalStreams.Add(1) > int64(m.cfg.MaxGlobalStreams) {
+			m.globalStreams.Add(-1)
+			m.activeStreams.Add(-1)
 			return false
 		}
 	}
-	m.localActive.Add(1)
 	return true
 }
 
 func (m *Mux) releaseStreamSlot() {
-	m.localActive.Add(-1)
-	if m.globalActive != nil {
-		m.globalActive.Add(-1)
+	m.activeStreams.Add(-1)
+	if m.globalStreams != nil && m.cfg.MaxGlobalStreams > 0 {
+		m.globalStreams.Add(-1)
 	}
 }
 
-func (m *Mux) reaperLoop() {
-	ticker := time.NewTicker(1 * time.Second)
+func (m *Mux) handleLaneHeaders(lane *dataLane, f *protocol.Frame) {
+	lane.mu.Lock()
+	st, exists := lane.streams[f.StreamID]
+	if exists {
+		// Either multi-frame continuation of an assembling header block, OR response headers on a client-opened stream.
+		lane.mu.Unlock()
+		st.onInboundHeaders(f.Flags, f.Payload)
+		return
+	}
+	// New peer-initiated stream: StreamID MUST strictly advance on this ordered lane (eliminates C-4!).
+	if f.StreamID <= lane.lastPeerStreamID {
+		lane.mu.Unlock()
+		_ = lane.sendFrame(f.StreamID, protocol.TypeReset, protocol.FlagNone, protocol.EncodeResetPayload(protocol.ErrCodeProtocolError))
+		return
+	}
+	if !m.tryAcquireStreamSlot() {
+		lane.mu.Unlock()
+		_ = lane.sendFrame(f.StreamID, protocol.TypeReset, protocol.FlagNone, protocol.EncodeResetPayload(protocol.ErrCodeRefusedStream))
+		return
+	}
+	lane.lastPeerStreamID = f.StreamID
+	st = newStream(m, lane, f.StreamID, false)
+	lane.streams[f.StreamID] = st
+	lane.mu.Unlock()
+
+	st.onInboundHeaders(f.Flags, f.Payload)
+}
+
+func (m *Mux) lookupStream(lane *dataLane, streamID uint32) (*Stream, bool) {
+	lane.mu.Lock()
+	st := lane.streams[streamID]
+	alreadyClosed := st == nil && streamID <= lane.lastPeerStreamID
+	lane.mu.Unlock()
+	return st, alreadyClosed
+}
+
+func (m *Mux) handleLaneData(lane *dataLane, f *protocol.Frame) {
+	st, alreadyClosed := m.lookupStream(lane, f.StreamID)
+	if st == nil {
+		if !alreadyClosed {
+			_ = lane.sendFrame(f.StreamID, protocol.TypeReset, protocol.FlagNone, protocol.EncodeResetPayload(protocol.ErrCodeProtocolError))
+		}
+		return
+	}
+	st.onInboundData(f.Payload, (f.Flags&protocol.FlagFin) != 0)
+}
+
+func (m *Mux) handleLaneWSChunk(lane *dataLane, f *protocol.Frame) {
+	st, alreadyClosed := m.lookupStream(lane, f.StreamID)
+	if st == nil {
+		if !alreadyClosed {
+			_ = lane.sendFrame(f.StreamID, protocol.TypeReset, protocol.FlagNone, protocol.EncodeResetPayload(protocol.ErrCodeProtocolError))
+		}
+		return
+	}
+	st.onInboundWSChunk(f.Type, (f.Flags&protocol.FlagMsgFin) != 0, f.Payload)
+}
+
+func (m *Mux) handleLaneWSClose(lane *dataLane, f *protocol.Frame) {
+	st, alreadyClosed := m.lookupStream(lane, f.StreamID)
+	if st == nil {
+		if !alreadyClosed {
+			_ = lane.sendFrame(f.StreamID, protocol.TypeReset, protocol.FlagNone, protocol.EncodeResetPayload(protocol.ErrCodeProtocolError))
+		}
+		return
+	}
+	st.onInboundWSClose(f.Payload)
+}
+
+func (m *Mux) handleLaneCredit(lane *dataLane, f *protocol.Frame) {
+	st, _ := m.lookupStream(lane, f.StreamID)
+	if st == nil {
+		return
+	}
+	delta := binary.BigEndian.Uint32(f.Payload)
+	st.onInboundCredit(delta)
+}
+
+func (m *Mux) handleLaneReset(lane *dataLane, f *protocol.Frame) {
+	st, _ := m.lookupStream(lane, f.StreamID)
+	if st == nil {
+		return
+	}
+	code := protocol.ErrorCode(binary.BigEndian.Uint32(f.Payload))
+	st.onPeerReset(code)
+}
+
+func (m *Mux) HandleLaneClose(laneIdx int) {
+	if laneIdx < 0 || laneIdx >= len(m.lanes) {
+		return
+	}
+	lane := m.lanes[laneIdx]
+	lane.sendMu.Lock()
+	lane.dc = nil
+	lane.sendMu.Unlock()
+	lane.signalLow()
+
+	lane.mu.Lock()
+	victims := make([]*Stream, 0, len(lane.streams))
+	for _, st := range lane.streams {
+		victims = append(victims, st)
+	}
+	lane.streams = make(map[uint32]*Stream)
+	lane.mu.Unlock()
+
+	for _, st := range victims {
+		st.abortLocal(ErrMuxClosed)
+	}
+}
+
+func (m *Mux) deliverAcceptedStream(st *Stream) {
+	select {
+	case m.acceptCh <- st:
+	case <-m.closedCh:
+		st.abortLocal(ErrMuxClosed)
+	default:
+		st.Reset(protocol.ErrCodeRefusedStream)
+	}
+}
+
+// AcceptStream waits for the next peer-opened stream whose headers have finished assembling.
+func (m *Mux) AcceptStream(ctx context.Context) (*Stream, error) {
+	select {
+	case st := <-m.acceptCh:
+		return st, nil
+	case <-m.closedCh:
+		return nil, ErrMuxClosed
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// OpenStream opens a client-initiated HTTP or WebSocket stream on the least-loaded data lane
+// using a strictly monotonic StreamID (zero slot blocking, zero HoL across N lanes).
+func (m *Mux) OpenStream(headersRaw []byte, hasBody bool) (*Stream, error) {
+	if m.closed.Load() {
+		return nil, ErrMuxClosed
+	}
+	if len(headersRaw) == 0 || len(headersRaw) > protocol.MaxTotalHeadersSize {
+		return nil, protocol.ErrInvalidPayloadSize
+	}
+	if !m.tryAcquireStreamSlot() {
+		return nil, protocol.ErrInvalidPayloadSize
+	}
+
+	// Pick the least-loaded lane with an attached DC (prefers idle lanes & lowest SCTP backlog -> zero HoL).
+	var chosen *dataLane
+	bestLoad := int(^uint(0) >> 1)
+	var bestBuf uint64 = ^uint64(0)
+	for _, lane := range m.lanes {
+		lane.sendMu.Lock()
+		dc := lane.dc
+		lane.sendMu.Unlock()
+		if dc == nil {
+			continue
+		}
+		bufAmt := dc.BufferedAmount()
+		lane.mu.Lock()
+		load := len(lane.streams)
+		lane.mu.Unlock()
+		if load < bestLoad || (load == bestLoad && bufAmt < bestBuf) {
+			bestLoad = load
+			bestBuf = bufAmt
+			chosen = lane
+			if load == 0 && bufAmt == 0 {
+				break
+			}
+		}
+	}
+	if chosen == nil {
+		m.releaseStreamSlot()
+		return nil, ErrMuxClosed
+	}
+
+	// Serialize local StreamID allocation + initial HEADERS emission per ordered lane so concurrent
+	// OpenStream calls on the same lane ALWAYS arrive at the peer in strictly increasing StreamID order!
+	chosen.openMu.Lock()
+	streamID := m.nextStreamID.Add(1)
+	st := newStream(m, chosen, streamID, true)
+	chosen.mu.Lock()
+	chosen.streams[streamID] = st
+	chosen.mu.Unlock()
+
+	err := st.WriteHeaders(headersRaw, !hasBody)
+	chosen.openMu.Unlock()
+	if err != nil {
+		st.abortLocal(err)
+		return nil, err
+	}
+	return st, nil
+}
+
+func (m *Mux) idleReaperLoop() {
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-m.ctx.Done():
+		case <-m.closedCh:
 			return
-		case now := <-ticker.C:
-			timeout := m.cfg.StreamIdleTimeout
-			for _, sl := range m.poolSlots {
-				sl.mu.Lock()
-				s := sl.active
-				sl.mu.Unlock()
-				if s == nil {
-					continue
+		case <-ticker.C:
+			cutoff := time.Now().Add(-m.cfg.StreamIdleTimeout)
+			var stale []*Stream
+			for _, lane := range m.lanes {
+				lane.mu.Lock()
+				for _, st := range lane.streams {
+					if st.isIdleBefore(cutoff) {
+						stale = append(stale, st)
+					}
 				}
-				if s.isHeaderAssemblyTimedOut(now) {
-					s.Reset(protocol.ErrCodeProtocolError)
-				} else if !s.IsLongLived() && now.Sub(s.LastActivity()) > timeout {
-					s.Reset(protocol.ErrCodeCancel)
-				}
+				lane.mu.Unlock()
 			}
-			m.wsMu.Lock()
-			var wsList []*Stream
-			var staleIdleWS []*dcSlot
-			for sl := range m.wsSlots {
-				sl.mu.Lock()
-				if sl.active != nil {
-					wsList = append(wsList, sl.active)
-				} else if !sl.createdAt.IsZero() && now.Sub(sl.createdAt) > HeaderAssemblyTimeout {
-					staleIdleWS = append(staleIdleWS, sl)
-				}
-				sl.mu.Unlock()
-			}
-			m.wsMu.Unlock()
-			for _, sl := range staleIdleWS {
-				if sl.onWSClose != nil {
-					sl.onWSClose()
-				} else {
-					sl.closeAndResetActive()
-				}
-			}
-			for _, s := range wsList {
-				if s.isHeaderAssemblyTimedOut(now) {
-					s.Reset(protocol.ErrCodeProtocolError)
-				} else if !s.IsLongLived() && now.Sub(s.LastActivity()) > timeout {
-					s.Reset(protocol.ErrCodeCancel)
-				}
+			for _, st := range stale {
+				st.Reset(protocol.ErrCodeCancel)
 			}
 		}
 	}
 }
 
-// Close tears down all active streams and releases 100% of MemoryBudget cleanly.
+// Close shuts down the Mux, aborts all active streams immediately (releasing all memory budgets),
+// and closes attached DataChannels.
 func (m *Mux) Close() {
 	m.closeOnce.Do(func() {
-		m.cancel()
-		for _, sl := range m.poolSlots {
-			sl.closeAndResetActive()
-		}
-		m.wsMu.Lock()
-		wsList := make([]*dcSlot, 0, len(m.wsSlots))
-		for sl := range m.wsSlots {
-			wsList = append(wsList, sl)
-		}
-		m.wsSlots = make(map[*dcSlot]struct{})
-		m.wsMu.Unlock()
-		for _, sl := range wsList {
-			sl.closeAndResetActive()
-		}
-		m.ctrlMu.Lock()
-		ctrl := m.ctrlDC
+		m.closed.Store(true)
+		close(m.closedCh)
+
+		m.ctrlSendMu.Lock()
+		cdc := m.ctrlDC
 		m.ctrlDC = nil
-		m.ctrlMu.Unlock()
-		if ctrl != nil {
-			_ = ctrl.Close()
+		m.ctrlSendMu.Unlock()
+		if cdc != nil {
+			_ = cdc.Close()
+		}
+
+		for i, lane := range m.lanes {
+			lane.sendMu.Lock()
+			dc := lane.dc
+			lane.dc = nil
+			lane.sendMu.Unlock()
+			lane.signalLow()
+			if dc != nil {
+				_ = dc.Close()
+			}
+			m.HandleLaneClose(i)
+		}
+
+		// Drain any unaccepted streams sitting in acceptCh.
+		for {
+			select {
+			case st := <-m.acceptCh:
+				st.abortLocal(ErrMuxClosed)
+			default:
+				return
+			}
 		}
 	})
 }

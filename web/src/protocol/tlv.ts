@@ -76,7 +76,8 @@ export interface ResponseHeaders {
 }
 
 const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder('utf-8', { fatal: true });
+// H-6b: ignoreBOM: true preserves leading U+FEFF bytes identically to Go (prevents empty cookie name decoding).
+const textDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 // RFC 9110 §5.6.2 tchar lookup table.
 const TCHAR_TABLE = new Uint8Array(256);

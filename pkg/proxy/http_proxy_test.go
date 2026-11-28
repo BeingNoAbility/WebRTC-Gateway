@@ -48,7 +48,7 @@ func TestProxyV7_HTTPProxy_FastPostGzipAndStaticOSRootSecurity(t *testing.T) {
 			{Name: "content-length", Value: "15"},
 		},
 	})
-	cs, err := cm.OpenHTTPStream(context.Background(), postTLV, false)
+	cs, err := cm.OpenStream(postTLV, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestProxyV7_HTTPProxy_FastPostGzipAndStaticOSRootSecurity(t *testing.T) {
 		rh, _ := protocol.DecodeRequestHeaders(st.HeadersRaw())
 		hpEOF.HandleStream(st, rh, "198.51.100.2", nil, nil)
 	}()
-	csEOF, _ := cm.OpenHTTPStream(context.Background(), mustReqTLV("GET", "/crash"), true)
+	csEOF, _ := cm.OpenStream(mustReqTLV("GET", "/crash"), false)
 	rbEOF, _ := csEOF.ReadResponseHeaders(context.Background())
 	respEOF, _ := protocol.DecodeResponseHeaders(rbEOF)
 	_ = csEOF.Close()
@@ -149,7 +149,7 @@ func TestProxyV7_HTTPProxy_FastPostGzipAndStaticOSRootSecurity(t *testing.T) {
 			rh, _ := protocol.DecodeRequestHeaders(st.HeadersRaw())
 			hpFS.HandleStream(st, rh, "198.51.100.2", nil, capScope)
 		}()
-		s, _ := cm2.OpenHTTPStream(context.Background(), mustReqTLV("GET", target), true)
+		s, _ := cm2.OpenStream(mustReqTLV("GET", target), false)
 		rb, err := s.ReadResponseHeaders(context.Background())
 		if err != nil {
 			t.Fatalf("req %s ReadResponseHeaders: %v", target, err)
@@ -257,7 +257,7 @@ func TestHTTPProxyMultiEncodingStrongETagAndContentLength(t *testing.T) {
 			Target:   target,
 			Headers:  hdrs,
 		})
-		s, err := cm.OpenHTTPStream(context.Background(), tlv, !hasBody)
+		s, err := cm.OpenStream(tlv, hasBody)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -368,7 +368,7 @@ func TestHTTPProxyCredentialsOmitIgnoresMutationsAndSetCookie(t *testing.T) {
 			{Op: protocol.CookieOpSet, Name: "jsmut", Value: "should-not-apply", Path: "/"},
 		},
 	})
-	s, err := cm.OpenHTTPStream(context.Background(), tlv, true)
+	s, err := cm.OpenStream(tlv, false)
 	if err != nil {
 		t.Fatal(err)
 	}

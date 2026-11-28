@@ -20,9 +20,13 @@ scripts/gate.sh --full
 # 查看当前全部 Go 测试用例名称（单一事实源）
 go test -list . ./...
 
-# Go 全量并发竞态测试与模糊冒烟测试
-go test -race -count=1 ./...
-go test -run=^$ -fuzz=. -fuzztime=5s ./pkg/protocol ./pkg/proxy
+# Go 全量并发竞态测试（含内嵌前端）与逐目标模糊冒烟测试
+go test -race -count=1 -tags embedweb ./...
+for pkg in ./pkg/protocol ./pkg/proxy ./pkg/signaling; do
+  for ft in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz'); do
+    go test -run='^$' -fuzz="^${ft}\$" -fuzztime=2s "$pkg"
+  done
+done
 
 # 前端真实 TS 模块测试、信令黑盒一致性、发版卫生与无头 Chrome CDP 端到端
 npm --prefix web run build && npm --prefix web test
@@ -66,4 +70,4 @@ SIGNAL_BIN="$PWD/bin/signal" AGENT_BIN="$PWD/bin/agent" node --test test/e2e/bro
 - **Safari / WebKit（macOS 与 iOS）**：验证存储分区、后台标签页暂停后的静默重连、SW 休眠唤醒与媒体 206 拖拽。
 - **Firefox（桌面端）**：验证 DTLS/SCTP 互操作、Service Worker Fetch 拦截与跨站沙箱导航。
 - **真实弱网与对称 NAT**：验证移动网络与 Wi-Fi 切换后的恢复表现，以及经用户自建 TURN 中继加密转发的连通性。
-- **生产反代与真实 TLS 证书**：在 Nginx / Caddy 前置反代下验证 Tier 1 固定双域、Tier 2 同站通配符与 Tier 3 双域通配符的 WebSocket 升级、客户端 IP 透传与证书热重载。
+- **生产反代与真实 TLS 证书**：在 Nginx / Caddy 前置反代下验证 Tier 1 跨站双域通配符与 Tier 2 受限模式（固定单域跨站 / 同站通配符）的 WebSocket 升级、客户端 IP 透传与证书热重载。
