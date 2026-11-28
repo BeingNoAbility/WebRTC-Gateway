@@ -24,6 +24,9 @@ done
 
 step() { printf '\n==> %s\n' "$*"; }
 
+step "CHANGELOG drift check (warning only)"
+node scripts/check-changelog-drift.mjs
+
 step "Release hygiene & version parity"
 node scripts/verify-release-hygiene.mjs
 node --test test/hygiene/release_hygiene.test.mjs
