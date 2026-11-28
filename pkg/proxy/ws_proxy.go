@@ -155,7 +155,6 @@ func (wp *WSProxy) HandleStream(
 		}
 	}
 	upstreamHeaders.Del("Sec-WebSocket-Protocol")
-	upstreamHeaders.Del("Sec-WebSocket-Extensions")
 
 	rawCapture := &wsRawConnCapture{}
 	dialCtx, dialCancel := context.WithTimeout(withWSRawConnCapture(stream.Context(), rawCapture), wsDialTimeout)
@@ -212,9 +211,31 @@ func (wp *WSProxy) HandleStream(
 	var closeOnce sync.Once
 	var wsCloseSentOnce sync.Once
 	var wsCloseSent atomic.Bool
+	var wsTxMu sync.Mutex
+	var wsPartialMsgSent bool
+	writeBackendChunk := func(op uint8, fin bool, payload []byte) error {
+		wsTxMu.Lock()
+		defer wsTxMu.Unlock()
+		if wsCloseSent.Load() {
+			return mux.ErrStreamClosed
+		}
+		if err := stream.WriteWSChunk(pumpCtx, op, fin, payload); err != nil {
+			return err
+		}
+		wsPartialMsgSent = !fin
+		return nil
+	}
 	sendWSClose := func(code uint16, reason string) {
 		wsCloseSentOnce.Do(func() {
+			wsTxMu.Lock()
 			wsCloseSent.Store(true)
+			partial := wsPartialMsgSent
+			wsTxMu.Unlock()
+			if partial {
+				// Never emit a clean WS_CLOSE on top of an unterminated half-message (P1-7).
+				stream.Reset(protocol.ErrCodeCancel)
+				return
+			}
 			_ = stream.WriteWSClose(code, reason)
 		})
 	}
@@ -251,7 +272,7 @@ func (wp *WSProxy) HandleStream(
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Goroutine A: Backend WS -> Dedicated "p2pws" DC (true O(1)-memory 16 KiB streaming with 1-chunk lookahead!).
+	// Goroutine A: Backend WS -> Pooled P2PMux V8 stream (true O(1)-memory 16 KiB streaming with 1-chunk lookahead!).
 	go func() {
 		defer wg.Done()
 		defer pumpCancel()
@@ -299,7 +320,7 @@ func (wp *WSProxy) HandleStream(
 			}
 			// Empty 0-byte WS message (e.g. `ws.send("")`) -> single final frame.
 			if nCur == 0 && errCur == io.EOF {
-				if werr := stream.WriteWSChunk(pumpCtx, firstOp, true, nil); werr != nil {
+				if werr := writeBackendChunk(firstOp, true, nil); werr != nil {
 					return
 				}
 				continue
@@ -307,7 +328,7 @@ func (wp *WSProxy) HandleStream(
 
 			for {
 				if errCur == io.EOF {
-					if werr := stream.WriteWSChunk(pumpCtx, curOp, true, curBuf[:nCur]); werr != nil {
+					if werr := writeBackendChunk(curOp, true, curBuf[:nCur]); werr != nil {
 						return
 					}
 					break
@@ -319,7 +340,7 @@ func (wp *WSProxy) HandleStream(
 					return
 				}
 				if nNext == 0 && errNext == io.EOF {
-					if werr := stream.WriteWSChunk(pumpCtx, curOp, true, curBuf[:nCur]); werr != nil {
+					if werr := writeBackendChunk(curOp, true, curBuf[:nCur]); werr != nil {
 						return
 					}
 					break
@@ -330,7 +351,7 @@ func (wp *WSProxy) HandleStream(
 					sendWSClose(uint16(websocket.StatusMessageTooBig), "frame exceeds 16 MiB")
 					return
 				}
-				if werr := stream.WriteWSChunk(pumpCtx, curOp, false, curBuf[:nCur]); werr != nil {
+				if werr := writeBackendChunk(curOp, false, curBuf[:nCur]); werr != nil {
 					return
 				}
 				curBuf, nextBuf = nextBuf, curBuf
@@ -339,7 +360,7 @@ func (wp *WSProxy) HandleStream(
 		}
 	}()
 
-	// Goroutine B: Dedicated "p2pws" DC -> Backend WS (commits writer.Close ONLY on FlagMsgFin!).
+	// Goroutine B: Pooled P2PMux V8 stream -> Backend WS (commits writer.Close ONLY on FlagMsgFin!).
 	// Enforces per-chunk progress deadlines instead of one fixed timeout across an entire 16 MiB message.
 	go func() {
 		defer wg.Done()

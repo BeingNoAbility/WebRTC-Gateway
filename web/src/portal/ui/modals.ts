@@ -285,8 +285,20 @@ export class PortalModals {
           const revBtn = createEl('button', 'p2p-btn p2p-btn-danger p2p-btn-sm', t('share.revoke'));
           revBtn.type = 'button';
           revBtn.onclick = async () => {
+            errBox.style.display = 'none';
             revBtn.disabled = true;
-            await ops.revoke(r.payload.jti).catch(() => {});
+            try {
+              const res = await ops.revoke(r.payload.jti);
+              if (!res.ok) {
+                errBox.textContent = res.error || t('common.error');
+                errBox.style.display = 'block';
+                revBtn.disabled = false;
+              }
+            } catch (err) {
+              errBox.textContent = err instanceof Error ? err.message : t('common.error');
+              errBox.style.display = 'block';
+              revBtn.disabled = false;
+            }
             await refreshList();
           };
           row.appendChild(revBtn);

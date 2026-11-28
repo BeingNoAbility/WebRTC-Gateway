@@ -577,7 +577,7 @@ func (p *DestinationPolicy) SanitizeRequestHeaders(
 	out := make(http.Header)
 	for _, f := range fields {
 		k := strings.ToLower(f.Name)
-		if allowWSUpgradeHeaders && (k == "sec-websocket-protocol" || k == "sec-websocket-extensions") {
+		if allowWSUpgradeHeaders && k == "sec-websocket-protocol" {
 			out.Add(f.Name, f.Value)
 			continue
 		}
@@ -691,6 +691,7 @@ func cookieEntriesToMutations(entries []protocol.CookieEntry) []ClientCookieMuta
 			Value:   e.Value,
 			Path:    e.Path,
 			Expires: e.ExpiresMs,
+			Secure:  e.Secure,
 		})
 	}
 	return out
@@ -717,6 +718,7 @@ func cookieDeltasToEntries(deltas []CookieDelta) []protocol.CookieEntry {
 		}
 		out = append(out, protocol.CookieEntry{
 			Op:        op,
+			Secure:    d.Secure,
 			Name:      name,
 			Value:     protocol.SanitizeHeaderValue(d.Value),
 			Path:      protocol.SanitizeHeaderValue(d.Path),

@@ -22,25 +22,26 @@ const (
 )
 
 // P2PMux V8 FetchCtx bitfield (RequestHeaders).
-// Bit 1 (0x02, legacy TopLevelNav) is removed and reserved because top-level sandbox
-// document navigation is unconditionally blocked at the Service Worker gate.
 const (
 	FetchCtxSameOriginClient     uint8 = 1 << 0
-	FetchCtxClientDecompressGzip uint8 = 1 << 2
-	FetchCtxCredentialsOmit      uint8 = 1 << 3
+	FetchCtxClientDecompressGzip uint8 = 1 << 1
+	FetchCtxCredentialsOmit      uint8 = 1 << 2
 	FetchCtxValidMask            uint8 = FetchCtxSameOriginClient | FetchCtxClientDecompressGzip | FetchCtxCredentialsOmit
 )
 
-// V7 RespFlags bitfield (ResponseHeaders).
+// P2PMux V8 RespFlags bitfield (ResponseHeaders).
 const (
 	RespFlagDecompressGzip uint8 = 1 << 0
 	RespFlagsValidMask     uint8 = RespFlagDecompressGzip
 )
 
-// V7 binary TLV cookie operation codes.
+// P2PMux V8 binary TLV cookie operation codes & attribute flags (packed in the 1-byte op field).
 const (
-	CookieOpSet uint8 = 1
-	CookieOpDel uint8 = 2
+	CookieOpSet        uint8 = 1
+	CookieOpDel        uint8 = 2
+	CookieOpMask       uint8 = 0x03
+	CookieOpFlagSecure uint8 = 0x80
+	CookieOpValidMask  uint8 = CookieOpMask | CookieOpFlagSecure
 )
 
 var (
@@ -67,6 +68,7 @@ type HeaderField struct {
 // CookieEntry is a compact binary TLV cookie mutation (request) or delta (response).
 type CookieEntry struct {
 	Op        uint8  // CookieOpSet (1) or CookieOpDel (2)
+	Secure    bool   // Wire-packed in CookieOpFlagSecure (0x80) inside the 1-byte op field
 	Name      string // 1..255 bytes
 	Value     string // 0..65535 bytes
 	Path      string // 0..65535 bytes
@@ -534,7 +536,11 @@ func encodeCookieEntries(buf []byte, pos int, entries []CookieEntry) int {
 	binary.BigEndian.PutUint16(buf[pos:], boundedUint16(len(entries)))
 	pos += 2
 	for _, c := range entries {
-		buf[pos] = c.Op
+		wireOp := c.Op
+		if c.Secure {
+			wireOp |= CookieOpFlagSecure
+		}
+		buf[pos] = wireOp
 		pos++
 		buf[pos] = boundedUint8(len(c.Name))
 		pos++
@@ -575,8 +581,13 @@ func decodeCookieEntries(raw []byte, pos, maxCount int) ([]CookieEntry, int, err
 		if pos+2 > len(raw) {
 			return nil, pos, ErrTLVTruncated
 		}
-		op := raw[pos]
+		rawOp := raw[pos]
 		pos++
+		if rawOp & ^CookieOpValidMask != 0 {
+			return nil, pos, ErrTLVInvalidCookie
+		}
+		op := rawOp & CookieOpMask
+		secure := (rawOp & CookieOpFlagSecure) != 0
 		nLen := int(raw[pos])
 		pos++
 		if nLen == 0 || pos+nLen+2 > len(raw) {
@@ -610,6 +621,7 @@ func decodeCookieEntries(raw []byte, pos, maxCount int) ([]CookieEntry, int, err
 
 		entry := CookieEntry{
 			Op:        op,
+			Secure:    secure,
 			Name:      name,
 			Value:     val,
 			Path:      p,

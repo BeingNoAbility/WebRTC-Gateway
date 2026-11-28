@@ -373,7 +373,7 @@ func (a *Agent) onControlChannelOpen(sess *VisitorSession, pc *webrtc.PeerConnec
 	}
 
 	settingsPayload, _ := json.Marshal(map[string]any{
-		"max_frame_payload": protocol.DefaultChunkSize,
+		"max_frame_payload": m.ChunkSize(),
 		"pool_size":         a.cfg.PoolSize,
 		"max_concurrent_ws": protocol.DefaultMaxWSConns,
 	})

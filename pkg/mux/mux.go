@@ -29,11 +29,12 @@ const (
 )
 
 var (
-	ErrMuxClosed        = errors.New("mux: closed")
-	ErrStreamReset      = errors.New("mux: stream reset")
-	ErrStreamClosed     = errors.New("mux: stream closed")
-	ErrInvalidLane      = errors.New("mux: invalid data lane")
-	ErrSCTPWriteTimeout = errors.New("mux: sctp backpressure write timeout")
+	ErrMuxClosed          = errors.New("mux: closed")
+	ErrStreamReset        = errors.New("mux: stream reset")
+	ErrStreamClosed       = errors.New("mux: stream closed")
+	ErrStreamLimitReached = errors.New("mux: stream limit reached")
+	ErrInvalidLane        = errors.New("mux: invalid data lane")
+	ErrSCTPWriteTimeout   = errors.New("mux: sctp backpressure write timeout")
 )
 
 // DataChannel is the minimal SCTP DataChannel abstraction (satisfied by *webrtc.DataChannel).
@@ -75,6 +76,7 @@ type dataLane struct {
 	lowCh  chan struct{}
 
 	mu               sync.Mutex
+	closed           bool
 	lastPeerStreamID uint32
 	streams          map[uint32]*Stream
 }
@@ -147,10 +149,12 @@ type Mux struct {
 
 	lanes []*dataLane
 
-	acceptCh  chan *Stream
-	closedCh  chan struct{}
-	closed    atomic.Bool
-	closeOnce sync.Once
+	acceptMu     sync.Mutex
+	acceptClosed bool
+	acceptCh     chan *Stream
+	closedCh     chan struct{}
+	closed       atomic.Bool
+	closeOnce    sync.Once
 }
 
 func New(cfg Config) *Mux {
@@ -246,6 +250,12 @@ func (m *Mux) AttachLaneDC(laneIdx int, dc DataChannel) {
 	if laneIdx < 0 || laneIdx >= len(m.lanes) {
 		return
 	}
+	if m.closed.Load() {
+		if dc != nil {
+			_ = dc.Close()
+		}
+		return
+	}
 	lane := m.lanes[laneIdx]
 	if lowDC, ok := dc.(bufferedLowAwareDC); ok {
 		lowDC.SetBufferedAmountLowThreshold(SCTPBackpressureLowWater)
@@ -254,6 +264,13 @@ func (m *Mux) AttachLaneDC(laneIdx int, dc DataChannel) {
 		})
 	}
 	lane.sendMu.Lock()
+	if m.closed.Load() {
+		lane.sendMu.Unlock()
+		if dc != nil {
+			_ = dc.Close()
+		}
+		return
+	}
 	lane.dc = dc
 	lane.sendMu.Unlock()
 }
@@ -477,6 +494,10 @@ func (m *Mux) releaseStreamSlot() {
 
 func (m *Mux) handleLaneHeaders(lane *dataLane, f *protocol.Frame) {
 	lane.mu.Lock()
+	if lane.closed || m.closed.Load() {
+		lane.mu.Unlock()
+		return
+	}
 	st, exists := lane.streams[f.StreamID]
 	if exists {
 		// Either multi-frame continuation of an assembling header block, OR response headers on a client-opened stream.
@@ -573,6 +594,7 @@ func (m *Mux) HandleLaneClose(laneIdx int) {
 	lane.signalLow()
 
 	lane.mu.Lock()
+	lane.closed = true
 	victims := make([]*Stream, 0, len(lane.streams))
 	for _, st := range lane.streams {
 		victims = append(victims, st)
@@ -586,11 +608,17 @@ func (m *Mux) HandleLaneClose(laneIdx int) {
 }
 
 func (m *Mux) deliverAcceptedStream(st *Stream) {
+	m.acceptMu.Lock()
+	if m.acceptClosed || m.closed.Load() {
+		m.acceptMu.Unlock()
+		st.abortLocal(ErrMuxClosed)
+		return
+	}
 	select {
 	case m.acceptCh <- st:
-	case <-m.closedCh:
-		st.abortLocal(ErrMuxClosed)
+		m.acceptMu.Unlock()
 	default:
+		m.acceptMu.Unlock()
 		st.Reset(protocol.ErrCodeRefusedStream)
 	}
 }
@@ -621,7 +649,7 @@ func (m *Mux) OpenStream(headersRaw []byte, hasBody bool) (*Stream, error) {
 		return nil, protocol.ErrInvalidPayloadSize
 	}
 	if !m.tryAcquireStreamSlot() {
-		return nil, protocol.ErrInvalidPayloadSize
+		return nil, ErrStreamLimitReached
 	}
 
 	// Pick the least-loaded lane with an attached DC (prefers idle lanes & lowest SCTP backlog -> zero HoL).
@@ -637,8 +665,12 @@ func (m *Mux) OpenStream(headersRaw []byte, hasBody bool) (*Stream, error) {
 		}
 		bufAmt := dc.BufferedAmount()
 		lane.mu.Lock()
+		closed := lane.closed
 		load := len(lane.streams)
 		lane.mu.Unlock()
+		if closed {
+			continue
+		}
 		if load < bestLoad || (load == bestLoad && bufAmt < bestBuf) {
 			bestLoad = load
 			bestBuf = bufAmt
@@ -656,10 +688,16 @@ func (m *Mux) OpenStream(headersRaw []byte, hasBody bool) (*Stream, error) {
 	// Serialize local StreamID allocation + initial HEADERS emission per ordered lane so concurrent
 	// OpenStream calls on the same lane ALWAYS arrive at the peer in strictly increasing StreamID order!
 	chosen.openMu.Lock()
+	chosen.mu.Lock()
+	if chosen.closed || m.closed.Load() {
+		chosen.mu.Unlock()
+		chosen.openMu.Unlock()
+		m.releaseStreamSlot()
+		return nil, ErrMuxClosed
+	}
 	streamID := m.nextStreamID.Add(1)
 	st := newStream(m, chosen, streamID, true)
 	st.kind.Store(uint32(kind))
-	chosen.mu.Lock()
 	chosen.streams[streamID] = st
 	chosen.mu.Unlock()
 
@@ -735,12 +773,20 @@ func (m *Mux) Close() {
 			m.HandleLaneClose(i)
 		}
 
-		// Drain any unaccepted streams sitting in acceptCh.
+		// Mark accept queue closed under acceptMu BEFORE draining so deliverAcceptedStream
+		// can never race-enqueue an orphaned stream after drain finishes.
+		m.acceptMu.Lock()
+		m.acceptClosed = true
+		var drained []*Stream
 		for {
 			select {
 			case st := <-m.acceptCh:
-				st.abortLocal(ErrMuxClosed)
+				drained = append(drained, st)
 			default:
+				m.acceptMu.Unlock()
+				for _, st := range drained {
+					st.abortLocal(ErrMuxClosed)
+				}
 				return
 			}
 		}

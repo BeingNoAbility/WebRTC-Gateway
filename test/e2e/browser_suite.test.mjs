@@ -1,9 +1,9 @@
 /**
- * Unified Real Chrome CDP End-to-End Test Matrix (V7)
+ * Unified Real Chrome CDP End-to-End Test Matrix (P2PMux V8)
  * Tests REAL compiled `signal` (-tags embedweb, NO -static!) + `agent` + real local HTTP/WS backend
  * + real headless Chrome with OOPIF cross-origin iframe inspection across 5 full suites:
  *
- *  Suite 1: Embedded DistFS + 3-Tier Sandbox Deployment (Local / Tier 1 Fixed / Tier 3 Wildcard)
+ *  Suite 1: Embedded DistFS + Deployment Tiers (LocalDev / Tier 2 Fixed / Tier 1 Cross-Site Wildcard)
  *  Suite 2: SPAKE2+, 40x Early 204 POST No-Deadlock, WS send+close, Close Codes 1008/1011 & 2.5 MiB Streaming
  *  Suite 3: Split-Pool CookieMirror Injection/Eviction Defense, Chinese/No-Charset <meta charset> & Attachment Non-Injection
  *  Suite 4: Adversarial CSRF Matrix, Worker/Back/Reload, top.location Sandbox Block, PWA Self-Destruct Defense & Silent Reconnect

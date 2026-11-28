@@ -422,8 +422,8 @@ export class SessionRegistry {
 
   /**
    * Immediately disarms any pending root-nav expectation when `appFrame` settles (`pageshow`,
-   * including BFCache restore) and restores `rootClientId` if a bound top-level frame returned
-   * from BFCache.
+   * including BFCache restore) and restores `rootClientId` ONLY if `rootClientId` is empty or
+   * already belongs to `clientId` (never lets a sub-iframe hijack `rootClientId`!).
    */
   clearExpectedRootNav(clientId: string): void {
     if (!clientId) return;
@@ -431,6 +431,7 @@ export class SessionRegistry {
     if (!mapped) return;
     const s = this.sessions.get(mapped);
     if (!s) return;
+    if (s.rootClientId && s.rootClientId !== clientId) return;
     s.expectRootNavUntil = 0;
     s.rootClientId = clientId;
   }
@@ -531,30 +532,6 @@ export class SessionRegistry {
   getSingleActiveSession(): TabSession | null {
     if (this.sessions.size !== 1) return null;
     return this.sessions.values().next().value ?? null;
-  }
-
-  /**
-   * Returns a read-only static (`-dir`/`-file`) session for opaque-origin iframe links where
-   * `CSP: sandbox` omits `clientId` and `replacesClientId`. Permits multiple Portal tabs viewing
-   * the SAME static `nodeId` (choosing the most recently attached tab), while failing closed
-   * (`null`) if any active session is non-static or targets a different `nodeId`.
-   */
-  getStaticFallbackSession(): TabSession | null {
-    if (this.sessions.size === 0) return null;
-    let chosen: TabSession | null = null;
-    let sharedNodeId = '';
-    for (const sess of this.sessions.values()) {
-      if (!sess.meta.isStaticMode) return null;
-      if (!sharedNodeId) {
-        sharedNodeId = sess.meta.nodeId;
-      } else if (sess.meta.nodeId !== sharedNodeId) {
-        return null;
-      }
-      if (!chosen || sess.attachedAt >= chosen.attachedAt) {
-        chosen = sess;
-      }
-    }
-    return chosen;
   }
 
   removeSession(tabId: string): void {

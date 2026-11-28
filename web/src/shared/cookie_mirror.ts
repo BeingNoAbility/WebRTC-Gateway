@@ -13,6 +13,7 @@ export interface MirrorCookieEntry {
   value: string;
   path: string;
   expires: number; // unix ms, 0 = session cookie
+  secure?: boolean;
 }
 
 export function normalizeCookiePath(rawPath?: string): string {
@@ -45,29 +46,33 @@ export class CookieMirrorStore {
     value: string | undefined,
     rawPath: string | undefined,
     expires: number | undefined,
-    now = Date.now()
-  ): { key: string; path: string; deleted: boolean; exp: number; val: string } {
+    now = Date.now(),
+    secure?: boolean
+  ): { key: string; path: string; deleted: boolean; exp: number; val: string; secure: boolean } {
     const path = normalizeCookiePath(rawPath);
     const key = cookieEntryKey(path, name);
     const exp = expires && expires > 0 ? expires : 0;
+    const isSecure = Boolean(secure);
     const deleted = op === 'del' || (exp > 0 && exp <= now);
     if (deleted) {
       this.entries.delete(key);
-      return { key, path, deleted: true, exp: 0, val: '' };
+      return { key, path, deleted: true, exp: 0, val: '', secure: isSecure };
     }
     if (!this.entries.has(key) && this.entries.size >= MAX_MIRROR_COOKIES) {
       const oldestKey = this.entries.keys().next().value;
       if (oldestKey) this.entries.delete(oldestKey);
     }
     const val = value ?? '';
-    this.entries.set(key, { name, value: val, path, expires: exp });
-    return { key, path, deleted: false, exp, val };
+    const entry: MirrorCookieEntry = { name, value: val, path, expires: exp };
+    if (isSecure) entry.secure = true;
+    this.entries.set(key, entry);
+    return { key, path, deleted: false, exp, val, secure: isSecure };
   }
 
   applyDeltas(deltas: CookieDelta[], now = Date.now()): void {
     for (const d of deltas) {
       if (!isCookieDelta(d)) continue;
-      this.setOrDelete(d.op, d.name, d.value, d.path, d.expires, now);
+      this.setOrDelete(d.op, d.name, d.value, d.path, d.expires, now, d.secure);
     }
   }
 
@@ -78,13 +83,15 @@ export class CookieMirrorStore {
         this.entries.delete(k);
         continue;
       }
-      out.push({
+      const d: CookieDelta = {
         op: 'set',
         name: e.name,
         value: e.value,
         path: e.path,
         expires: e.expires || undefined,
-      });
+      };
+      if (e.secure) d.secure = true;
+      out.push(d);
     }
     return out;
   }

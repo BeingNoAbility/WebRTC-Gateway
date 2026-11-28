@@ -489,10 +489,16 @@ export class PeerSession {
       let controlChain: Promise<void> = Promise.resolve();
 
       const enqueueControlFrame = (frame: Frame) => {
-        controlChain = controlChain.then(async () => {
-          if (this.generation !== gen || this.pc !== pc) return;
-          await this.authClient.handleControlFrame(authGen, frame);
-        });
+        controlChain = controlChain
+          .then(async () => {
+            if (this.generation !== gen || this.pc !== pc) return;
+            await this.authClient.handleControlFrame(authGen, frame);
+          })
+          .catch((err) => {
+            if (this.generation !== gen || this.pc !== pc) return;
+            const msg = err instanceof Error ? err.message : String(err);
+            this.callbacks.onLog(`[Auth] Control frame handler error (recovered): ${msg}`);
+          });
       };
 
       const mux = new PoolMux(laneDCs.length, {

@@ -12,6 +12,7 @@ export interface CookieDelta {
   value?: string;
   path: string;
   expires?: number; // unix ms (0 or omitted = session cookie)
+  secure?: boolean;
 }
 
 export interface ClientCookieMutation {
@@ -20,12 +21,12 @@ export interface ClientCookieMutation {
   value?: string;
   path?: string;
   expires?: number; // unix ms (0 or omitted = session cookie)
+  secure?: boolean;
 }
 
 export interface BackendMeta {
   nodeId: string;
   backendOrigin: string;
-  isStaticMode: boolean;
   sameSiteMode: boolean;
   cookieSecureContext?: boolean;
   pinnedPk?: string;
@@ -99,7 +100,8 @@ export function isCookieDelta(v: unknown): v is CookieDelta {
     v.name.length > 0 &&
     typeof v.path === 'string' &&
     (v.value === undefined || typeof v.value === 'string') &&
-    (v.expires === undefined || typeof v.expires === 'number')
+    (v.expires === undefined || typeof v.expires === 'number') &&
+    (v.secure === undefined || typeof v.secure === 'boolean')
   );
 }
 
@@ -111,7 +113,8 @@ export function isClientCookieMutation(v: unknown): v is ClientCookieMutation {
     v.name.length > 0 &&
     (v.value === undefined || typeof v.value === 'string') &&
     (v.path === undefined || typeof v.path === 'string') &&
-    (v.expires === undefined || typeof v.expires === 'number')
+    (v.expires === undefined || typeof v.expires === 'number') &&
+    (v.secure === undefined || typeof v.secure === 'boolean')
   );
 }
 
@@ -120,7 +123,6 @@ export function isBackendMeta(v: unknown): v is BackendMeta {
     isRecord(v) &&
     typeof v.nodeId === 'string' &&
     typeof v.backendOrigin === 'string' &&
-    typeof v.isStaticMode === 'boolean' &&
     typeof v.sameSiteMode === 'boolean'
   );
 }

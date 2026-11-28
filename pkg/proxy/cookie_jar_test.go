@@ -48,10 +48,14 @@ func TestProxyV7_CookieJarRFC6265bisAndMutations(t *testing.T) {
 		t.Fatalf("missing expected cookies on same-origin: %q", soHdr)
 	}
 
-	// JS mutation attempting to overwrite HttpOnly or __Host- fails, while deleting non-HttpOnly `theme` succeeds.
+	// JS mutation attempting to overwrite HttpOnly or __Host- without Secure fails,
+	// while compliant __Host-/__Secure- with Secure=true on HTTPS succeeds and deleting `theme` succeeds.
 	jar.ApplyClientMutations(httpsURL, []ClientCookieMutation{
 		{Op: "set", Name: "sid", Value: "forged", Path: "/"},
 		{Op: "set", Name: "__Host-evil", Value: "1", Path: "/"},
+		{Op: "set", Name: "__Host-badpath", Value: "1", Path: "/sub", Secure: true},
+		{Op: "set", Name: "__Host-csrf", Value: "ok-csrf", Path: "/", Secure: true},
+		{Op: "set", Name: "__Secure-pref", Value: "ok-sec", Path: "/", Secure: true},
 		{Op: "del", Name: "theme", Path: "/"},
 	})
 	afterDel := jar.BuildCookieHeaderWithContext(httpsURL, CookieRequestContext{
@@ -60,11 +64,23 @@ func TestProxyV7_CookieJarRFC6265bisAndMutations(t *testing.T) {
 	if !strings.Contains(afterDel, "sid=admin-secret") {
 		t.Fatalf("HttpOnly cookie tampered: %q", afterDel)
 	}
-	if strings.Contains(afterDel, "__Host-evil") {
-		t.Fatalf("JS forged __Host- cookie: %q", afterDel)
+	if strings.Contains(afterDel, "__Host-evil") || strings.Contains(afterDel, "__Host-badpath") {
+		t.Fatalf("JS forged invalid __Host- cookie: %q", afterDel)
+	}
+	if !strings.Contains(afterDel, "__Host-csrf=ok-csrf") || !strings.Contains(afterDel, "__Secure-pref=ok-sec") {
+		t.Fatalf("P1-9 regression: compliant HTTPS JS __Host-/__Secure- cookies dropped: %q", afterDel)
 	}
 	if strings.Contains(afterDel, "theme=") {
 		t.Fatalf("JS-deleted cookie remained as zombie: %q", afterDel)
+	}
+	// Non-secure HTTP origin MUST reject __Host- and __Secure- even when Secure=true is claimed.
+	insecureURL, _ := url.Parse("http://app.example.com/")
+	jar.ApplyClientMutations(insecureURL, []ClientCookieMutation{
+		{Op: "set", Name: "__Host-http", Value: "bad", Path: "/", Secure: true},
+		{Op: "set", Name: "__Secure-http", Value: "bad", Path: "/", Secure: true},
+	})
+	if httpHdr := jar.BuildCookieHeaderWithContext(insecureURL, CookieRequestContext{Method: "GET", SameOriginClient: true}); strings.Contains(httpHdr, "__Host-http") || strings.Contains(httpHdr, "__Secure-http") {
+		t.Fatalf("non-secure HTTP origin accepted __Host-/__Secure- cookie: %q", httpHdr)
 	}
 
 	// SessionCookieManager.AcquireOrMint rejects client-chosen token fixation.

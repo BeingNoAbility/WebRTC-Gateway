@@ -70,7 +70,7 @@ func GenerateSelfSignedCert(extraDNSNames ...string) (tls.Certificate, error) {
 	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
-// ReloadingCertProvider hot-reloads custom TLS cert/key files when mtime changes,
+// ReloadingCertProvider hot-reloads custom TLS cert/key files when inode, mtime, or size changes,
 // serializing reload probes to prevent concurrent handshake stampedes.
 type ReloadingCertProvider struct {
 	certPath string
@@ -79,10 +79,8 @@ type ReloadingCertProvider struct {
 	reloadMu  sync.Mutex
 	mu        sync.RWMutex
 	cert      *tls.Certificate
-	certMtime time.Time
-	keyMtime  time.Time
-	certSize  int64
-	keySize   int64
+	certInfo  os.FileInfo
+	keyInfo   os.FileInfo
 	lastCheck time.Time
 }
 
@@ -109,13 +107,18 @@ func (p *ReloadingCertProvider) reload() error {
 	}
 	p.mu.Lock()
 	p.cert = &loaded
-	p.certMtime = cs.ModTime()
-	p.keyMtime = ks.ModTime()
-	p.certSize = cs.Size()
-	p.keySize = ks.Size()
+	p.certInfo = cs
+	p.keyInfo = ks
 	p.lastCheck = time.Now()
 	p.mu.Unlock()
 	return nil
+}
+
+func certFileChanged(prev, cur os.FileInfo) bool {
+	if prev == nil || cur == nil {
+		return true
+	}
+	return !os.SameFile(prev, cur) || !cur.ModTime().Equal(prev.ModTime()) || cur.Size() != prev.Size()
 }
 
 func (p *ReloadingCertProvider) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -134,8 +137,7 @@ func (p *ReloadingCertProvider) GetCertificate(*tls.ClientHelloInfo) (*tls.Certi
 	p.mu.RLock()
 	cur = p.cert
 	stale = time.Since(p.lastCheck) > 30*time.Second
-	cm, km := p.certMtime, p.keyMtime
-	cSz, kSz := p.certSize, p.keySize
+	ci, ki := p.certInfo, p.keyInfo
 	p.mu.RUnlock()
 	if !stale {
 		return cur, nil
@@ -150,7 +152,7 @@ func (p *ReloadingCertProvider) GetCertificate(*tls.ClientHelloInfo) (*tls.Certi
 		p.mu.Unlock()
 		return cur, nil
 	}
-	if !cs.ModTime().Equal(cm) || !ks.ModTime().Equal(km) || cs.Size() != cSz || ks.Size() != kSz {
+	if certFileChanged(ci, cs) || certFileChanged(ki, ks) {
 		if err := p.reload(); err != nil {
 			log.Printf("[Signal] TLS cert hot-reload failed (keeping active cert): %v", err)
 			p.mu.Lock()

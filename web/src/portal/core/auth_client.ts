@@ -342,7 +342,6 @@ export class AuthClient {
         const meta: BackendMeta = {
           nodeId: this.nodeId,
           backendOrigin: typeof rawMeta.backendOrigin === 'string' ? rawMeta.backendOrigin : '',
-          isStaticMode: Boolean(rawMeta.isStaticMode),
           sameSiteMode: this.sameSiteMode,
           cookieSecureContext:
             typeof rawMeta.cookieSecureContext === 'boolean'

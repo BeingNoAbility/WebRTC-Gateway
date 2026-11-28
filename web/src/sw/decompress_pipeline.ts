@@ -40,8 +40,29 @@ export function pipeThroughBoundedDecompression(
   let decompReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let decompWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
   let pumpPromise: Promise<void> | null = null;
+  let pumpError: unknown = null;
+  let hasPumpError = false;
   let started = false;
   let cancelled = false;
+
+  const failFromPump = (reason: unknown) => {
+    if (!hasPumpError) {
+      hasPumpError = true;
+      pumpError = reason instanceof Error ? reason : new Error(String(reason));
+    }
+    if (srcReader) {
+      const r = srcReader;
+      srcReader = null;
+      void r.cancel(pumpError).catch(() => {});
+    }
+    // Abort decompWriter BEFORE touching decompReader so any pending decompReader.read()
+    // rejects with pumpError instead of resolving cleanly as { done: true }!
+    if (decompWriter) {
+      const dw = decompWriter;
+      decompWriter = null;
+      void dw.abort(pumpError).catch(() => {});
+    }
+  };
 
   const abortAll = (reason: unknown) => {
     cancelled = true;
@@ -54,15 +75,15 @@ export function pipeThroughBoundedDecompression(
       started = true;
       void source.cancel(reason).catch(() => {});
     }
-    if (decompReader) {
-      const dr = decompReader;
-      decompReader = null;
-      void dr.cancel(reason).catch(() => {});
-    }
     if (decompWriter) {
       const dw = decompWriter;
       decompWriter = null;
       void dw.abort(reason).catch(() => {});
+    }
+    if (decompReader) {
+      const dr = decompReader;
+      decompReader = null;
+      void dr.cancel(reason).catch(() => {});
     }
   };
 
@@ -90,13 +111,21 @@ export function pipeThroughBoundedDecompression(
           await decompWriter.close();
         }
       } catch (err) {
-        abortAll(err);
+        if (!cancelled) {
+          failFromPump(err);
+        }
       }
     })();
   };
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
+      if (hasPumpError) {
+        const err = pumpError;
+        abortAll(err);
+        controller.error(err);
+        return;
+      }
       if (cancelled) {
         controller.close();
         return;
@@ -105,25 +134,37 @@ export function pipeThroughBoundedDecompression(
         started = true;
         srcReader = source.getReader();
         // Peek until first non-empty chunk or clean 0-byte EOF (never feeds 0 bytes to DecompressionStream!).
-        while (!cancelled && srcReader) {
-          const { done, value } = await srcReader.read();
-          if (done) {
-            try {
-              srcReader.releaseLock();
-            } catch {
-              // ignore
+        try {
+          while (!cancelled && srcReader) {
+            const { done, value } = await srcReader.read();
+            if (done) {
+              try {
+                srcReader.releaseLock();
+              } catch {
+                // ignore
+              }
+              srcReader = null;
+              controller.close();
+              return;
             }
-            srcReader = null;
-            controller.close();
-            return;
+            if (value && value.byteLength > 0) {
+              initDecompressorWithFirstChunk(value);
+              break;
+            }
           }
-          if (value && value.byteLength > 0) {
-            initDecompressorWithFirstChunk(value);
-            break;
-          }
+        } catch (err) {
+          abortAll(err);
+          controller.error(err);
+          return;
         }
       }
 
+      if (hasPumpError) {
+        const err = pumpError;
+        abortAll(err);
+        controller.error(err);
+        return;
+      }
       if (!decompReader || cancelled) {
         controller.close();
         return;
@@ -134,13 +175,20 @@ export function pipeThroughBoundedDecompression(
         try {
           readRes = await decompReader.read();
         } catch (err) {
-          abortAll(err);
-          controller.error(err);
+          const finalErr = hasPumpError ? pumpError : err;
+          abortAll(finalErr);
+          controller.error(finalErr);
           return;
         }
         const { done, value } = readRes;
         if (done) {
           if (pumpPromise) await pumpPromise.catch(() => {});
+          if (hasPumpError) {
+            const err = pumpError;
+            abortAll(err);
+            controller.error(err);
+            return;
+          }
           controller.close();
           return;
         }

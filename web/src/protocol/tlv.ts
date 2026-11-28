@@ -1,5 +1,5 @@
 /**
- * P2PMux V7 Compact Binary TLV Header Codec
+ * P2PMux V8 Compact Binary TLV Header Codec
  * Byte-for-byte mirror of Go pkg/protocol/tlv.go.
  */
 
@@ -18,13 +18,11 @@ export const MAX_REQUEST_COOKIE_MUTATIONS = 32;
 export const MAX_RESPONSE_COOKIE_DELTAS = 64;
 export const MAX_COOKIE_NAME_LEN = 255;
 
-// Bit 1 (0x02, legacy TOP_LEVEL_NAV) is removed and reserved because top-level sandbox
-// document navigation is unconditionally blocked at the Service Worker gate.
 export const FetchCtxFlag = {
   NONE: 0x00,
   SAME_ORIGIN_CLIENT: 1 << 0,
-  CLIENT_DECOMPRESS_GZIP: 1 << 2,
-  CREDENTIALS_OMIT: 1 << 3,
+  CLIENT_DECOMPRESS_GZIP: 1 << 1,
+  CREDENTIALS_OMIT: 1 << 2,
 } as const;
 
 export const FETCH_CTX_VALID_MASK =
@@ -44,6 +42,10 @@ export const CookieOp = {
   DEL: 2,
 } as const;
 
+export const COOKIE_OP_MASK = 0x03;
+export const COOKIE_OP_FLAG_SECURE = 0x80;
+export const COOKIE_OP_VALID_MASK = COOKIE_OP_MASK | COOKIE_OP_FLAG_SECURE;
+
 export type CookieOpValue = (typeof CookieOp)[keyof typeof CookieOp];
 
 export interface HeaderField {
@@ -53,6 +55,7 @@ export interface HeaderField {
 
 export interface CookieTLVEntry {
   op: CookieOpValue;
+  secure?: boolean;
   name: string;
   value: string;
   path: string;
@@ -174,7 +177,8 @@ function prepareCookies(entries: CookieTLVEntry[] | undefined, maxCount: number)
     ) {
       throw new RangeError(`invalid cookie expiresMs: ${c.expiresMs}`);
     }
-    list[i] = { op: c.op, name, value, path, expiresMs: BigInt(c.expiresMs) };
+    const wireOp = c.op | (c.secure ? COOKIE_OP_FLAG_SECURE : 0);
+    list[i] = { op: wireOp, name, value, path, expiresMs: BigInt(c.expiresMs) };
     byteSize += 1 + 1 + name.byteLength + 2 + value.byteLength + 2 + path.byteLength + 8;
   }
   return { list, byteSize };
@@ -217,7 +221,12 @@ function decodeCookies(
   const cookies: CookieTLVEntry[] = new Array(count);
   for (let i = 0; i < count; i++) {
     if (pos + 2 > raw.byteLength) throw new Error('truncated cookie entry');
-    const op = raw[pos++];
+    const rawOp = raw[pos++];
+    if ((rawOp & ~COOKIE_OP_VALID_MASK) !== 0) {
+      throw new Error(`invalid cookie op flags: 0x${rawOp.toString(16)}`);
+    }
+    const op = rawOp & COOKIE_OP_MASK;
+    const secure = (rawOp & COOKIE_OP_FLAG_SECURE) !== 0;
     if (op !== CookieOp.SET && op !== CookieOp.DEL) throw new Error(`invalid cookie op: ${op}`);
     const nLen = raw[pos++];
     if (nLen === 0 || pos + nLen + 2 > raw.byteLength) throw new Error('truncated cookie name');
@@ -248,7 +257,9 @@ function decodeCookies(
     }
     const expiresMs = Number(rawExp);
     pos += 8;
-    cookies[i] = { op: op as CookieOpValue, name, value, path, expiresMs };
+    const entry: CookieTLVEntry = { op: op as CookieOpValue, name, value, path, expiresMs };
+    if (secure) entry.secure = true;
+    cookies[i] = entry;
   }
   return { cookies, nextPos: pos };
 }

@@ -54,12 +54,7 @@ export function parseDocumentCookieAssignment(
   const value = first.slice(eq + 1).trim();
   // Match Go ProxyCookieJar.isValidCookieName (RFC 9110 tchar, <= 255 bytes).
   if (!name || name.length > 255 || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) return null;
-  // Align strictly with Go ProxyCookieJar.ApplyClientMutations: JS cannot forge __Host-/__Secure-
-  // cookies because ClientCookieMutation does not carry a Secure flag on the wire.
   const lowerName = name.toLowerCase();
-  if (lowerName.startsWith('__host-') || lowerName.startsWith('__secure-')) {
-    return null;
-  }
   if (textEncoder.encode(value).byteLength > 4096) return null;
   for (let i = 0; i < value.length; i++) {
     const c = value.charCodeAt(i);
@@ -68,6 +63,7 @@ export function parseDocumentCookieAssignment(
 
   let path = defaultCookiePath(currentPathname);
   let hasSecureAttr = false;
+  let hasDomainAttr = false;
   let expires = 0;
   let hasMaxAge = false;
   let isDelete = false;
@@ -84,6 +80,7 @@ export function parseDocumentCookieAssignment(
     } else if (aName === 'secure') {
       hasSecureAttr = true;
     } else if (aName === 'domain') {
+      hasDomainAttr = true;
       const dom = aVal.replace(/^\.+/, '').toLowerCase();
       if (!dom) return null;
       if (allowedHosts.length > 0) {
@@ -124,17 +121,28 @@ export function parseDocumentCookieAssignment(
   if (hasSecureAttr && !isSecure) {
     return null;
   }
+  // RFC 6265bis §4.1.3: allow compliant __Secure- and __Host- cookies in Secure Contexts (P1-9).
+  if (lowerName.startsWith('__secure-') && (!isSecure || !hasSecureAttr)) {
+    return null;
+  }
+  if (lowerName.startsWith('__host-') && (!isSecure || !hasSecureAttr || hasDomainAttr || path !== '/')) {
+    return null;
+  }
 
   if (isDelete) {
-    return { op: 'del', name, path };
+    const mut: ClientCookieMutation = { op: 'del', name, path };
+    if (hasSecureAttr) mut.secure = true;
+    return mut;
   }
-  return {
+  const mut: ClientCookieMutation = {
     op: 'set',
     name,
     value,
     path,
     expires: expires > 0 ? expires : undefined,
   };
+  if (hasSecureAttr) mut.secure = true;
+  return mut;
 }
 
 export class ClientCookieMirror extends CookieMirrorStore {

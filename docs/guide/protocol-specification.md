@@ -80,11 +80,11 @@ $$\text{StreamID}_{\text{next}} = \text{StreamID}_{\text{prev}} + 1 \quad (1 \le
 | `0x03` | `AUTH_RESPONSE` | `p2pctrl` | `0` | `MORE` | JSON（`method`: `spake2p`/`cap`/`public`, `share_p`, `confirm_p`, `cap_token`, `cookie_resume_token`） |
 | `0x04` | `AUTH_RESULT` | `p2pctrl` | `0` | `MORE` | JSON（`ok`, `role`, `confirm_v`, `cookie_resume_token`, `meta`） |
 | `0x05` | `CAP_REQ` | `p2pctrl` | `0` | `MORE` | JSON（Owner 签发/查询/吊销能力令牌请求） |
-| `0x06` | `CAP_RESP` | `p2pctrl` | `0` | `MORE` | JSON（能力令牌结果与记录列表，支持 `FlagMore` 分片至 `128 KiB`） |
+| `0x06` | `CAP_RESP` | `p2pctrl` | `0` | `MORE` | JSON（能力令牌签发/列表/吊销结果，吊销返回 `jti` 与布尔 `revoked`，支持 `FlagMore` 分片至 `128 KiB`） |
 | `0x08` | `PING` | `p2pctrl` | `0` | `0x00` | 严格 8 字节 `uint64` 序号 |
 | `0x09` | `PONG` | `p2pctrl` | `0` | `0x00` | 严格 8 字节 `uint64` 回显序号 |
 | `0x0A` | `GOAWAY` | `p2pctrl` | `0` | `0x00` | 严格 4 字节大端 `ErrorCode` |
-| `0x10` | `HEADERS` | `p2p_01..12` | `> 0` | `FIN \| MORE` | 紧凑二进制 TLV 头块（多片续传复用 `HEADERS` + `FlagMore`，总上限 `64 KiB` / `17` 片，禁止 0 字节非末片） |
+| `0x10` | `HEADERS` | `p2p_01..12` | `> 0` | `FIN` 或 `MORE` | 紧凑二进制 TLV 头块（多片续传复用 `HEADERS` + `FlagMore`，禁止非末片同时携带 `FIN \| MORE`，总上限 `64 KiB` / `17` 片，禁止 0 字节非末片） |
 | `0x12` | `DATA` | `p2p_01..12` | `> 0` | `FIN` | 原始 HTTP Body 字节流（无 `FIN` 时禁止 0 字节载荷） |
 | `0x13` | `CREDIT` | `p2p_01..12` | `> 0` | `0x00` | 严格 4 字节大端 `uint32` 纯载荷字节增量，`1 <= delta <= 0x7fffffff` |
 | `0x14` | `RESET` | `p2p_01..12` | `> 0` | `0x00` | 严格 4 字节大端 `ErrorCode` |
@@ -98,7 +98,7 @@ $$\text{StreamID}_{\text{next}} = \text{StreamID}_{\text{prev}} + 1 \quad (1 \le
 
 ### 1. 请求与响应 TLV 编码
 
-请求头与响应头采用二进制大端编码，内嵌 `FetchCtx`（`SameOriginClient`、`ClientDecompressGzip`、`CredentialsOmit` 抑制 Cookie 变更与响应 Cookie 保存；历史 bit 1 已移除并作为保留位严格拒绝）、`RespFlags`（`DecompressGzip`）与行内 Cookie 变更/差量 TLV（消除带外竞态，严格校验 `0 <= expiresMs <= Number.MAX_SAFE_INTEGER`），天然保留多值 Header（如多条 `Content-Security-Policy` 或 `Vary`）与有效 UTF-8 字符（含 BOM），并严格拒绝控制字符、CR/LF/NUL 与请求目标中的 ASCII 空格（`0x20`）：
+请求头与响应头采用二进制大端编码，内嵌 `FetchCtx`（bit 0 = `SameOriginClient`、bit 1 = `ClientDecompressGzip`、bit 2 = `CredentialsOmit`，其余保留位严格拒绝）、`RespFlags`（`DecompressGzip`）与行内 Cookie 变更/差量 TLV（在 1 字节 `op` 高位 `0x80` 复用 `Secure` 标志以原生支持安全上下文下的 `__Host-` / `__Secure-` Cookie，消除带外竞态并严格校验 `0 <= expiresMs <= Number.MAX_SAFE_INTEGER`），天然保留多值 Header（如多条 `Content-Security-Policy` 或 `Vary`）与有效 UTF-8 字符（含 BOM），并严格拒绝控制字符、CR/LF/NUL 与请求目标中的 ASCII 空格（`0x20`）：
 
 ```text
 Request TLV:
@@ -106,13 +106,13 @@ Request TLV:
   [u16 targetLen] [target UTF-8 (no spaces/ctl)] [u16 headerCount <= 256]
   repeat headerCount: [u16 nameLen] [lowercase name] [u16 valLen] [value UTF-8]
   [u16 cookieMutCount <= 32]
-  repeat cookieMutCount: [u8 op (1=set, 2=del)] [u8 nameLen] [name] [u16 valLen] [val] [u16 pathLen] [path] [i64 expiresMs]
+  repeat cookieMutCount: [u8 opFlags (bits0..1: 1=set, 2=del; bit7=Secure)] [u8 nameLen] [name] [u16 valLen] [val] [u16 pathLen] [path] [i64 expiresMs]
 
 Response TLV:
   [u16 status (100..599)] [u8 respFlags (bit0=DecompressGzip)] [u16 headerCount <= 256]
   repeat headerCount: [u16 nameLen] [lowercase name] [u16 valLen] [value UTF-8]
   [u16 cookieDeltaCount <= 64]
-  repeat cookieDeltaCount: [u8 op (1=set, 2=del)] [u8 nameLen] [name] [u16 valLen] [val] [u16 pathLen] [path] [i64 expiresMs]
+  repeat cookieDeltaCount: [u8 opFlags (bits0..1: 1=set, 2=del; bit7=Secure)] [u8 nameLen] [name] [u16 valLen] [val] [u16 pathLen] [path] [i64 expiresMs]
 ```
 
 ### 2. 同通道流式 WebSocket 分片

@@ -99,6 +99,7 @@ func main() {
 	mintPath := fs.String("mint-path", "", "Optional path prefix scope for -mint-link (e.g. /public)")
 	mintReadonly := fs.Bool("mint-readonly", false, "Restrict -mint-link to GET/HEAD/OPTIONS only (blocks WS)")
 	mintMaxConns := fs.Int("mint-max-conns", 0, "Optional max concurrent connections for -mint-link")
+	revokeCap := fs.String("revoke-cap", "", "Revoke a capability token by JTI in the persistent state file and exit")
 
 	healthFlag := fs.Bool("health", false, "Probe local Agent /healthz endpoint and exit")
 	healthURL := fs.String("health-url", "", "Optional custom URL for -health")
@@ -265,6 +266,29 @@ func main() {
 		os.Exit(0)
 	}
 
+	if strings.TrimSpace(*revokeCap) != "" {
+		if *ephemeralID {
+			log.Fatalf("[Agent] -revoke-cap requires persistent identity/state (cannot combine with -ephemeral-identity)")
+		}
+		statePath := strings.TrimSpace(*stateFile)
+		if statePath == "" && identity.KeyPath != "" {
+			statePath = identity.KeyPath + ".state.json"
+		}
+		if statePath == "" {
+			log.Fatalf("[Agent] -revoke-cap requires a persistent -state-file or -identity-key")
+		}
+		capStore, serr := agent.NewCapabilityStoreWithFile(statePath)
+		if serr != nil {
+			log.Fatalf("[Agent] Load capability state %q failed: %v", statePath, serr)
+		}
+		jti := strings.TrimSpace(*revokeCap)
+		if rerr := capStore.Revoke(jti); rerr != nil {
+			log.Fatalf("[Agent] Revoke capability %q failed: %v", jti, rerr)
+		}
+		fmt.Printf("revoked %s\n", jti)
+		os.Exit(0)
+	}
+
 	resolvedSignalSecret, sigFromCLI, err := config.ResolveSecret(
 		*signalSecret, explicit["signal-secret"],
 		"SIGNAL_SECRET", "SIGNAL_SECRET_FILE", fileCfg.SignalSecret,
@@ -328,7 +352,6 @@ func main() {
 	var httpProxy *proxy.HTTPProxy
 	var wsProxy *proxy.WSProxy
 	var staticHandler *proxy.StaticFSHandler
-	isStaticMode := false
 
 	if *targetURL != "" {
 		pol, err := proxy.NewDestinationPolicy(*targetURL, *upstreamHost)
@@ -363,7 +386,6 @@ func main() {
 		if parsedProxyURL != nil || strings.TrimSpace(*sni) != "" || *insecureTarget {
 			log.Fatalf("[Agent] -proxy, -sni, and -insecure-target are only valid with -target")
 		}
-		isStaticMode = true
 		staticHandler, err = proxy.NewStaticFSHandler(proxy.StaticFSOptions{
 			RootDir:        *dirPath,
 			SingleFile:     *filePath,
@@ -401,7 +423,6 @@ func main() {
 		StateFile:           *stateFile,
 		HTTPProxy:           httpProxy,
 		WSProxy:             wsProxy,
-		IsStaticMode:        isStaticMode,
 		ICEMDNS:             *iceMDNS,
 		STUNServers:         parsedSTUN,
 		TURNURL:             trimmedTurnURL,

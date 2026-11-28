@@ -250,6 +250,10 @@ func ValidateFrameMeta(streamID uint32, frameType, flags uint8, payloadLen int) 
 		if flags & ^(FlagFin|FlagMore) != 0 {
 			return ErrInvalidFlags
 		}
+		// FlagFin belongs exclusively on the final HEADERS chunk (FlagMore == 0).
+		if flags&(FlagFin|FlagMore) == (FlagFin | FlagMore) {
+			return ErrInvalidFlags
+		}
 		// Non-final 0-byte HEADERS chunk is forbidden (anti-DoS).
 		if payloadLen == 0 && flags&FlagMore != 0 {
 			return ErrInvalidPayloadSize

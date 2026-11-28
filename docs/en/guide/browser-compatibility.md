@@ -8,11 +8,11 @@ WebRTC Gateway runs strictly on standard Web APIs (WebRTC DataChannel, Service W
 
 | Browser Family | Engine | Tier | Verification | Notes |
 | :--- | :--- | :---: | :--- | :--- |
-| **Google Chrome** | Chromium / Blink | **Tier 1** | Automated CI CDP E2E | Linux CI runs cross-site OOPIF E2E against the embedded `web.DistFS` binary (requires Chrome 137+ for native WebCrypto `Ed25519`; Transferable `ReadableStream` since Chrome 87+) |
-| **Microsoft Edge** | Chromium / Blink | **Tier 1** | Shared CDP E2E suite | Requires Edge 137+ (WebCrypto `Ed25519`); select locally via `EDGE_BIN` or `BROWSER_BIN` |
-| **Brave / Vivaldi / Opera** | Chromium / Blink | Tier 2 | Community verified | Requires Chromium 137+ base; aggressive WebRTC privacy blockers may require TURN relay |
-| **Mozilla Firefox** | Gecko | Tier 2 | Community verified | Requires Firefox 129+ (WebCrypto `Ed25519`, Transferable `ReadableStream`); SW falls back to `arrayBuffer()` when `FetchEvent.request.body === undefined` |
-| **Apple Safari (macOS / iOS)** | WebKit | Tier 2 | Community verified | Requires Safari 17+ (WebCrypto `Ed25519`, Transferable `ReadableStream`); subject to iOS suspension and `getRemoteCertificates()` limits below |
+| **Google Chrome** | Chromium / Blink | **Tier 1** | Automated CI CDP E2E | Linux CI runs cross-site OOPIF E2E against the embedded `web.DistFS` binary (Chrome 137+ uses native WebCrypto `Ed25519`; Chrome 87–136 automatically fall back to built-in zero-dependency pure-JS RFC 8032 Ed25519 verification) |
+| **Microsoft Edge** | Chromium / Blink | **Tier 1** | Shared CDP E2E suite | Edge 87+ (native WebCrypto `Ed25519` on 137+, automatic pure-JS fallback on earlier builds); select locally via `EDGE_BIN` or `BROWSER_BIN` |
+| **Brave / Vivaldi / Opera** | Chromium / Blink | Tier 2 | Community verified | Chromium 87+ base (native WebCrypto or automatic pure-JS Ed25519 fallback); aggressive WebRTC privacy blockers may require TURN relay |
+| **Mozilla Firefox** | Gecko | Tier 2 | Community verified | Firefox 103+ (native WebCrypto `Ed25519` on 129+, automatic pure-JS fallback on earlier builds); SW falls back to `arrayBuffer()` when `FetchEvent.request.body === undefined` |
+| **Apple Safari (macOS / iOS)** | WebKit | Tier 2 | Community verified | Requires Safari 17+ (native WebCrypto `Ed25519` and Transferable `ReadableStream`); subject to iOS suspension and `getRemoteCertificates()` limits below |
 | **Android Chromium Browsers** | Chromium / Blink | Tier 2 | Community verified | Modern Chrome Android and Edge Mobile |
 
 > [!NOTE]

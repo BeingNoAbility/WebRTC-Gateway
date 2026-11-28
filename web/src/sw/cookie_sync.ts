@@ -48,35 +48,36 @@ export class CookieMirror extends CookieMirrorStore {
     const deltas: CookieDelta[] = [];
     for (const m of mutations) {
       if (!isClientCookieMutation(m)) continue;
-      const res = this.setOrDelete(m.op, m.name, m.value, m.path, m.expires, now);
+      const res = this.setOrDelete(m.op, m.name, m.value, m.path, m.expires, now, m.secure);
       if (res.deleted) {
         const delDelta: CookieDelta = { op: 'del', name: m.name, path: res.path };
+        if (res.secure) delDelta.secure = true;
         deltas.push(delDelta);
         if (opts.queueForUpstream !== false) {
-          this.pendingMutations.set(res.key, {
-            mut: { op: 'del', name: m.name, path: res.path },
-            ver: ++this.mutVerSeq,
-          });
+          const mut: ClientCookieMutation = { op: 'del', name: m.name, path: res.path };
+          if (res.secure) mut.secure = true;
+          this.pendingMutations.set(res.key, { mut, ver: ++this.mutVerSeq });
         }
       } else {
-        deltas.push({
+        const setDelta: CookieDelta = {
           op: 'set',
           name: m.name,
           value: res.val,
           path: res.path,
           expires: res.exp || undefined,
-        });
+        };
+        if (res.secure) setDelta.secure = true;
+        deltas.push(setDelta);
         if (opts.queueForUpstream !== false) {
-          this.pendingMutations.set(res.key, {
-            mut: {
-              op: 'set',
-              name: m.name,
-              value: res.val,
-              path: res.path,
-              expires: res.exp || undefined,
-            },
-            ver: ++this.mutVerSeq,
-          });
+          const mut: ClientCookieMutation = {
+            op: 'set',
+            name: m.name,
+            value: res.val,
+            path: res.path,
+            expires: res.exp || undefined,
+          };
+          if (res.secure) mut.secure = true;
+          this.pendingMutations.set(res.key, { mut, ver: ++this.mutVerSeq });
         }
       }
     }
