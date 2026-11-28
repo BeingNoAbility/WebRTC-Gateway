@@ -77,7 +77,7 @@ func NewStaticFSHandler(opts StaticFSOptions) (*StaticFSHandler, error) {
 	}
 	// Fail-Closed at startup: verify SingleFile exists and is a regular file (L-9).
 	if singleName != "" {
-		f, _, _, oerr := h.openSafeRootPath(singleName, "", true)
+		f, _, oerr := h.openSafeRootPath(singleName, "", true)
 		if oerr != nil {
 			_ = root.Close()
 			return nil, fmt.Errorf("proxy/static: invalid SingleFile %q: %w", opts.SingleFile, oerr)
@@ -131,7 +131,7 @@ func (h *StaticFSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Enforce CapabilityScope.PathPrefix confinement even across symlink hops (H-8).
 	scopePrefix := strings.TrimPrefix(StaticPathPrefixFromContext(r.Context()), "/")
 
-	f, resolvedRel, dirRoot, err := h.openSafeRootPath(rel, scopePrefix, false)
+	f, resolvedRel, err := h.openSafeRootPath(rel, scopePrefix, false)
 	if err != nil {
 		if os.IsNotExist(err) || errors.Is(err, os.ErrPermission) {
 			http.NotFound(w, r)
@@ -141,9 +141,6 @@ func (h *StaticFSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	if dirRoot != nil && dirRoot != h.root {
-		defer dirRoot.Close()
-	}
 
 	fi, err := f.Stat()
 	if err != nil {
@@ -172,10 +169,7 @@ func (h *StaticFSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if resolvedRel != "." {
 			idxRel = resolvedRel + "/index.html"
 		}
-		if idxFile, _, idxDirRoot, ierr := h.openSafeRootPath(idxRel, scopePrefix, false); ierr == nil {
-			if idxDirRoot != nil && idxDirRoot != h.root {
-				_ = idxDirRoot.Close()
-			}
+		if idxFile, _, ierr := h.openSafeRootPath(idxRel, scopePrefix, false); ierr == nil {
 			if idxInfo, serr := idxFile.Stat(); serr == nil && idxInfo.Mode().IsRegular() {
 				defer idxFile.Close()
 				http.ServeContent(w, r, "index.html", idxInfo.ModTime(), idxFile)
@@ -183,7 +177,7 @@ func (h *StaticFSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = idxFile.Close()
 		}
-		h.serveDirListing(w, r, f, dirRoot, resolvedRel, cleanReqPath, scopePrefix)
+		h.serveDirListing(w, r, f, resolvedRel, cleanReqPath, scopePrefix)
 		return
 	}
 
@@ -200,7 +194,7 @@ func (h *StaticFSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *StaticFSHandler) serveSingleFile(w http.ResponseWriter, r *http.Request, name string) {
-	f, _, _, err := h.openSafeRootPath(name, "", true)
+	f, _, err := h.openSafeRootPath(name, "", true)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -242,27 +236,25 @@ func validateSymlinkTarget(target string) error {
 // O_NOFOLLOW|O_NONBLOCK. When followSymlinks is false (default Fail-Closed), ALL symlinks are
 // rejected immediately. When followSymlinks is true, multi-hop symlinks are resolved strictly
 // within BOTH os.Root AND scopePrefix (eliminating H-8 CapabilityScope symlink escapes).
-// When the resolved entry is a directory, dirRoot is returned (caller closes if != h.root) so
-// serveDirListing can Lstat DT_UNKNOWN entries directly in O(1) syscalls (eliminating H-12).
-func (h *StaticFSHandler) openSafeRootPath(rel, scopePrefix string, allowSingleDotfile bool) (*os.File, string, *os.Root, error) {
+func (h *StaticFSHandler) openSafeRootPath(rel, scopePrefix string, allowSingleDotfile bool) (*os.File, string, error) {
 	curPath := path.Clean(rel)
 	if !isWithinScopePrefix(curPath, scopePrefix) {
-		return nil, "", nil, os.ErrPermission
+		return nil, "", os.ErrPermission
 	}
 	if curPath == "." || curPath == "" {
 		f, err := openRootNoFollowNoBlock(h.root, ".")
 		if err != nil {
-			return nil, "", nil, err
+			return nil, "", err
 		}
 		fi, serr := f.Stat()
 		if serr != nil || !fi.IsDir() {
 			_ = f.Close()
-			return nil, "", nil, os.ErrPermission
+			return nil, "", os.ErrPermission
 		}
-		return f, ".", h.root, nil
+		return f, ".", nil
 	}
 	if strings.HasPrefix(curPath, "/") || curPath == ".." || strings.HasPrefix(curPath, "../") {
-		return nil, "", nil, os.ErrPermission
+		return nil, "", os.ErrPermission
 	}
 
 	hops := 0
@@ -285,12 +277,12 @@ func (h *StaticFSHandler) openSafeRootPath(rel, scopePrefix string, allowSingleD
 			}
 			if seg == ".." || strings.ContainsRune(seg, '\\') || strings.ContainsRune(seg, '\x00') {
 				closeCur()
-				return nil, "", nil, os.ErrPermission
+				return nil, "", os.ErrPermission
 			}
 			allowDot := allowSingleDotfile && hops == 0 && len(parts) == 1 && seg == h.singleName
 			if h.hideDotfiles && strings.HasPrefix(seg, ".") && !allowDot {
 				closeCur()
-				return nil, "", nil, os.ErrPermission
+				return nil, "", os.ErrPermission
 			}
 			if prefix == "" {
 				prefix = seg
@@ -301,22 +293,22 @@ func (h *StaticFSHandler) openSafeRootPath(rel, scopePrefix string, allowSingleD
 			li, err := curRoot.Lstat(seg)
 			if err != nil {
 				closeCur()
-				return nil, "", nil, err
+				return nil, "", err
 			}
 			if li.Mode()&os.ModeSymlink != 0 {
 				if !h.followSymlinks {
 					closeCur()
-					return nil, "", nil, os.ErrPermission
+					return nil, "", os.ErrPermission
 				}
 				hops++
 				if hops > maxSymlinkHops {
 					closeCur()
-					return nil, "", nil, os.ErrPermission
+					return nil, "", os.ErrPermission
 				}
 				target, rerr := curRoot.Readlink(seg)
 				if rerr != nil || validateSymlinkTarget(target) != nil {
 					closeCur()
-					return nil, "", nil, os.ErrPermission
+					return nil, "", os.ErrPermission
 				}
 				parent := path.Dir(prefix)
 				resolved := path.Clean(target)
@@ -325,13 +317,13 @@ func (h *StaticFSHandler) openSafeRootPath(rel, scopePrefix string, allowSingleD
 				}
 				if resolved == ".." || strings.HasPrefix(resolved, "../") || strings.HasPrefix(resolved, "/") {
 					closeCur()
-					return nil, "", nil, os.ErrPermission
+					return nil, "", os.ErrPermission
 				}
 				if h.hideDotfiles {
 					for _, tSeg := range strings.Split(resolved, "/") {
 						if tSeg != "" && tSeg != "." && strings.HasPrefix(tSeg, ".") {
 							closeCur()
-							return nil, "", nil, os.ErrPermission
+							return nil, "", os.ErrPermission
 						}
 					}
 				}
@@ -347,19 +339,19 @@ func (h *StaticFSHandler) openSafeRootPath(rel, scopePrefix string, allowSingleD
 				}
 				closeCur()
 				if !isWithinScopePrefix(curPath, scopePrefix) {
-					return nil, "", nil, os.ErrPermission
+					return nil, "", os.ErrPermission
 				}
 				if curPath == "." {
 					f, oerr := openRootNoFollowNoBlock(h.root, ".")
 					if oerr != nil {
-						return nil, "", nil, oerr
+						return nil, "", oerr
 					}
 					fi, serr := f.Stat()
 					if serr != nil || !fi.IsDir() {
 						_ = f.Close()
-						return nil, "", nil, os.ErrPermission
+						return nil, "", os.ErrPermission
 					}
-					return f, ".", h.root, nil
+					return f, ".", nil
 				}
 				restarted = true
 				break
@@ -368,18 +360,18 @@ func (h *StaticFSHandler) openSafeRootPath(rel, scopePrefix string, allowSingleD
 			if i < len(parts)-1 {
 				if !li.IsDir() {
 					closeCur()
-					return nil, "", nil, os.ErrNotExist
+					return nil, "", os.ErrNotExist
 				}
 				nextRoot, oerr := curRoot.OpenRoot(seg)
 				if oerr != nil {
 					closeCur()
-					return nil, "", nil, oerr
+					return nil, "", oerr
 				}
 				nextFi, serr := nextRoot.Stat(".")
 				if serr != nil || !nextFi.IsDir() || !os.SameFile(li, nextFi) {
 					_ = nextRoot.Close()
 					closeCur()
-					return nil, "", nil, os.ErrPermission
+					return nil, "", os.ErrPermission
 				}
 				closeCur()
 				curRoot = nextRoot
@@ -388,32 +380,26 @@ func (h *StaticFSHandler) openSafeRootPath(rel, scopePrefix string, allowSingleD
 
 			if !li.Mode().IsRegular() && !li.IsDir() {
 				closeCur()
-				return nil, "", nil, os.ErrPermission
+				return nil, "", os.ErrPermission
 			}
 			f, oerr := openRootNoFollowNoBlock(curRoot, seg)
 			if oerr != nil {
 				closeCur()
-				return nil, "", nil, oerr
+				return nil, "", oerr
 			}
 			fi, serr := f.Stat()
 			if serr != nil || (!fi.Mode().IsRegular() && !fi.IsDir()) || !os.SameFile(li, fi) {
 				_ = f.Close()
 				closeCur()
-				return nil, "", nil, os.ErrPermission
-			}
-			var targetDirRoot *os.Root
-			if fi.IsDir() {
-				if dr, derr := curRoot.OpenRoot(seg); derr == nil {
-					targetDirRoot = dr
-				}
+				return nil, "", os.ErrPermission
 			}
 			closeCur()
-			return f, prefix, targetDirRoot, nil
+			return f, prefix, nil
 		}
 
 		if !restarted {
 			closeCur()
-			return nil, "", nil, os.ErrPermission
+			return nil, "", os.ErrPermission
 		}
 	}
 }
@@ -429,7 +415,6 @@ func (h *StaticFSHandler) serveDirListing(
 	w http.ResponseWriter,
 	r *http.Request,
 	dir *os.File,
-	dirRoot *os.Root,
 	resolvedRel, displayPath, scopePrefix string,
 ) {
 	type item struct {
@@ -469,10 +454,7 @@ func (h *StaticFSHandler) serveDirListing(
 				if resolvedRel != "." {
 					childRel = resolvedRel + "/" + name
 				}
-				cf, _, childDirRoot, cerr := h.openSafeRootPath(childRel, scopePrefix, false)
-				if childDirRoot != nil && childDirRoot != h.root {
-					_ = childDirRoot.Close()
-				}
+				cf, _, cerr := h.openSafeRootPath(childRel, scopePrefix, false)
 				if cerr != nil {
 					continue
 				}

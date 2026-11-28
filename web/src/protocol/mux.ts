@@ -542,6 +542,8 @@ export class WSStream extends BaseStream {
   private asmBytes = 0;
   private asmMemCost = 0;
   private asmChunkCount = 0;
+  private asmDeferredCreditBytes = 0;
+  private asmDeferredCreditChunks = 0;
 
   private pendingMsgs: Array<{
     msg: WSDeliveredMessage;
@@ -554,6 +556,8 @@ export class WSStream extends BaseStream {
   private consumedBytes = 0;
   private consumedChunks = 0;
   private writeChain: Promise<void> = Promise.resolve();
+  private pendingSends = 0;
+  private closeRequested = false;
 
   private recordConsumed(bytes: number, chunks: number): void {
     if (bytes <= 0 && chunks <= 0) return;
@@ -585,6 +589,19 @@ export class WSStream extends BaseStream {
       }
       cb(item.msg);
     }
+    // P0-4: Flush any deferred credit accumulated by an in-progress partial message sitting in
+    // asmChunks while pendingMsgs was non-empty; otherwise the sender's window stays at 0 until 30s timeout!
+    if (
+      !this.remoteCloseReceived &&
+      !this.terminated &&
+      (this.asmDeferredCreditBytes > 0 || this.asmDeferredCreditChunks > 0)
+    ) {
+      const dBytes = this.asmDeferredCreditBytes;
+      const dChunks = this.asmDeferredCreditChunks;
+      this.asmDeferredCreditBytes = 0;
+      this.asmDeferredCreditChunks = 0;
+      this.recordConsumed(dBytes, dChunks);
+    }
     if (this.pendingClose && this.pendingMsgs.length === 0 && !this.terminated) {
       const cl = this.pendingClose;
       this.pendingClose = null;
@@ -606,7 +623,7 @@ export class WSStream extends BaseStream {
   }
 
   sendMessage(data: string | Uint8Array): Promise<void> {
-    if (this.terminated || this.localFin) {
+    if (this.terminated || this.localFin || this.closeRequested) {
       return Promise.reject(new Error('WebSocket stream closed'));
     }
     const isBinary = data instanceof Uint8Array;
@@ -615,7 +632,12 @@ export class WSStream extends BaseStream {
       return Promise.reject(new RangeError('WebSocket message exceeds 16 MiB'));
     }
     // Serialize multi-chunk message sends internally so concurrent callers can never interleave frames.
-    const run = this.writeChain.then(() => this.sendMessageSerialized(isBinary, raw));
+    this.pendingSends++;
+    const run = this.writeChain
+      .then(() => this.sendMessageSerialized(isBinary, raw))
+      .finally(() => {
+        this.pendingSends--;
+      });
     this.writeChain = run.catch(() => {});
     return run;
   }
@@ -649,7 +671,7 @@ export class WSStream extends BaseStream {
     }
   }
 
-  close(code = 1000, reason = ''): void {
+  private emitCloseNow(code: number, reason: string): void {
     if (this.terminated || this.localFin) return;
     this.localFin = true;
     try {
@@ -664,6 +686,18 @@ export class WSStream extends BaseStream {
       // ignore
     }
     this.maybeDetach();
+  }
+
+  close(code = 1000, reason = ''): void {
+    if (this.terminated || this.localFin || this.closeRequested) return;
+    this.closeRequested = true;
+    if (this.pendingSends === 0) {
+      this.emitCloseNow(code, reason);
+      return;
+    }
+    // P2-2: Wait for in-flight multi-chunk sendMessage() frames to flush before emitting WS_CLOSE.
+    const flushClose = () => this.emitCloseNow(code, reason);
+    this.writeChain = this.writeChain.then(flushClose, flushClose);
   }
 
   protected onHeaderFin(): void {
@@ -692,9 +726,10 @@ export class WSStream extends BaseStream {
     }
     const plen = payload.byteLength;
     if (this.asmBytes + plen > MAX_WS_MESSAGE_BYTES) {
-      // H-5c: Unconditionally send 1009 and clean up regardless of localFin!
+      // H-5c: Unconditionally send 1009 immediately and clean up regardless of localFin/pendingSends!
       if (!this.localFin) {
-        this.close(1009, 'message exceeds 16 MiB');
+        this.closeRequested = true;
+        this.emitCloseNow(1009, 'message exceeds 16 MiB');
       }
       this.abortLocal(new Error('WebSocket message exceeds 16 MiB'));
       return;
@@ -716,23 +751,31 @@ export class WSStream extends BaseStream {
 
     // Replenish pure payload-byte CREDIT immediately only when an active consumer is attached
     // (or during the first streaming message before any message queues in pendingMsgs).
+    // Otherwise track exact deferred credit on the in-progress assembly so onMessage() flushes it!
     const immediateCredit = this.msgCb !== null || this.pendingMsgs.length === 0;
-    if (plen > 0 && immediateCredit) {
-      this.recordConsumed(plen, 1);
+    if (plen > 0) {
+      if (immediateCredit) {
+        this.recordConsumed(plen, 1);
+      } else {
+        this.asmDeferredCreditBytes += plen;
+        this.asmDeferredCreditChunks += 1;
+      }
     }
 
     if (!fin) return;
 
     const assembled = concatChunks(this.asmChunks, this.asmBytes);
     const totalMemCost = this.asmMemCost;
-    const totalPayloadBytes = this.asmBytes;
-    const totalChunkCount = this.asmChunkCount;
+    const deferredBytes = this.asmDeferredCreditBytes;
+    const deferredChunks = this.asmDeferredCreditChunks;
     const isBinary = this.asmOp === FrameType.WS_BINARY;
     this.asmOp = 0;
     this.asmChunks = [];
     this.asmBytes = 0;
     this.asmMemCost = 0;
     this.asmChunkCount = 0;
+    this.asmDeferredCreditBytes = 0;
+    this.asmDeferredCreditChunks = 0;
 
     let msg: WSDeliveredMessage;
     if (isBinary) {
@@ -749,13 +792,16 @@ export class WSStream extends BaseStream {
 
     if (this.msgCb) {
       this.mux.releaseSessionBytes(totalMemCost);
+      if (deferredBytes > 0 || deferredChunks > 0) {
+        this.recordConsumed(deferredBytes, deferredChunks);
+      }
       this.msgCb(msg);
     } else {
       this.pendingMsgs.push({
         msg,
         memCost: totalMemCost,
-        deferredCreditBytes: immediateCredit ? 0 : totalPayloadBytes,
-        deferredCreditChunks: immediateCredit ? 0 : totalChunkCount,
+        deferredCreditBytes: deferredBytes,
+        deferredCreditChunks: deferredChunks,
       });
     }
   }
@@ -782,6 +828,8 @@ export class WSStream extends BaseStream {
       this.asmBytes = 0;
       this.asmMemCost = 0;
       this.asmChunkCount = 0;
+      this.asmDeferredCreditBytes = 0;
+      this.asmDeferredCreditChunks = 0;
     }
     this.maybeDetach();
 
@@ -807,6 +855,8 @@ export class WSStream extends BaseStream {
     this.asmBytes = 0;
     this.asmMemCost = 0;
     this.asmChunkCount = 0;
+    this.asmDeferredCreditBytes = 0;
+    this.asmDeferredCreditChunks = 0;
     for (const item of this.pendingMsgs) {
       freed += item.memCost;
     }

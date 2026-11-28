@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -227,15 +228,22 @@ func (a *Agent) completeOffer(msg signaling.OfferRelayDTO, offerSDP string, sess
 		a.onControlChannelOpen(sess, pc, m)
 	})
 
+	var emittedCands atomic.Int32
+	var droppedMDNSHosts atomic.Int32
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
+			if a.cfg.ICEMDNS && emittedCands.Load() == 0 && droppedMDNSHosts.Load() > 0 {
+				log.Printf("[Agent] WARNING: ICE gathering produced 0 usable candidates (%d non-.local host candidate(s) filtered by -ice-mdns=true); in pure LAN/Docker/offline environments without working mDNS, set -ice-mdns=false or configure -turn-url", droppedMDNSHosts.Load())
+			}
 			return
 		}
 		init := c.ToJSON()
 		scrubbedCand, allow := sanitizeOutboundICECandidate(init.Candidate, a.cfg.ICEMDNS)
 		if !allow {
+			droppedMDNSHosts.Add(1)
 			return
 		}
+		emittedCands.Add(1)
 		var idxPtr *int
 		if init.SDPMLineIndex != nil {
 			v := int(*init.SDPMLineIndex)

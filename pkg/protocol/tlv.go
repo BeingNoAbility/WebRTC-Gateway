@@ -21,13 +21,14 @@ const (
 	MaxSafeExpiresMs int64 = (1 << 53) - 1
 )
 
-// V7 FetchCtx bitfield (RequestHeaders).
+// P2PMux V8 FetchCtx bitfield (RequestHeaders).
+// Bit 1 (0x02, legacy TopLevelNav) is removed and reserved because top-level sandbox
+// document navigation is unconditionally blocked at the Service Worker gate.
 const (
 	FetchCtxSameOriginClient     uint8 = 1 << 0
-	FetchCtxTopLevelNav          uint8 = 1 << 1
 	FetchCtxClientDecompressGzip uint8 = 1 << 2
 	FetchCtxCredentialsOmit      uint8 = 1 << 3
-	FetchCtxValidMask            uint8 = FetchCtxSameOriginClient | FetchCtxTopLevelNav | FetchCtxClientDecompressGzip | FetchCtxCredentialsOmit
+	FetchCtxValidMask            uint8 = FetchCtxSameOriginClient | FetchCtxClientDecompressGzip | FetchCtxCredentialsOmit
 )
 
 // V7 RespFlags bitfield (ResponseHeaders).

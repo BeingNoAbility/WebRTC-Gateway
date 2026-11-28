@@ -12,18 +12,20 @@ import (
 )
 
 const (
-	DefaultStreamWindow       int64 = 512 * 1024
-	MaxStreamInboundBytes     int64 = 2 * 1024 * 1024
-	CreditThresholdBytes      int64 = 128 * 1024
-	CreditThresholdChunks           = 256
-	inboundChunkOverhead      int64 = 64
-	DefaultMaxSessionStreams        = 256
-	DefaultStreamIdleTimeout        = 150 * time.Second
-	DefaultSCTPWriteTimeout         = 30 * time.Second
-	SCTPBackpressureHighWater       = 512 * 1024
-	SCTPBackpressureLowWater        = 128 * 1024
-	acceptQueueSize                 = 256
-	frameSendPoolBufSize            = protocol.HeaderSize + protocol.DefaultChunkSize
+	DefaultStreamWindow          int64 = 512 * 1024
+	MaxStreamInboundBytes        int64 = 2 * 1024 * 1024
+	MaxStreamInboundChunks             = 16384
+	CreditThresholdBytes         int64 = 128 * 1024
+	CreditThresholdChunks              = 256
+	inboundChunkOverhead         int64 = 64
+	DefaultMaxSessionStreams           = 256
+	DefaultHeaderAssemblyTimeout       = 10 * time.Second
+	DefaultStreamIdleTimeout           = 150 * time.Second
+	DefaultSCTPWriteTimeout            = 30 * time.Second
+	SCTPBackpressureHighWater          = 512 * 1024
+	SCTPBackpressureLowWater           = 128 * 1024
+	acceptQueueSize                    = 256
+	frameSendPoolBufSize               = protocol.HeaderSize + protocol.DefaultChunkSize
 )
 
 var (
@@ -49,18 +51,19 @@ type bufferedLowAwareDC interface {
 
 // Config configures a P2PMux V8 multiplexer session.
 type Config struct {
-	PoolSize            int
-	MaxGlobalStreams    int
-	MaxSessionStreams   int
-	SessionBudget       *MemoryBudget
-	GlobalBudget        *MemoryBudget
-	GlobalActiveStreams *atomic.Int64
-	StreamIdleTimeout   time.Duration
-	SCTPWriteTimeout    time.Duration
-	RequireAuth         bool // Defense-in-depth: reject data-lane frames before SetAuthenticated(true)
-	OnControlFrame      func(f *protocol.Frame)
-	OnGoAway            func(code protocol.ErrorCode)
-	OnProtocolError     func(err error)
+	PoolSize              int
+	MaxGlobalStreams      int
+	MaxSessionStreams     int
+	SessionBudget         *MemoryBudget
+	GlobalBudget          *MemoryBudget
+	GlobalActiveStreams   *atomic.Int64
+	HeaderAssemblyTimeout time.Duration
+	StreamIdleTimeout     time.Duration
+	SCTPWriteTimeout      time.Duration
+	RequireAuth           bool // Defense-in-depth: reject data-lane frames before SetAuthenticated(true)
+	OnControlFrame        func(f *protocol.Frame)
+	OnGoAway              func(code protocol.ErrorCode)
+	OnProtocolError       func(err error)
 }
 
 type dataLane struct {
@@ -159,6 +162,9 @@ func New(cfg Config) *Mux {
 	}
 	if cfg.MaxSessionStreams <= 0 {
 		cfg.MaxSessionStreams = DefaultMaxSessionStreams
+	}
+	if cfg.HeaderAssemblyTimeout <= 0 {
+		cfg.HeaderAssemblyTimeout = DefaultHeaderAssemblyTimeout
 	}
 	if cfg.StreamIdleTimeout <= 0 {
 		cfg.StreamIdleTimeout = DefaultStreamIdleTimeout
@@ -610,6 +616,10 @@ func (m *Mux) OpenStream(headersRaw []byte, hasBody bool) (*Stream, error) {
 	if len(headersRaw) == 0 || len(headersRaw) > protocol.MaxTotalHeadersSize {
 		return nil, protocol.ErrInvalidPayloadSize
 	}
+	kind := headersRaw[0]
+	if kind != protocol.StreamKindHTTP && kind != protocol.StreamKindWS {
+		return nil, protocol.ErrInvalidPayloadSize
+	}
 	if !m.tryAcquireStreamSlot() {
 		return nil, protocol.ErrInvalidPayloadSize
 	}
@@ -648,6 +658,7 @@ func (m *Mux) OpenStream(headersRaw []byte, hasBody bool) (*Stream, error) {
 	chosen.openMu.Lock()
 	streamID := m.nextStreamID.Add(1)
 	st := newStream(m, chosen, streamID, true)
+	st.kind.Store(uint32(kind))
 	chosen.mu.Lock()
 	chosen.streams[streamID] = st
 	chosen.mu.Unlock()
@@ -662,19 +673,29 @@ func (m *Mux) OpenStream(headersRaw []byte, hasBody bool) (*Stream, error) {
 }
 
 func (m *Mux) idleReaperLoop() {
-	ticker := time.NewTicker(10 * time.Second)
+	interval := 10 * time.Second
+	if half := m.cfg.HeaderAssemblyTimeout / 2; half < interval {
+		interval = half
+	}
+	if half := m.cfg.StreamIdleTimeout / 2; half < interval {
+		interval = half
+	}
+	if interval < 20*time.Millisecond {
+		interval = 20 * time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-m.closedCh:
 			return
 		case <-ticker.C:
-			cutoff := time.Now().Add(-m.cfg.StreamIdleTimeout)
+			now := time.Now()
 			var stale []*Stream
 			for _, lane := range m.lanes {
 				lane.mu.Lock()
 				for _, st := range lane.streams {
-					if st.isIdleBefore(cutoff) {
+					if st.isStale(now, m.cfg.HeaderAssemblyTimeout, m.cfg.StreamIdleTimeout) {
 						stale = append(stale, st)
 					}
 				}

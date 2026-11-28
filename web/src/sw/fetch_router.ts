@@ -12,6 +12,7 @@
 import { FetchCtxFlag, RespFlag, type HeaderField } from '../protocol/tlv';
 import type { ClientCookieMutation } from '../shared/ipc';
 import {
+  broadcastClientCookieDeltas,
   decodeClientMutationsHeader,
   syncCookieDeltasToClients,
 } from './cookie_sync';
@@ -212,6 +213,7 @@ export function rewriteUpstreamCsp(
     const hasScriptSrcElem = directives.some((d) => d.name === 'script-src-elem');
 
     const renderedDirs: string[] = [];
+    let synthesizedScriptSrcElem: string[] | null = null;
     for (const dir of directives) {
       let tokens = dir.tokens;
       if (CSP_SOURCE_DIRECTIVES.has(dir.name) && backendOrigin) {
@@ -224,12 +226,36 @@ export function rewriteUpstreamCsp(
         });
       }
 
-      const controlsExternalScript =
-        dir.name === 'script-src-elem' ||
-        dir.name === 'script-src' ||
-        (dir.name === 'default-src' && !hasScriptSrc && !hasScriptSrcElem);
-
-      if (controlsExternalScript) {
+      if (dir.name === 'default-src' && !hasScriptSrc && !hasScriptSrcElem) {
+        // P2-1: Keep `default-src` untouched (never relax `default-src 'none'` into `default-src 'self'`
+        // which would open img-src/object-src/frame-src/connect-src). Synthesize a minimal `script-src-elem`
+        // directive to permit ONLY the gateway's external scripts.
+        let dirNonce: string | undefined;
+        for (const tok of tokens) {
+          const m = CSP_NONCE_TOKEN_RE.exec(tok);
+          if (m) {
+            dirNonce = m[1];
+            break;
+          }
+        }
+        if (dirNonce && (!detectedNonce || detectedNonce === dirNonce)) {
+          detectedNonce = dirNonce;
+        } else if (dirNonce && detectedNonce) {
+          const nextToks = [...tokens];
+          const sharedTok = `'nonce-${detectedNonce}'`;
+          if (!nextToks.includes(sharedTok)) nextToks.push(sharedTok);
+          synthesizedScriptSrcElem = nextToks;
+        } else {
+          const nextToks = tokens.filter((tok) => {
+            const low = tok.toLowerCase();
+            return low !== "'none'" && low !== "'strict-dynamic'";
+          });
+          if (!nextToks.some((tok) => tok.toLowerCase() === "'self'")) {
+            nextToks.unshift("'self'");
+          }
+          synthesizedScriptSrcElem = nextToks;
+        }
+      } else if (dir.name === 'script-src-elem' || dir.name === 'script-src') {
         let dirNonce: string | undefined;
         for (const tok of tokens) {
           const m = CSP_NONCE_TOKEN_RE.exec(tok);
@@ -264,6 +290,14 @@ export function rewriteUpstreamCsp(
         if (!deduped.includes(tok)) deduped.push(tok);
       }
       renderedDirs.push(deduped.length > 0 ? `${dir.name} ${deduped.join(' ')}` : dir.name);
+    }
+
+    if (synthesizedScriptSrcElem) {
+      const deduped: string[] = [];
+      for (const tok of synthesizedScriptSrcElem) {
+        if (!deduped.includes(tok)) deduped.push(tok);
+      }
+      renderedDirs.push(`script-src-elem ${deduped.join(' ')}`);
     }
 
     if (renderedDirs.length > 0) {
@@ -445,17 +479,18 @@ export function authorizeFetchRequest(
 
   // 3b. Only cookie-less read-only static `-dir`/`-file` (`CSP: sandbox` opaque origin) lacks
   //     clientId/replacesClientId on in-iframe directory link clicks. Proxy `-target` mode NEVER falls back!
-  const single = registry.getSingleActiveSession();
-  if (!single || !single.meta.isStaticMode) {
+  //     Supports multiple Portal tabs viewing the SAME static nodeId (fails closed on mixed/different nodes).
+  const staticSession = registry.getStaticFallbackSession();
+  if (!staticSession) {
     return {
       allowed: false,
       reason: 'Unbound iframe navigation blocked (missing enter token or bound client)',
     };
   }
   if (input.resultingClientId) {
-    registry.bindClient(input.resultingClientId, single.tabId, false);
+    registry.bindClient(input.resultingClientId, staticSession.tabId, false);
   }
-  return { allowed: true, session: single, sameOriginClient: false };
+  return { allowed: true, session: staticSession, sameOriginClient: false };
 }
 
 export function collectRequestHeaders(
@@ -511,9 +546,6 @@ export function collectRequestHeaders(
   let fetchCtx = 0;
   if (sameOriginClient) {
     fetchCtx |= FetchCtxFlag.SAME_ORIGIN_CLIENT;
-  }
-  if (request.mode === 'navigate' && request.destination === 'document') {
-    fetchCtx |= FetchCtxFlag.TOP_LEVEL_NAV;
   }
   if (typeof DecompressionStream === 'function') {
     fetchCtx |= FetchCtxFlag.CLIENT_DECOMPRESS_GZIP;
@@ -752,9 +784,25 @@ export async function handleFetchEvent(
   }
   if (!auth.allowed) {
     // Emit per-tab P2P_SW_EVICTED recovery hint whenever an existing live nested appFrame/worker
-    // lost its session binding — even if ANOTHER tab already re-attached (sessions.size > 0)!
-    if (event.clientId && req.destination !== 'document') {
-      const liveCaller = await registry.isLiveNestedAppClient(swScope, event.clientId);
+    // lost its session binding — including iframe reload/back/forward where event.clientId is ""
+    // (checking replacesClientId or live nested clients on empty-registry same-origin reloads).
+    if (req.destination !== 'document') {
+      const callerId = event.clientId || replacesClientId;
+      let liveCaller = callerId
+        ? await registry.isLiveNestedAppClient(swScope, callerId)
+        : null;
+      const fetchSite = (req.headers.get('sec-fetch-site') || '').toLowerCase();
+      const isReloadOrHistorySite =
+        fetchSite === '' || fetchSite === 'same-origin' || fetchSite === 'none';
+      if (
+        !liveCaller &&
+        req.mode === 'navigate' &&
+        req.destination === 'iframe' &&
+        registry.getActiveSessionCount() === 0 &&
+        isReloadOrHistorySite
+      ) {
+        liveCaller = await registry.findAnyLiveNestedAppClient(swScope);
+      }
       if (liveCaller) {
         try {
           liveCaller.postMessage({ type: 'P2P_SW_EVICTED' });
@@ -797,11 +845,16 @@ export async function handleFetchEvent(
         session.cookieMirror.commitPendingMutations(peeked.watermark);
       }
       if (inlineMutations.length > 0) {
-        session.cookieMirror.applyClientMutations(inlineMutations, {
+        const inlineDeltas = session.cookieMirror.applyClientMutations(inlineMutations, {
           clientId: event.clientId,
           seq: inlineMutationSeq,
           queueForUpstream: false,
         });
+        if (inlineDeltas.length > 0) {
+          event.waitUntil(
+            broadcastClientCookieDeltas(swScope, session, event.clientId, inlineDeltas).catch(() => {})
+          );
+        }
       }
     }
   };

@@ -306,11 +306,13 @@ func TestFrameBoundariesAndV8Validation(t *testing.T) {
 		t.Fatal("expected > 64 KiB response header block to fail")
 	}
 
-	// Reserved FetchCtx / RespFlags bits MUST be rejected.
-	if _, err := EncodeRequestHeaders(&RequestHeaders{
-		Kind: StreamKindHTTP, FetchCtx: 0x80, Method: "GET", Target: "/",
-	}); err == nil {
-		t.Fatal("expected reserved FetchCtx bit to fail")
+	// Reserved FetchCtx / RespFlags bits (including removed bit 1 / 0x02) MUST be rejected.
+	for _, badCtx := range []uint8{0x02, 0x80} {
+		if _, err := EncodeRequestHeaders(&RequestHeaders{
+			Kind: StreamKindHTTP, FetchCtx: badCtx, Method: "GET", Target: "/",
+		}); err == nil {
+			t.Fatalf("expected reserved FetchCtx bit 0x%02x to fail", badCtx)
+		}
 	}
 	if _, err := EncodeResponseHeaders(&ResponseHeaders{
 		Status: 200, RespFlags: 0x80,

@@ -473,7 +473,7 @@ func TestRegression_P1_WSStreamCloseNeverEmitsTypeDataFin(t *testing.T) {
 	m.AttachLaneDC(0, dc)
 
 	s := newStream(m, m.lanes[0], 1, false)
-	s.SetWebSocket()
+	s.kind.Store(uint32(protocol.StreamKindWS))
 	m.lanes[0].mu.Lock()
 	m.lanes[0].streams[1] = s
 	m.lanes[0].mu.Unlock()
@@ -569,7 +569,6 @@ func TestRegression_P2_RequireAuthHeaderBudgetReleaseAndWSChunkCap(t *testing.T)
 			resetSent.Store(true)
 		}
 	}})
-	st.SetWebSocket()
 	// Feed MaxWSMessageChunks + 1 tiny 1-byte chunks (reading concurrently so recvInFlightPayload stays low).
 	doneRead := make(chan struct{})
 	go func() {
@@ -613,3 +612,177 @@ func (c *captureDC) Send(b []byte) error {
 }
 func (c *captureDC) BufferedAmount() uint64 { return 0 }
 func (c *captureDC) Close() error           { return nil }
+
+func TestRegression_P0_3_SingleStreamZeroByteWSCannotExhaustSessionBudget(t *testing.T) {
+	var resetCode atomic.Uint32
+	m := New(Config{PoolSize: 1}) // default 32 MiB session budget
+	defer m.Close()
+	m.AttachLaneDC(0, &captureDC{onSend: func(b []byte) {
+		if f, err := protocol.Decode(b); err == nil && f.Type == protocol.TypeReset {
+			if code, cerr := protocol.DecodeResetPayload(f.Payload); cerr == nil {
+				resetCode.Store(uint32(code))
+			}
+		}
+	}})
+
+	wsReq, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
+		Kind: protocol.StreamKindWS, Method: "GET", Target: "/ws",
+	})
+	hdrFrame, _ := (&protocol.Frame{
+		StreamID: 1, Type: protocol.TypeHeaders, Flags: protocol.FlagNone, Payload: wsReq,
+	}).Encode()
+	m.HandleLaneMessage(0, hdrFrame)
+	st, err := m.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.TakeHeadersRaw()
+
+	emptyWS, _ := (&protocol.Frame{
+		StreamID: 1, Type: protocol.TypeWSText, Flags: protocol.FlagMsgFin, Payload: nil,
+	}).Encode()
+	for i := 0; i < MaxStreamInboundChunks+100; i++ {
+		if st.Context().Err() != nil {
+			break
+		}
+		m.HandleLaneMessage(0, emptyWS)
+	}
+	if protocol.ErrorCode(resetCode.Load()) != protocol.ErrCodeFlowControlError {
+		t.Fatalf("P0-3 regression: expected FLOW_CONTROL_ERROR reset on 0B WS flood, got code=%d", resetCode.Load())
+	}
+	if m.SessionMemUsed() != 0 {
+		t.Fatalf("P0-3 regression: session memory leaked after reset: %d", m.SessionMemUsed())
+	}
+}
+
+func TestRegression_P1_1_HTTPStreamRejectsWSFramesAndPreservesCloseFin(t *testing.T) {
+	var sentMu sync.Mutex
+	var resetCodes []protocol.ErrorCode
+	m := New(Config{PoolSize: 1})
+	defer m.Close()
+	m.AttachLaneDC(0, &captureDC{onSend: func(b []byte) {
+		if f, err := protocol.Decode(b); err == nil && f.Type == protocol.TypeReset {
+			if code, cerr := protocol.DecodeResetPayload(f.Payload); cerr == nil {
+				sentMu.Lock()
+				resetCodes = append(resetCodes, code)
+				sentMu.Unlock()
+			}
+		}
+	}})
+
+	httpReq, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
+		Kind: protocol.StreamKindHTTP, Method: "POST", Target: "/upload",
+	})
+	hdrFrame, _ := (&protocol.Frame{
+		StreamID: 1, Type: protocol.TypeHeaders, Flags: protocol.FlagNone, Payload: httpReq,
+	}).Encode()
+	m.HandleLaneMessage(0, hdrFrame)
+	st, err := m.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject illegal WS_TEXT frame on an HTTP stream -> must Reset(PROTOCOL_ERROR) immediately!
+	wsInject, _ := (&protocol.Frame{
+		StreamID: 1, Type: protocol.TypeWSText, Flags: protocol.FlagMsgFin, Payload: []byte("spoof"),
+	}).Encode()
+	m.HandleLaneMessage(0, wsInject)
+
+	if _, rerr := io.ReadAll(st); rerr == nil {
+		t.Fatal("P1-1 regression: HTTP Stream.Read accepted spoofed WS_TEXT payload")
+	}
+	sentMu.Lock()
+	defer sentMu.Unlock()
+	if len(resetCodes) == 0 || resetCodes[0] != protocol.ErrCodeProtocolError {
+		t.Fatalf("P1-1 regression: expected PROTOCOL_ERROR reset on WS_TEXT in HTTP stream, got %v", resetCodes)
+	}
+}
+
+func TestRegression_P1_2_IncompleteHeadersRejectsCreditAndEnforcesHardTimeout(t *testing.T) {
+	// 1. CREDIT arriving before HEADERS completes must immediately reset with PROTOCOL_ERROR.
+	var resetCode atomic.Uint32
+	m1 := New(Config{PoolSize: 1})
+	defer m1.Close()
+	m1.AttachLaneDC(0, &captureDC{onSend: func(b []byte) {
+		if f, err := protocol.Decode(b); err == nil && f.Type == protocol.TypeReset {
+			if code, cerr := protocol.DecodeResetPayload(f.Payload); cerr == nil {
+				resetCode.Store(uint32(code))
+			}
+		}
+	}})
+	partHdr, _ := (&protocol.Frame{
+		StreamID: 1, Type: protocol.TypeHeaders, Flags: protocol.FlagMore, Payload: []byte{0x01},
+	}).Encode()
+	m1.HandleLaneMessage(0, partHdr)
+	creditPay, _ := protocol.EncodeCreditPayload(1)
+	credit1, _ := (&protocol.Frame{
+		StreamID: 1, Type: protocol.TypeCredit, Payload: creditPay,
+	}).Encode()
+	m1.HandleLaneMessage(0, credit1)
+	if protocol.ErrorCode(resetCode.Load()) != protocol.ErrCodeProtocolError {
+		t.Fatalf("P1-2 regression: CREDIT on incomplete HEADERS must trigger PROTOCOL_ERROR, got %d", resetCode.Load())
+	}
+	if m1.activeStreams.Load() != 0 {
+		t.Fatalf("P1-2 regression: stream slot leaked after premature CREDIT: %d", m1.activeStreams.Load())
+	}
+
+	// 2. Unfinished HEADERS stream must be reaped by HeaderAssemblyTimeout even when idle timeout is long.
+	m2 := New(Config{
+		PoolSize:              1,
+		HeaderAssemblyTimeout: 60 * time.Millisecond,
+		StreamIdleTimeout:     5 * time.Second,
+	})
+	defer m2.Close()
+	m2.AttachLaneDC(0, &captureDC{})
+	m2.HandleLaneMessage(0, partHdr)
+	if m2.activeStreams.Load() != 1 {
+		t.Fatalf("expected 1 active partial stream, got %d", m2.activeStreams.Load())
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if m2.activeStreams.Load() == 0 {
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatalf("P1-2 regression: unfinished HEADERS stream was not reaped within HeaderAssemblyTimeout (active=%d)", m2.activeStreams.Load())
+}
+
+func TestRegression_P1_3_HTTPCloseDoesNotStallBehindBlockedWrite(t *testing.T) {
+	cli, srv, cLanes, _ := newPair(t, 1, Config{}, Config{SCTPWriteTimeout: 500 * time.Millisecond})
+	reqTLV, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
+		Kind: protocol.StreamKindHTTP, Method: "POST", Target: "/slow",
+	})
+	cs, err := cli.OpenStream(reqTLV, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss, err := srv.AcceptStream(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+
+	cLanes[0].setBuffered(SCTPBackpressureHighWater + 1024)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, werr := cs.Write([]byte("blocked-write"))
+		writeDone <- werr
+	}()
+	time.Sleep(20 * time.Millisecond)
+
+	start := time.Now()
+	_ = cs.Close()
+	elapsed := time.Since(start)
+	if elapsed > 150*time.Millisecond {
+		t.Fatalf("P1-3 regression: HTTP Close() stalled behind blocked Write() for %v", elapsed)
+	}
+	select {
+	case werr := <-writeDone:
+		if werr == nil {
+			t.Fatal("expected blocked Write() to abort when Close() ran")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("P1-3 regression: blocked Write() did not wake after Close()")
+	}
+}

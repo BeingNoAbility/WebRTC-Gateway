@@ -110,8 +110,17 @@ export function installFetchAndXhrPatch(
         headers.set('x-p2p-cookie-seq', String(pending.maxSeq));
         promise = origFetch(rewrittenUrl, { ...init, headers });
       }
-    } else if (isSameCanonicalRequestUrl(rewrittenUrl, input.url, document.baseURI) && !attachMuts) {
-      promise = origFetch(input, init);
+    } else if (isSameCanonicalRequestUrl(rewrittenUrl, input.url, document.baseURI)) {
+      if (!attachMuts) {
+        promise = origFetch(input, init);
+      } else {
+        // Pass existing Request directly with merged headers (no body/ReadableStream rebuild)
+        // so Firefox (no ReadableStream request bodies) and Chrome `keepalive: true` work seamlessly.
+        const headers = new Headers(init?.headers ?? input.headers);
+        headers.set('x-p2p-cookie-mutations', pending.b64);
+        headers.set('x-p2p-cookie-seq', String(pending.maxSeq));
+        promise = origFetch(input, { ...init, headers });
+      }
     } else {
       const extra = attachMuts
         ? {

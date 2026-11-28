@@ -427,16 +427,46 @@ func TestRegression_M20_SWRequiresWorkerHeaderAndPreRenderedETag(t *testing.T) {
 
 func TestRegression_M22_TokenBucketFailClosedOnActiveSaturation(t *testing.T) {
 	lim := NewIPRateLimiter(64, 120)
-	// Saturate all maxTrackedIPs upgrade buckets with actively consumed buckets.
+	// Use a small burst so exhausting all 16,384 buckets to actively rate-limited (< 1.0 tokens) is fast.
+	lim.maxUpgrPer60s = 1
 	for i := 0; i < maxTrackedIPs; i++ {
 		ip := fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xff, (i>>8)&0xff, i&0xff)
 		if !lim.AllowUpgrade(ip) {
 			t.Fatalf("bucket %d should succeed before saturation", i)
 		}
 	}
-	// A brand-new unseen IP MUST fail closed while all 16,384 tracked buckets remain actively non-full.
+	// All 16,384 tracked buckets are now genuinely exhausted (< 1.0 tokens); unseen IP MUST fail closed.
 	if lim.AllowUpgrade("198.51.100.254") {
-		t.Fatal("M-22 regression: AllowUpgrade evicted an active rate-limited bucket instead of failing closed")
+		t.Fatal("M-22 regression: AllowUpgrade evicted an actively rate-limited bucket instead of failing closed")
+	}
+}
+
+func TestRegression_P0_2_SingleProbeSprayDoesNotLockOutLegitVisitors(t *testing.T) {
+	lim := NewIPRateLimiter(64, 120)
+	// First throttle a few real attacker IPs (0 tokens left) so they sit at the LRU tail.
+	for a := 0; a < 4; a++ {
+		attacker := fmt.Sprintf("203.0.113.%d", a+1)
+		for j := 0; j < DefaultMaxIPUpgrades+2; j++ {
+			_ = lim.AllowUpgrade(attacker)
+		}
+		if lim.AllowUpgrade(attacker) {
+			t.Fatalf("attacker %s should be rate-limited", attacker)
+		}
+	}
+	// Fill remaining slots with 1-probe-per-key IPv6 /64 spray (each still holds 119/120 tokens).
+	for i := 0; i < maxTrackedIPs; i++ {
+		ip := fmt.Sprintf("2001:db8:%x:%x::1", i>>8, i&0xff)
+		if !lim.AllowUpgrade(ip) {
+			t.Fatalf("single-probe key %d unexpectedly rejected", i)
+		}
+	}
+	// Unseen legitimate visitor MUST still pass (healthy 119/120 buckets evicted; throttled attackers preserved).
+	if !lim.AllowUpgrade("198.51.100.42") {
+		t.Fatal("P0-2 regression: single-probe IPv6 spray globally locked out legitimate unseen visitor")
+	}
+	// Previously throttled attackers must STILL be rate-limited (never evicted by healthy-bucket probe).
+	if lim.AllowUpgrade("203.0.113.1") {
+		t.Fatal("P0-2 regression: throttled attacker bucket was evicted")
 	}
 }
 

@@ -54,6 +54,7 @@ export interface CapMintResult {
   error?: string;
   token?: string;
   jti?: string;
+  revoked?: boolean;
   pkHash?: string;
   records?: CapabilityRecordDTO[];
   total?: number;
@@ -167,6 +168,10 @@ export class AuthClient {
     this.currentShareVB64 = '';
     this.waitingForPasswordOnChallenge = false;
     return this.channelGen;
+  }
+
+  clearCookieResumeToken(): void {
+    this.cookieResumeToken = '';
   }
 
   resetChannel(reason: string): void {
@@ -388,6 +393,7 @@ export class AuthClient {
           error: typeof parsed.error === 'string' ? parsed.error : undefined,
           token: typeof parsed.token === 'string' ? parsed.token : undefined,
           jti,
+          revoked: typeof parsed.revoked === 'boolean' ? parsed.revoked : undefined,
           pkHash: typeof parsed.pk_hash === 'string' ? parsed.pk_hash : undefined,
           records,
           total: typeof parsed.total === 'number' ? parsed.total : undefined,

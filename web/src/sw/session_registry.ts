@@ -533,6 +533,30 @@ export class SessionRegistry {
     return this.sessions.values().next().value ?? null;
   }
 
+  /**
+   * Returns a read-only static (`-dir`/`-file`) session for opaque-origin iframe links where
+   * `CSP: sandbox` omits `clientId` and `replacesClientId`. Permits multiple Portal tabs viewing
+   * the SAME static `nodeId` (choosing the most recently attached tab), while failing closed
+   * (`null`) if any active session is non-static or targets a different `nodeId`.
+   */
+  getStaticFallbackSession(): TabSession | null {
+    if (this.sessions.size === 0) return null;
+    let chosen: TabSession | null = null;
+    let sharedNodeId = '';
+    for (const sess of this.sessions.values()) {
+      if (!sess.meta.isStaticMode) return null;
+      if (!sharedNodeId) {
+        sharedNodeId = sess.meta.nodeId;
+      } else if (sess.meta.nodeId !== sharedNodeId) {
+        return null;
+      }
+      if (!chosen || sess.attachedAt >= chosen.attachedAt) {
+        chosen = sess;
+      }
+    }
+    return chosen;
+  }
+
   removeSession(tabId: string): void {
     const sess = this.sessions.get(tabId);
     if (!sess) return;
@@ -717,6 +741,32 @@ export class SessionRegistry {
     }
     if (caller.type === 'worker' || caller.type === 'sharedworker') {
       return caller;
+    }
+    return null;
+  }
+
+  async findAnyLiveNestedAppClient(swScope: ServiceWorkerGlobalScope): Promise<Client | null> {
+    if (!swScope?.clients || typeof swScope.clients.matchAll !== 'function') {
+      return null;
+    }
+    let list: readonly Client[];
+    try {
+      list = await swScope.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    } catch {
+      return null;
+    }
+    for (const c of list) {
+      if (typeof c.url !== 'string') continue;
+      try {
+        const cu = new URL(c.url);
+        if (cu.origin !== swScope.location.origin) continue;
+        if (cu.pathname.startsWith('/__p2p_gw__/')) continue;
+      } catch {
+        continue;
+      }
+      if ((c as WindowClient).frameType === 'nested') {
+        return c;
+      }
     }
     return null;
   }
