@@ -8,6 +8,21 @@ Pre-release versions (tags containing `-`, such as `v5.0.0-alpha.3`) are publish
 
 ## [Unreleased]
 
+### Changed
+- **P2PMux V8 Unified Data Plane**: Replaces the V7 `1 Ctrl` + `32` HTTP pool layout with 1 fragmented control channel (`id=0` `p2pctrl`) + 12 ordered multiplexed channels (`id=1..12` `p2p_01..p2p_12`) carrying HTTP and streaming WebSocket under monotonic `StreamID`s (zero dynamic DCEP channels); 8-byte fixed frame header, payload-byte `CREDIT` flow control, native Transferable `ReadableStream` IPC, and streaming gzip via `compress/gzip` / `DecompressionStream('gzip')`. Per-stream memory budgets (`memCost` + chunk cap), immutable HTTP/WS stream kind after `HEADERS`, a 10 s deadline for incomplete `HEADERS`, `MaxWSMessageChunks` (16384), and TS `PoolStream` 2 MiB / 32 MiB inbound and `WSStream` 16 MiB outbound caps are enforced.
+- **Startup-Explicit Origins**: `cmd/signal` requires explicit `-portal-origin` + `-sandbox-origin` (loopback requires explicit `-dev`), with Tier 1 cross-site wildcard and Tier 2 restricted isolation (fixed single-domain cross-site or `-allow-same-site-sandbox`); the Portal shows a Tier 2 warning banner.
+- **Service Worker Navigation & Static Gate**: Single-use `P2P_EXPECT_NAV` / `P2P_NAV_SETTLED` fallback for Firefox and Safari reload/Back/Forward; recovery from SW eviction; `-dir` / `-file` static content is served under a script-free `sandbox allow-same-origin` CSP with no SW bypass path; the legacy `data-p2p-boot` fallback is removed.
+- **Unified Cookie Mirror**: `CookieMirrorStore` and Go `ProxyCookieJar` share `Secure` / `__Host-` / `__Secure-` prefix rules; TLV cookie op byte packs `Secure` as bit 7 (`0x80`) and `FetchCtx` bits are compacted (bit 0 `SameOriginClient`, bit 1 `ClientDecompressGzip`, bit 2 `CredentialsOmit`); `HEADERS` carrying both `FlagMore` and `FlagFin` is rejected. Go/TS golden vectors updated.
+- **Signaling & Agent Hardening**: Per-node lockout scoped to configured node IDs; global saturation kill-switch disabled for machine secrets of at least 128 bits; IPv6 single-probe sprays no longer evict unseen visitors from the rate-limit table; TLS certificate hot-reload verifies inode identity (`os.SameFile`); `HEALTH_URL` and agent exit-code-2 healthcheck fallback; RFC 6455 WebSocket subprotocol validation; `CAP_RESP` revoke schema (`jti` + boolean `revoked`).
+
+### Added
+- `-revoke-cap` Agent CLI flag to revoke a capability token by JTI in the persistent state file and exit.
+- Zero-dependency pure-JS RFC 8032 Ed25519 verification fallback for browsers without WebCrypto Ed25519 support, plus a clear `NotSupportedError` diagnostic.
+- mDNS zero-candidate diagnostic warning and a warning when embedded web assets are missing.
+
+### Fixed
+- `Mux.Close` vs `HandleLaneMessage` permanent stream/budget leak (`ErrStreamLimitReached`, bounded `Close()` backpressure wait); WebSocket `WS_CLOSE` mid-message truncation; silent HTTP 200 truncation on mid-stream upstream errors in the decompression pipeline; `ProxyCookieJar.ExportNonHttpOnlySnapshot` data race; `CapabilityStore.Track` now persists atomically before memory commit; the 512 MiB decompression hard cap is removed.
+
 ## [v5.0.0-alpha.3] - 2026-11-27
 
 > **Pre-release (WebRTC Gateway V7 Architecture).** Moves `:v5.0.0-alpha.3`, `:5.0.0-alpha.3`, and `:alpha`; `:latest` is not moved.

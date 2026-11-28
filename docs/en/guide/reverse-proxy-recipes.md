@@ -1,5 +1,7 @@
 # Local Reverse-Proxy & Adapter Recipes
 
+> Audience: Agent administrators whose proxied application depends on virtual hosts, multiple origins, or special headers and who work with Nginx / Caddy.
+
 Each Agent locks strictly to a single exact `-target` origin (Pure Pipe neutrality; see [Project Constitution](../CONSTITUTION.md) and [Design Boundaries and Trade-offs](../DESIGN_TRADEOFFS.md)). When an application requires multi-origin API aggregation, hardcoded URL rewriting, path prefix stripping, or custom upstream header injection, run a standard local reverse proxy (Nginx or Caddy) behind `-target` to handle those application-layer rules.
 
 > [!NOTE]

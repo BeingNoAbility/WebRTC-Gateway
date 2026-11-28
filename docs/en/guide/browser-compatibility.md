@@ -1,5 +1,7 @@
 # Browser Compatibility Matrix
 
+> Audience: users and operators who need to confirm which visitor browsers are supported or to debug browser-specific behavior.
+
 WebRTC Gateway runs strictly on standard Web APIs (WebRTC DataChannel, Service Worker, Fetch, Streams, and WebCrypto Ed25519) with no browser extensions or custom root CAs. This page summarizes support tiers, verification coverage, and platform limits.
 
 ---

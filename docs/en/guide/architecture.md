@@ -1,5 +1,7 @@
 # Architecture and Core Design
 
+> Audience: evaluators and contributors who want to understand component roles, data flow, and sandbox isolation; readers who only want to deploy can skip this page at first.
+
 WebRTC Gateway consists of three decoupled components:
 1. **Browser Client (Modular Web Runtime)**: Independent Portal (content-hashed `/__p2p_gw__/portal.<hash>.js` and `portal.<hash>.css`), ephemeral bootstrap bridge (`/__p2p_gw__/bridge.html` and `/__p2p_gw__/assets/bridge.<hash>.js`), modular Service Worker (`/__p2p_gw__/sw.js`), external bootstrap script (`/__p2p_gw__/boot.js`), modular pure-compatibility DOM and in-memory `CookieMirror` patch (`/__p2p_gw__/assets/patch.<hash>.js`), and TypeScript P2PMux V8;
 2. **Signaling Server (Single Authoritative Go Signal)**: Standalone Go binary (`cmd/signal`, pre-rendering embedded content-hashed frontend assets and SHA-256 ETags at startup under `-tags embedweb`) that brokers structured `SessionDescriptor` Offer/Answer payloads and ICE candidates without ever relaying or decoding application traffic;

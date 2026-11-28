@@ -1,5 +1,7 @@
 # 浏览器兼容性矩阵 (Browser Compatibility Matrix)
 
+> 适合：需要确认访客浏览器是否受支持，或排查浏览器特有行为的使用者与运维者。
+
 WebRTC Gateway 基于标准 Web 规范（WebRTC DataChannel、Service Worker、Fetch、Streams 与 WebCrypto Ed25519）运行，无需浏览器插件或私有根证书。本页说明各浏览器的支持分级、验证依据与平台限制。
 
 ---

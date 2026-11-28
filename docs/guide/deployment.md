@@ -1,5 +1,7 @@
 # 生产部署与两档沙箱规划 (Production Deployment)
 
+> 适合：准备把信令与门户服务发布到公网的运维者，用于选择部署档位并规划域名、证书与反向代理。
+
 WebRTC Gateway 以单一权威 Go 信令服务（`cmd/signal`）于启动期预渲染内容哈希前端资产并统一交付信令服务，提供两档明确的沙箱隔离模式（均在启动期显式配置 `-portal-origin` 与 `-sandbox-origin`，本地回环使用 `-dev`）。非回环生产部署需按以下规范准备域名、证书、持久化状态与容器配置。按具体拓扑与业务需求快速选用模板见 [服务端典型用例](./server-use-cases) 与 [Agent 典型用例](./agent-use-cases)。
 
 ---

@@ -1,5 +1,7 @@
 # Read-Only Static Directory and File Adapter (`-dir` / `-file`)
 
+> Audience: Agent administrators who want to share a directory or single file read-only with `-dir` / `-file`.
+
 `-dir` and `-file` plug a minimal Go `os.Root` read-only `http.Handler` (`pkg/proxy/static_fs.go`) behind `HTTPProxy` via an in-process `RoundTripper`, sharing the exact same P2PMux V8 framing, flow control, compression, and capability-scope enforcement as HTTP reverse proxying.
 
 ---

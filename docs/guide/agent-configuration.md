@@ -1,5 +1,7 @@
 # Agent 与信令服务端配置参考
 
+> 适合：需要查某个命令行参数、环境变量或 YAML 字段的 Agent 与信令服务运维者。首次使用请先读[五分钟上手](./quickstart)。
+
 WebRTC Gateway 采用统一配置加载器（`pkg/config`）：
 - **优先级**：命令行参数 > 环境变量 / `*_FILE` 密钥文件 > 显式配置文件；
 - **绝不自动加载当前目录配置文件**：仅当显式传入 `-config <path>` 或设置 `CONFIG_FILE` 时读取 YAML/JSON，并启用 `KnownFields(true)` 拒绝拼写错误或未知字段；
@@ -43,6 +45,7 @@ WebRTC Gateway 采用统一配置加载器（`pkg/config`）：
 | `-mint-link` | — | — | 空 | 离线签发 Ed25519 能力分享链接（如 `2h`、`7d`）并退出 |
 | `-mint-path` / `-mint-readonly` / `-mint-max-conns` | — | — | 空 / `false` / `0` | 能力令牌路径前缀、只读与并发连接限制 |
 | `-revoke-cap` | — | — | 空 | 按 JTI 离线吊销持久化状态文件中的能力令牌并退出（支持跨进程锁合并） |
+| `-version` / `-v` | — | — | `false` | 打印版本号并退出 |
 | `-health` / `-health-url` | — | — | `false` / 空 | 执行容器健康检查并退出 |
 
 ---
@@ -70,4 +73,5 @@ WebRTC Gateway 采用统一配置加载器（`pkg/config`）：
 | `-max-ip-conns` / `-max-ip-msgs` | `MAX_IP_CONNS` / `MAX_IP_MSGS` | `max_ip_conns` / `max_ip_msgs` | `64` / `120` | 每 IP（IPv6 按 `/64` 聚合）并发 WS 上限与每 10 秒消息上限 |
 | `-static` | `STATIC_DIR` | `static_dir` | 空 | 外部前端静态目录（未设时使用编译期内嵌 `web.DistFS`） |
 | `-metrics-addr` | `METRICS_ADDR` | `metrics_addr` | 空 | Prometheus `/metrics` 监听地址 |
+| `-version` / `-v` | — | — | `false` | 打印版本号并退出 |
 | `-health` / `-health-url` | — | — | `false` / 空 | 探测 `/healthz` 健康状态并退出 |

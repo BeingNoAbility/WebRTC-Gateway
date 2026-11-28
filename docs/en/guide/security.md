@@ -1,5 +1,7 @@
 # Security and Cryptographic Boundaries
 
+> Audience: users, evaluators, and contributors assessing security boundaries, the threat model, and the password and capability-token mechanisms.
+
 WebRTC Gateway enforces defense-in-depth with explicit trust roots spanning structured SDP synthesis, Ed25519 node identity, in-DTLS RFC 9383 SPAKE2+ authentication, cross-site dual-domain sandboxing, and strict proxy validation.
 
 ---

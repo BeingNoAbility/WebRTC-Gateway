@@ -1,5 +1,7 @@
 # 静态目录与单文件只读适配器 (`-dir` / `-file`)
 
+> 适合：想用 `-dir` / `-file` 只读分享目录或单个文件的 Agent 管理员。
+
 `-dir` 与 `-file` 通过基于 Go `os.Root` 的极简只读 `http.Handler`（`pkg/proxy/static_fs.go`）经进程内 `RoundTripper` 直接挂载在 `HTTPProxy` 之后，与常规 HTTP 反代共享同一套 P2PMux V8 协议、流控、压缩与能力令牌权限校验。
 
 ---

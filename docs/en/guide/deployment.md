@@ -1,5 +1,7 @@
 # Production Deployment and 2-Tier Sandbox
 
+> Audience: operators publishing the signaling and portal service to the internet, to choose a deployment tier and plan domains, certificates, and reverse proxies.
+
 WebRTC Gateway runs on a single authoritative Go signaling server (`cmd/signal`) that pre-renders embedded content-hashed frontend assets at startup and serves WebSocket signaling, offering two explicit sandbox isolation tiers configured via explicit startup origins (`-portal-origin` and `-sandbox-origin`, or `-dev` on loopback). Configure domains, TLS certificates, persistent state, and hardened containers following the layout below. For ready-to-use templates by topology and workload, see [Server Use Cases](./server-use-cases) and [Agent Use Cases](./agent-use-cases).
 
 ---

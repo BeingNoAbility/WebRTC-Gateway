@@ -1,5 +1,7 @@
 # P2PMux V8 传输层多路复用协议规范
 
+> 适合：实现或审查线协议的贡献者；普通使用者无需阅读。
+
 > **协议版本**：P2PMux V8（对应 `test/fixtures/protocol_v8_golden_vectors.json` 中的 `"version": 8`）  
 > **底层承载**：单一 WebRTC `RTCPeerConnection` + `1` 条分片控制通道 + `12` 条预协商有序多路复用数据通道（统一承载 HTTP 与流式 WebSocket，SCTP over DTLS，RFC 8831 / RFC 8261）  
 > **参考实现**：Go [`pkg/protocol/`](https://github.com/BeingNoAbility/WebRTC-Gateway/blob/main/pkg/protocol/frame.go)、[`pkg/mux/`](https://github.com/BeingNoAbility/WebRTC-Gateway/blob/main/pkg/mux/mux.go)；TypeScript [`web/src/protocol/`](https://github.com/BeingNoAbility/WebRTC-Gateway/blob/main/web/src/protocol/mux.ts)
@@ -134,5 +136,5 @@ Close:
 
 - **纯载荷字节信用流控、SCTP 水位与微包防死锁**：每条流初始发送窗口 `512 KiB`，发送窗口等待超时 `30 s`（超时立即 `Reset`）；单条 DataChannel 写缓冲遵循高水位 `512 KiB` / 低水位 `128 KiB` 背压控制；消费方在同一通道发送纯载荷字节 `CREDIT`（绝不把内部 64B 结构开销混入线协议信用，且在累计达到 `128 KiB` 或 `256` 个分片时即触发补窗，避免海量 13B SSE 微包触发窗口耗尽或误重置），浏览器 `PoolStream.ackConsumed` 严格钳制补窗不超过实际已投递未确认载荷字节数。
 - **三层入站内存预算、64B 帧开销记账、等长分配与无条件归还**：本地入站内存记账与线协议 `CREDIT` 严格解耦——Go 与 TS 端对入站数据与 WS 分片执行等长分配拷贝（`cap == len`），本地按 `len(payload) + 64` 计入每流 `2 MiB`（且单流排队分片上限 `16384`）、每访客会话 `32 MiB`、Go 跨会话全局 `256 MiB` 三层入站上限（防止 0 字节或微包堆放大攻击）；服务端未完成组装的 `HEADERS` 受 `10 s` 不可续命硬超时约束且拒绝提前 `CREDIT`；流类型在首个完整 `HEADERS` 时冻结为 HTTP 或 WS 不可变；流 `Close()` / `Reset()` 时无条件清扫未读入站缓冲并归还预算。
-- **确定性并发限额与无锁重置**：每会话限制并发活跃 HTTP/WS 流总数（全局流上限默认 `512`，WS 上限 `64`）；HTTP 代理与浏览器均依据响应/请求 `HEADERS` 是否携带 `FlagFin` 判断是否存在消息体（`HasRequestBody()` / `hasResponseBody`），避免响应头与体在同微任务到达时误判空体；`Reset()` 立即无锁唤醒阻塞读写协程并确保不向已重置流再触发正常结束回调。
+- **确定性并发限额与无锁重置**：并发活跃 HTTP/WS 流同时受会话与全局上限约束（每会话默认 `256`，Agent 全局默认 `512`，WS 上限 `64`）；HTTP 代理与浏览器均依据响应/请求 `HEADERS` 是否携带 `FlagFin` 判断是否存在消息体（`HasRequestBody()` / `hasResponseBody`），避免响应头与体在同微任务到达时误判空体；`Reset()` 立即无锁唤醒阻塞读写协程并确保不向已重置流再触发正常结束回调。
 - **跨语言黄金测试向量**：Go 端 [`TestV8GoldenVectors`](https://github.com/BeingNoAbility/WebRTC-Gateway/blob/main/pkg/protocol/protocol_test.go) 与 TS 端 `test/web/protocol.test.mjs` 共享 `test/fixtures/protocol_v8_golden_vectors.json`（含 UTF-8 多字节字符、BOM 保留、V8 TLV、以及 RFC 9383 Appendix C.1 官方向量与 SPAKE2+ KDF 跨语言校验），保证两端编解码与密码学派生逐字节一致。
