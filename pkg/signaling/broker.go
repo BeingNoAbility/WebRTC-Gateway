@@ -26,7 +26,9 @@ const (
 	DefaultBoundKeyOfflineTTL   = 7 * 24 * time.Hour
 	MaxBoundNodeKeys            = 10000
 	MaxGlobalUnknownWaiting     = 512 // Cap total waiting clients targeting completely unknown nodes
-	brokerCloseAllGraceTimeout  = 2 * time.Second
+	MaxWaitingPerIPPerNode      = 8   // Cap waiting clients per IP (/32 or /64) per offline node
+	MaxClientsPerIPPerNode      = 32  // Cap concurrent clients per IP (/32 or /64) per online node
+	brokerCloseAllGraceTimeout  = time.Second
 )
 
 var (
@@ -55,7 +57,7 @@ type SignalBroker struct {
 	clients              map[string]*Session            // sessionID -> Client
 	nodeClients          map[string]map[string]*Session // nodeID -> sessionID -> Client
 	boundKeys            map[string]*boundKeyEntry      // nodeID -> Ed25519 public key (no secrets!)
-	boundKeysStore       *state.AtomicFileStore
+	boundKeysStore       *state.LatestFileWriter
 	boundKeysVer         uint64
 	halfOpenTimeout      time.Duration
 	offlineWaitTimeout   time.Duration
@@ -73,9 +75,9 @@ func NewSignalBroker() *SignalBroker {
 
 func NewSignalBrokerWithFile(boundKeysFile string) (*SignalBroker, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	var store *state.AtomicFileStore
+	var store *state.LatestFileWriter
 	if boundKeysFile != "" {
-		store = state.NewAtomicFileStore(boundKeysFile)
+		store = state.NewLatestFileWriter(boundKeysFile)
 		if err := store.CheckWritable(); err != nil {
 			cancel()
 			return nil, err
@@ -221,30 +223,42 @@ func (b *SignalBroker) RegisterAgent(sess *Session, pk ed25519.PublicKey, requir
 		}
 	}
 
-	if entry, ok := b.boundKeys[sess.NodeID]; ok {
-		if !bytes.Equal(entry.pk, pk) {
-			if !allowForceRekey {
-				b.mu.Unlock()
-				return ErrNodeOwnershipConflict
+	entry, hasBound := b.boundKeys[sess.NodeID]
+	if hasBound {
+		if !bytes.Equal(entry.pk, pk) && !allowForceRekey {
+			b.mu.Unlock()
+			return ErrNodeOwnershipConflict
+		}
+	} else if len(b.boundKeys) >= MaxBoundNodeKeys {
+		for nid, ent := range b.boundKeys {
+			if _, online := b.agents[nid]; online {
+				continue
 			}
+			if !ent.lastOffline.IsZero() && now.Sub(ent.lastOffline) > DefaultBoundKeyOfflineTTL {
+				delete(b.boundKeys, nid)
+			}
+		}
+		if len(b.boundKeys) >= MaxBoundNodeKeys {
+			b.mu.Unlock()
+			return ErrBoundKeyCapacityFull
+		}
+	}
+
+	// Atomically enqueue RegisteredDTO inside b.mu BEFORE mutating b.boundKeys/b.agents or
+	// broadcasting PeerStatusDTO so no OfferRelayDTO can ever overtake RegisteredDTO.
+	if sess.outCh != nil {
+		if err := sess.TrySend(RegisteredDTO{Type: TypeRegistered, NodeID: sess.NodeID}); err != nil {
+			b.mu.Unlock()
+			return err
+		}
+	}
+
+	if hasBound {
+		if !bytes.Equal(entry.pk, pk) {
 			entry.pk = append(ed25519.PublicKey(nil), pk...)
 		}
 		entry.lastOffline = time.Time{}
 	} else {
-		if len(b.boundKeys) >= MaxBoundNodeKeys {
-			for nid, ent := range b.boundKeys {
-				if _, online := b.agents[nid]; online {
-					continue
-				}
-				if !ent.lastOffline.IsZero() && now.Sub(ent.lastOffline) > DefaultBoundKeyOfflineTTL {
-					delete(b.boundKeys, nid)
-				}
-			}
-			if len(b.boundKeys) >= MaxBoundNodeKeys {
-				b.mu.Unlock()
-				return ErrBoundKeyCapacityFull
-			}
-		}
 		b.boundKeys[sess.NodeID] = &boundKeyEntry{pk: append(ed25519.PublicKey(nil), pk...)}
 	}
 
@@ -293,8 +307,15 @@ func (b *SignalBroker) JoinClient(sess *Session) (online bool, requireVisitorAut
 
 	agent := b.agents[sess.NodeID]
 	cmap := b.nodeClients[sess.NodeID]
+	ipKey := RateLimitKey(sess.ClientIP)
+	ipCountOnNode := 0
+	for _, existing := range cmap {
+		if RateLimitKey(existing.ClientIP) == ipKey {
+			ipCountOnNode++
+		}
+	}
 	if agent == nil {
-		if len(cmap) >= MaxWaitingPerNode {
+		if len(cmap) >= MaxWaitingPerNode || ipCountOnNode >= MaxWaitingPerIPPerNode {
 			return false, false, "", ErrNodeWaitingQueueFull
 		}
 		// Bound waiting clients targeting completely unknown nodes to resist anonymous queue floods.
@@ -311,7 +332,7 @@ func (b *SignalBroker) JoinClient(sess *Session) (online bool, requireVisitorAut
 				return false, false, "", ErrNodeWaitingQueueFull
 			}
 		}
-	} else if len(cmap) >= MaxClientsPerNode {
+	} else if len(cmap) >= MaxClientsPerNode || ipCountOnNode >= MaxClientsPerIPPerNode {
 		return false, false, "", ErrNodeClientLimitFull
 	}
 

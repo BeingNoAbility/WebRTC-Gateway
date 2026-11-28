@@ -75,7 +75,7 @@ export default withMermaid(
               collapsed: false,
               items: [
                 { text: 'Agent 与服务端配置', link: '/guide/agent-configuration' },
-                { text: 'P2PMux V7 协议规范', link: '/guide/protocol-specification' },
+                { text: 'P2PMux V8 协议规范', link: '/guide/protocol-specification' },
                 { text: '架构决策记录 (RFC V7)', link: '/rfcs/v7.0-architecture' },
               ],
             },
@@ -159,7 +159,7 @@ export default withMermaid(
               collapsed: false,
               items: [
                 { text: 'Agent & Server Configuration', link: '/en/guide/agent-configuration' },
-                { text: 'P2PMux V7 Wire Protocol', link: '/en/guide/protocol-specification' },
+                { text: 'P2PMux V8 Wire Protocol', link: '/en/guide/protocol-specification' },
                 { text: 'Architecture Decisions (RFC V7)', link: '/en/rfcs/v7.0-architecture' },
               ],
             },

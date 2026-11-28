@@ -46,6 +46,7 @@ type agentFileConfig struct {
 	FilePath            string `yaml:"file_path"`
 	HideDotfiles        *bool  `yaml:"hide_dotfiles"`
 	FileInlineActive    bool   `yaml:"file_inline_active"`
+	FollowSymlinks      bool   `yaml:"follow_symlinks"`
 	UpstreamHost        string `yaml:"upstream_host"`
 	ProxyURL            string `yaml:"proxy_url"`
 	SNI                 string `yaml:"sni"`
@@ -80,6 +81,7 @@ func main() {
 	filePath := fs.String("file", "", "Serve a single local file read-only via os.Root adapter")
 	hideDotfiles := fs.Bool("hide-dotfiles", true, "Hide dotfiles and symlinks pointing to dotfiles in -dir/-file mode")
 	fileInlineActive := fs.Bool("file-inline-active", false, "Allow inline script execution on static files (disables CSP: sandbox)")
+	followSymlinks := fs.Bool("follow-symlinks", false, "Allow following in-root symlinks in -dir/-file mode (default false: Fail-Closed O_NOFOLLOW)")
 	upstreamHost := fs.String("upstream-host", "", "Optional Host header override (RFC 9110 host[:port]) for virtual-host -target backends")
 	proxyURLRaw := fs.String("proxy", "", "Optional outbound HTTP/SOCKS proxy URL for -target")
 	sni := fs.String("sni", "", "Optional TLS SNI override for HTTPS -target")
@@ -151,6 +153,7 @@ func main() {
 	resolveStr("file", "FILE_PATH", fileCfg.FilePath, "", filePath)
 	resolveBool("hide-dotfiles", "P2P_HIDE_DOTFILES", fileCfg.HideDotfiles, false, true, hideDotfiles)
 	resolveBool("file-inline-active", "FILE_INLINE_ACTIVE", nil, fileCfg.FileInlineActive, false, fileInlineActive)
+	resolveBool("follow-symlinks", "FOLLOW_SYMLINKS", nil, fileCfg.FollowSymlinks, false, followSymlinks)
 	resolveStr("upstream-host", "UPSTREAM_HOST", fileCfg.UpstreamHost, "", upstreamHost)
 	resolveStr("proxy", "PROXY_URL", fileCfg.ProxyURL, "", proxyURLRaw)
 	resolveStr("sni", "SNI", fileCfg.SNI, "", sni)
@@ -384,10 +387,11 @@ func main() {
 		}
 		isStaticMode = true
 		staticHandler, err = proxy.NewStaticFSHandler(proxy.StaticFSOptions{
-			RootDir:      *dirPath,
-			SingleFile:   *filePath,
-			HideDotfiles: *hideDotfiles,
-			InlineActive: *fileInlineActive,
+			RootDir:        *dirPath,
+			SingleFile:     *filePath,
+			HideDotfiles:   *hideDotfiles,
+			InlineActive:   *fileInlineActive,
+			FollowSymlinks: *followSymlinks,
 		})
 		if err != nil {
 			log.Fatalf("[Agent] Static os.Root init failed: %v", err)

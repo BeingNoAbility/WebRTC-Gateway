@@ -1,13 +1,14 @@
 package agent
 
 import (
+	"log"
 	"time"
 
 	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/protocol"
 )
 
-// serveMuxStreams accepts authenticated streams from one visitor's PoolMux
+// serveMuxStreams accepts authenticated streams from one visitor's Mux
 // and dispatches each stream to HTTPProxy or WSProxy.
 func (a *Agent) serveMuxStreams(sess *VisitorSession, m *mux.Mux) {
 	for {
@@ -20,6 +21,12 @@ func (a *Agent) serveMuxStreams(sess *VisitorSession, m *mux.Mux) {
 
 		go func(st *mux.Stream) {
 			defer a.metrics.ActiveStreams.Add(-1)
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[Agent] Recovered panic in stream handler: %v", rec)
+					st.Reset(protocol.ErrCodeInternalError)
+				}
+			}()
 			a.dispatchStream(sess, st)
 		}(stream)
 	}
@@ -58,16 +65,12 @@ func (a *Agent) dispatchStream(sess *VisitorSession, stream *mux.Stream) {
 
 	switch reqHdr.Kind {
 	case protocol.StreamKindWS:
-		if !stream.IsWS() || a.cfg.WSProxy == nil {
+		if a.cfg.WSProxy == nil {
 			stream.Reset(protocol.ErrCodeForbidden)
 			return
 		}
 		a.cfg.WSProxy.HandleStream(stream, reqHdr, clientIP, jar, capScope)
 	case protocol.StreamKindHTTP:
-		if stream.IsWS() {
-			stream.Reset(protocol.ErrCodeProtocolError)
-			return
-		}
 		a.cfg.HTTPProxy.HandleStream(stream, reqHdr, clientIP, jar, capScope)
 	default:
 		stream.Reset(protocol.ErrCodeProtocolError)

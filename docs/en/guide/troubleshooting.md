@@ -27,8 +27,8 @@ Visitors can also enter an RFC 7065 TURN URI in the SmartPill Settings modal (us
 
 | Error Message | Cause | Fix |
 | :--- | :--- | :--- |
-| `SIGNAL_SECRET is required` | Missing cluster admission secret on Signal | Set `SIGNAL_SECRET` / `SIGNAL_SECRET_FILE`, or pass `-allow-anonymous-agents` for local dev |
-| `non-loopback bind requires -portal-domain with -sandbox-host (Tier 1) or -sandbox-domain (Tier 2/3)` | Non-loopback Signal started without domains | Set `-portal-domain` paired with `-sandbox-host` (Tier 1) or `-sandbox-domain` (Tier 3; add `-allow-same-site-sandbox` for Tier 2 single-root setups) |
+| `SIGNAL_SECRET is required` / `at least 16 bytes` | Missing or too-short cluster admission secret on Signal | Set a `SIGNAL_SECRET` / `SIGNAL_SECRET_FILE` of at least 16 bytes, or pass `-allow-anonymous-agents` for local dev |
+| `both -portal-origin and -sandbox-origin are required` | Signal started without explicit origins or `-dev` | Configure `-portal-origin` + `-sandbox-origin` (add `-allow-same-site-sandbox` for Tier 2 single-root setups), or pass `-dev` for loopback dev |
 | `ACCESS_SECRET is required` | Missing visitor secret on Agent | Set `ACCESS_SECRET` / `ACCESS_SECRET_FILE`, or pass `-allow-public` explicitly |
 | `Specify exactly ONE of -target, -dir, or -file` | Zero or multiple backend modes set | Specify exactly one of `-target`, `-dir`, or `-file` |
 | `unknown field ...` | Typo or invalid YAML key in config file | Check keys against `configs/*.example.yaml` (`KnownFields(true)` is enforced) |
@@ -43,8 +43,8 @@ Visitors can also enter an RFC 7065 TURN URI in the SmartPill Settings modal (us
 
 ### 4. Browser WebSocket Handshake Returns `403 Forbidden` or `421 Misdirected Request`
 
-- **`421 Misdirected Request`**: The `Host` header does not match `PORTAL_DOMAIN`, `SANDBOX_DOMAIN`, `SANDBOX_HOST`, or loopback `localhost` / `*.localhost`. Ensure your reverse proxy preserves the original `Host` header.
-- **`403 Forbidden` (behind a reverse proxy)**: Signal defaults `-trusted-proxies` to loopback (`127.0.0.0/8,::1/128`), ignoring `X-Forwarded-Proto` from bridge/remote proxies. Add your reverse proxy CIDR to `-trusted-proxies`.
+- **`421 Misdirected Request`**: The `Host` header does not match `PORTAL_ORIGIN`, `SANDBOX_ORIGIN`, or loopback `localhost` / `*.localhost` under `-dev`. Ensure your reverse proxy preserves the original `Host` header.
+- **`403 Forbidden` (behind a reverse proxy)**: The browser's `Origin` header does not exactly match the configured startup `-portal-origin` (scheme, host, and port). Verify external scheme/port matches `-portal-origin`, and add your reverse proxy CIDR to `-trusted-proxies` for accurate per-IP rate limiting.
 - **`403 Forbidden` (direct sandbox URL visit)**: Direct visits or cross-site probes to the sandbox origin are rejected by the SW W3C Fetch anti-CSRF gate; always enter through the Portal URL (e.g. `https://portal.example.com/#node`).
 
 ### 5. Agent Inside Docker Cannot Reach Host `127.0.0.1:8080`

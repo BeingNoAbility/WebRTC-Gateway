@@ -352,7 +352,7 @@ func TestCapabilityRevocationTOCTOUAndContinuousEnforcement(t *testing.T) {
 	s2c := make(chan []byte, 32)
 	go func() {
 		for b := range c2s {
-			serverMux.HandlePoolMessage(0, b)
+			serverMux.HandleLaneMessage(0, b)
 		}
 	}()
 	go func() {
@@ -365,11 +365,11 @@ func TestCapabilityRevocationTOCTOUAndContinuousEnforcement(t *testing.T) {
 					}
 				}
 			}
-			clientMux.HandlePoolMessage(0, b)
+			clientMux.HandleLaneMessage(0, b)
 		}
 	}()
-	clientMux.AttachPoolDC(0, &chanDC{ch: c2s})
-	serverMux.AttachPoolDC(0, &chanDC{ch: s2c})
+	clientMux.AttachLaneDC(0, &chanDC{ch: c2s})
+	serverMux.AttachLaneDC(0, &chanDC{ch: s2c})
 
 	sess := &VisitorSession{
 		signalSessionID: "cap-sess-1",
@@ -388,7 +388,7 @@ func TestCapabilityRevocationTOCTOUAndContinuousEnforcement(t *testing.T) {
 	reqTLV, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
 		Kind: protocol.StreamKindHTTP, Method: "GET", Target: "/check",
 	})
-	_, err = clientMux.OpenHTTPStream(context.Background(), reqTLV, true)
+	_, err = clientMux.OpenStream(reqTLV, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -644,7 +644,7 @@ func TestPreAuthPoolDCBlocked(t *testing.T) {
 	reqTLV, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
 		Kind: protocol.StreamKindHTTP, Method: "GET", Target: "/secret",
 	})
-	wire, _ := (&protocol.Frame{Gen: 1, Type: protocol.TypeHeaders, Flags: protocol.FlagFin, Payload: reqTLV}).Encode()
+	wire, _ := (&protocol.Frame{StreamID: 1, Type: protocol.TypeHeaders, Flags: protocol.FlagFin, Payload: reqTLV}).Encode()
 	_ = pool0.Send(wire)
 
 	// Agent must terminate the unauthenticated session and never hit backend.
@@ -754,13 +754,13 @@ func TestAgentV7_EndToEnd_RealPionSPAKE2P_StructuredSDP_DTLSBind_AndHTTPProxy(t 
 		idx := i
 		dc := pdc
 		if dc.ReadyState() == webrtc.DataChannelStateOpen {
-			clientMux.AttachPoolDC(idx, dc)
+			clientMux.AttachLaneDC(idx, dc)
 		} else {
 			dc.OnOpen(func() {
-				clientMux.AttachPoolDC(idx, dc)
+				clientMux.AttachLaneDC(idx, dc)
 			})
 		}
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) { clientMux.HandlePoolMessage(idx, msg.Data) })
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) { clientMux.HandleLaneMessage(idx, msg.Data) })
 	}
 
 	var authRes authResDTO
@@ -779,7 +779,7 @@ func TestAgentV7_EndToEnd_RealPionSPAKE2P_StructuredSDP_DTLSBind_AndHTTPProxy(t 
 
 	// Request 1: sets HttpOnly cookie in Agent ProxyCookieJar.
 	req1, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{Kind: protocol.StreamKindHTTP, FetchCtx: protocol.FetchCtxSameOriginClient, Method: "GET", Target: "/first"})
-	st1, err := clientMux.OpenHTTPStream(context.Background(), req1, true)
+	st1, err := clientMux.OpenStream(req1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -796,7 +796,7 @@ func TestAgentV7_EndToEnd_RealPionSPAKE2P_StructuredSDP_DTLSBind_AndHTTPProxy(t 
 
 	// Request 2: verifies HttpOnly admin_sid cookie is automatically sent by Agent's ProxyCookieJar.
 	req2, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{Kind: protocol.StreamKindHTTP, FetchCtx: protocol.FetchCtxSameOriginClient, Method: "GET", Target: "/second"})
-	st2, err := clientMux.OpenHTTPStream(context.Background(), req2, true)
+	st2, err := clientMux.OpenStream(req2, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -72,10 +72,10 @@ func newTestMuxPair(t *testing.T) (*mux.Mux, *mux.Mux) {
 	for i := 0; i < 4; i++ {
 		idx := i
 		cDC, sDC := newTestPipePair()
-		cm.AttachPoolDC(idx, cDC)
-		sm.AttachPoolDC(idx, sDC)
-		cDC.start(func(b []byte) { cm.HandlePoolMessage(idx, b) })
-		sDC.start(func(b []byte) { sm.HandlePoolMessage(idx, b) })
+		cm.AttachLaneDC(idx, cDC)
+		sm.AttachLaneDC(idx, sDC)
+		cDC.start(func(b []byte) { cm.HandleLaneMessage(idx, b) })
+		sDC.start(func(b []byte) { sm.HandleLaneMessage(idx, b) })
 	}
 	t.Cleanup(func() {
 		cm.Close()

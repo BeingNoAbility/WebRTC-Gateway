@@ -10,9 +10,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 FULL=0
-if [ "${1:-}" = "--full" ]; then
-  FULL=1
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --full)
+      FULL=1
+      ;;
+    *)
+      echo "ERROR: unknown argument '$arg' (usage: scripts/gate.sh [--full])" >&2
+      exit 2
+      ;;
+  esac
+done
 
 step() { printf '\n==> %s\n' "$*"; }
 
@@ -61,8 +69,8 @@ elif [ -x "$(go env GOPATH)/bin/gosec" ]; then
   "$(go env GOPATH)/bin/gosec" ./...
 fi
 
-step "Go unit & integration tests (-race -short)"
-go test -race -short ./...
+step "Go unit & integration tests (-race -short -tags embedweb)"
+go test -race -short -tags embedweb ./...
 
 step "Go fuzz smoke tests"
 for pkg in ./pkg/protocol ./pkg/proxy ./pkg/signaling; do

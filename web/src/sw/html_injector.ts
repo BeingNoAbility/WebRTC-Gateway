@@ -1,15 +1,13 @@
 /**
- * V7 Streaming Byte-Level HTML5 Head Tokenizer & Safe Injector (Simplified)
- * - Single-tag absolute URL `<script src="${sandboxOrigin}${PATCH_ASSET_URL}" data-p2p-boot="..."></script>`
- *   with expired cookie filtering & 16 KiB boot payload cap.
- * - Injects strictly BEFORE the first executable `<script>` (fixing headless documents AND removing
- *   16 redundant `<script>` escaped/double-escaped tokenizer states!).
- * - Exact 1024-byte `<meta charset>` prescan protection when HTTP `Content-Type` omits `charset=`.
- * - Handles nested `<template>` / `<svg>` / `<math>` stack, foreign self-closing `<title/>` / `<style/>`,
- *   `<![CDATA[...]]>`, rawtext end-tag attributes, bogus comments, and UTF-8 / UTF-16 BOMs.
+ * Streaming Byte-Level HTML5 Head Tokenizer & Safe Injector
+ * - Emits ONLY two compact synchronous external `<script>` tags (~140B total, zero 22 KiB inline
+ *   `data-p2p-boot` payload): `/__p2p_gw__/boot.js` (SW-synthesized per-session config) +
+ *   immutable hashed `/__p2p_gw__/assets/patch.<hash>.js`.
+ * - Propagates upstream CSP `nonce` onto injected `<script>` tags when present.
+ * - Injects strictly BEFORE the first executable `<script>` and respects 1024-byte `<meta charset>`
+ *   prescan, `<template>` / `<svg>` / `<math>` skip stacks, `<![CDATA[...]]>`, and UTF-16 BOMs.
  */
 
-import { base64UrlEncode } from '../shared/crypto';
 import type { CookieDelta } from '../shared/ipc';
 
 export interface PatchInjectConfig {
@@ -23,12 +21,17 @@ export interface PatchInjectConfig {
 export interface HtmlInjectorOptions {
   /** True when the HTTP `Content-Type` header already carries an explicit `charset=` parameter. */
   hasHttpCharset?: boolean;
+  /** Optional upstream CSP script nonce (e.g. from `script-src 'nonce-XYZ'`). */
+  scriptNonce?: string;
 }
 
 const textEncoder = new TextEncoder();
 const MAX_BOOT_JSON_BYTES = 16 * 1024;
 const CHARSET_PRESCAN_LIMIT_BYTES = 1024;
 const MAX_SCAN_BUFFER_BYTES = 256 * 1024;
+const SAFE_NONCE_RE = /^[A-Za-z0-9+/=_-]{1,128}$/;
+
+export const GATEWAY_BOOT_SCRIPT_PATH = '/__p2p_gw__/boot.js';
 
 export function resolvePatchAssetUrl(): string {
   const injected = (globalThis as { __P2P_GW_PATCH_URL__?: unknown }).__P2P_GW_PATCH_URL__;
@@ -38,7 +41,7 @@ export function resolvePatchAssetUrl(): string {
   return '/__p2p_gw__/assets/patch.js';
 }
 
-function pruneAndBoundBootConfig(cfg: PatchInjectConfig, now = Date.now()): PatchInjectConfig {
+export function pruneAndBoundBootConfig(cfg: PatchInjectConfig, now = Date.now()): PatchInjectConfig {
   const freshCookies = (cfg.initCookies || []).filter(
     (c) => !(c.expires && c.expires > 0 && c.expires <= now)
   );
@@ -57,11 +60,32 @@ function pruneAndBoundBootConfig(cfg: PatchInjectConfig, now = Date.now()): Patc
   return out;
 }
 
-export function buildPatchInjectionSnippet(sandboxOrigin: string, cfg: PatchInjectConfig): string {
-  const safeOrigin = sandboxOrigin.replace(/\/+$/, '');
+/**
+ * Generates the Service-Worker-served `/__p2p_gw__/boot.js` script body containing
+ * bounded per-session bootstrap config (zero inline HTML attributes).
+ */
+export function buildBootScriptPayload(cfg: PatchInjectConfig): string {
   const bounded = pruneAndBoundBootConfig(cfg);
-  const bootB64 = base64UrlEncode(textEncoder.encode(JSON.stringify(bounded)));
-  return `<script src="${safeOrigin}${resolvePatchAssetUrl()}" data-p2p-boot="${bootB64}"></script>`;
+  const safeJson = JSON.stringify(bounded)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+  return `globalThis.__P2P_GW_BOOT__=${safeJson};\n`;
+}
+
+export function buildPatchInjectionSnippet(
+  sandboxOrigin: string,
+  opts: { scriptNonce?: string } = {}
+): string {
+  const safeOrigin = sandboxOrigin.replace(/\/+$/, '');
+  const nonceAttr =
+    opts.scriptNonce && SAFE_NONCE_RE.test(opts.scriptNonce)
+      ? ` nonce="${opts.scriptNonce}"`
+      : '';
+  return (
+    `<script src="${safeOrigin}${GATEWAY_BOOT_SCRIPT_PATH}"${nonceAttr}></script>` +
+    `<script src="${safeOrigin}${resolvePatchAssetUrl()}"${nonceAttr}></script>`
+  );
 }
 
 const enum State {
@@ -133,14 +157,11 @@ export class StreamingHtmlInjector {
   private tagOpenGlobalOffset = 0;
   private bangBuf = '';
 
-  // Rawtext end-tag matching (used for <style>, <title>, etc. in HTML context)
   private rawTextEndTag = '';
   private rawTextMatchPos = 0;
 
-  // Nested foreign/template skip stack (`<template>`, `<svg>`, `<math>`)
   private readonly skipStack: string[] = [];
 
-  // 1024B `<meta charset>` prescan state (only active when `!hasHttpCharset`)
   private inHeadPrescan = false;
   private headCloseEndGlobalOffset = 0;
   private prescanLimitGlobalOffset = CHARSET_PRESCAN_LIMIT_BYTES;
@@ -152,9 +173,13 @@ export class StreamingHtmlInjector {
   private pendingBytes = 0;
   private fallbackInsertGlobalOffset = 0;
 
-  constructor(sandboxOrigin: string, cfg: PatchInjectConfig, opts: HtmlInjectorOptions = {}) {
-    this.snippetBytes = textEncoder.encode(buildPatchInjectionSnippet(sandboxOrigin, cfg));
-    this.hasHttpCharset = Boolean(opts.hasHttpCharset);
+  constructor(sandboxOrigin: string, _cfgOrOpts?: PatchInjectConfig | HtmlInjectorOptions, opts: HtmlInjectorOptions = {}) {
+    const resolvedOpts: HtmlInjectorOptions =
+      _cfgOrOpts && !('nodeId' in _cfgOrOpts) ? _cfgOrOpts : opts;
+    this.snippetBytes = textEncoder.encode(
+      buildPatchInjectionSnippet(sandboxOrigin, { scriptNonce: resolvedOpts.scriptNonce })
+    );
+    this.hasHttpCharset = Boolean(resolvedOpts.hasHttpCharset);
   }
 
   private inForeignContent(): boolean {
@@ -189,7 +214,6 @@ export class StreamingHtmlInjector {
             (this.bomFirstByte === 0xff && b === 0xfe) ||
             (this.bomFirstByte === 0xfe && b === 0xff)
           ) {
-            // UTF-16 BOM detected -> pass through untouched without UTF-8 corruption!
             this.bomState = 3;
             this.bypassed = true;
             const prefix = new Uint8Array([this.bomFirstByte, b]);
@@ -337,25 +361,24 @@ export class StreamingHtmlInjector {
 
       switch (this.state) {
         case State.DATA:
-          if (b === 0x3c /* '<' */) {
+          if (b === 0x3c) {
             this.resetTagState(absPos);
             this.state = State.TAG_OPEN;
           }
           break;
 
         case State.TAG_OPEN:
-          if (b === 0x21 /* '!' */) {
+          if (b === 0x21) {
             this.state = State.BANG;
             this.bangBuf = '';
-          } else if (b === 0x3f /* '?' */) {
+          } else if (b === 0x3f) {
             this.state = State.BOGUS_COMMENT;
-          } else if (b === 0x2f /* '/' */) {
+          } else if (b === 0x2f) {
             this.state = State.END_TAG_OPEN;
           } else if (isAsciiAlpha(b)) {
             this.tagName = String.fromCharCode(asciiLower(b));
             this.state = State.TAG_NAME;
-          } else if (b === 0x3c /* '<' */) {
-            // HTML5 §13.2.5.6: re-consume `<` in TAG_OPEN (`<<head>`!)
+          } else if (b === 0x3c) {
             this.resetTagState(absPos);
             this.state = State.TAG_OPEN;
           } else {
@@ -363,13 +386,12 @@ export class StreamingHtmlInjector {
           }
           break;
 
-        // HTML5 §13.2.5.7: `</ ` or `</1` enters BOGUS_COMMENT; `</>` returns to DATA.
         case State.END_TAG_OPEN:
           if (isAsciiAlpha(b)) {
             this.isEndTag = true;
             this.tagName = String.fromCharCode(asciiLower(b));
             this.state = State.TAG_NAME;
-          } else if (b === 0x3e /* '>' */) {
+          } else if (b === 0x3e) {
             this.state = State.DATA;
           } else {
             this.state = State.BOGUS_COMMENT;
@@ -377,9 +399,9 @@ export class StreamingHtmlInjector {
           break;
 
         case State.BANG:
-          if (b === 0x2d /* '-' */ && this.bangBuf === '') {
+          if (b === 0x2d && this.bangBuf === '') {
             this.state = State.COMMENT_START_1;
-          } else if (b === 0x3e /* '>' */) {
+          } else if (b === 0x3e) {
             if (this.bangBuf.toLowerCase().startsWith('doctype')) {
               this.fallbackInsertGlobalOffset = absPos + 1;
             }
@@ -399,14 +421,14 @@ export class StreamingHtmlInjector {
           break;
 
         case State.DOCTYPE:
-          if (b === 0x3e /* '>' */) {
+          if (b === 0x3e) {
             this.fallbackInsertGlobalOffset = absPos + 1;
             this.state = State.DATA;
           }
           break;
 
         case State.CDATA:
-          if (b === 0x5d /* ']' */) this.state = State.CDATA_BRACKET_1;
+          if (b === 0x5d) this.state = State.CDATA_BRACKET_1;
           break;
 
         case State.CDATA_BRACKET_1:
@@ -415,7 +437,7 @@ export class StreamingHtmlInjector {
           break;
 
         case State.CDATA_BRACKET_2:
-          if (b === 0x3e /* '>' */) this.state = State.DATA;
+          if (b === 0x3e) this.state = State.DATA;
           else if (b === 0x5d) this.state = State.CDATA_BRACKET_2;
           else this.state = State.CDATA;
           break;
@@ -464,13 +486,12 @@ export class StreamingHtmlInjector {
           if (b === 0x3e) this.state = State.DATA;
           break;
 
-        // HTML5 §13.2.5.8: tag name terminates ONLY on whitespace, '/', or '>'.
         case State.TAG_NAME:
           if (isWhitespace(b)) {
             this.state = State.BEFORE_ATTR_NAME;
-          } else if (b === 0x2f /* '/' */) {
+          } else if (b === 0x2f) {
             this.state = State.SELF_CLOSING_START_TAG;
-          } else if (b === 0x3e /* '>' */) {
+          } else if (b === 0x3e) {
             const found = this.onTagClosed(absPos);
             if (found >= 0) return found;
           } else if (this.tagName.length < 32) {
@@ -479,7 +500,7 @@ export class StreamingHtmlInjector {
           break;
 
         case State.SELF_CLOSING_START_TAG:
-          if (b === 0x3e /* '>' */) {
+          if (b === 0x3e) {
             this.selfClosing = true;
             const found = this.onTagClosed(absPos);
             if (found >= 0) return found;
@@ -492,9 +513,9 @@ export class StreamingHtmlInjector {
         case State.BEFORE_ATTR_NAME:
           if (isWhitespace(b)) {
             // skip
-          } else if (b === 0x2f /* '/' */) {
+          } else if (b === 0x2f) {
             this.state = State.SELF_CLOSING_START_TAG;
-          } else if (b === 0x3e /* '>' */) {
+          } else if (b === 0x3e) {
             const found = this.onTagClosed(absPos);
             if (found >= 0) return found;
           } else {
@@ -507,12 +528,12 @@ export class StreamingHtmlInjector {
         case State.ATTR_NAME:
           if (isWhitespace(b)) {
             this.state = State.AFTER_ATTR_NAME;
-          } else if (b === 0x2f /* '/' */) {
+          } else if (b === 0x2f) {
             this.commitAttr();
             this.state = State.SELF_CLOSING_START_TAG;
-          } else if (b === 0x3d /* '=' */) {
+          } else if (b === 0x3d) {
             this.state = State.BEFORE_ATTR_VALUE;
-          } else if (b === 0x3e /* '>' */) {
+          } else if (b === 0x3e) {
             this.commitAttr();
             const found = this.onTagClosed(absPos);
             if (found >= 0) return found;
@@ -524,12 +545,12 @@ export class StreamingHtmlInjector {
         case State.AFTER_ATTR_NAME:
           if (isWhitespace(b)) {
             // skip
-          } else if (b === 0x2f /* '/' */) {
+          } else if (b === 0x2f) {
             this.commitAttr();
             this.state = State.SELF_CLOSING_START_TAG;
-          } else if (b === 0x3d /* '=' */) {
+          } else if (b === 0x3d) {
             this.state = State.BEFORE_ATTR_VALUE;
-          } else if (b === 0x3e /* '>' */) {
+          } else if (b === 0x3e) {
             this.commitAttr();
             const found = this.onTagClosed(absPos);
             if (found >= 0) return found;
@@ -544,11 +565,11 @@ export class StreamingHtmlInjector {
         case State.BEFORE_ATTR_VALUE:
           if (isWhitespace(b)) {
             // skip
-          } else if (b === 0x22 /* '"' */) {
+          } else if (b === 0x22) {
             this.state = State.ATTR_VAL_DQ;
-          } else if (b === 0x27 /* "'" */) {
+          } else if (b === 0x27) {
             this.state = State.ATTR_VAL_SQ;
-          } else if (b === 0x3e /* '>' */) {
+          } else if (b === 0x3e) {
             this.commitAttr();
             const found = this.onTagClosed(absPos);
             if (found >= 0) return found;
@@ -561,7 +582,7 @@ export class StreamingHtmlInjector {
           break;
 
         case State.ATTR_VAL_DQ:
-          if (b === 0x22 /* '"' */) {
+          if (b === 0x22) {
             this.commitAttr();
             this.state = State.BEFORE_ATTR_NAME;
           } else if (this.curAttrVal.length < 64) {
@@ -570,7 +591,7 @@ export class StreamingHtmlInjector {
           break;
 
         case State.ATTR_VAL_SQ:
-          if (b === 0x27 /* "'" */) {
+          if (b === 0x27) {
             this.commitAttr();
             this.state = State.BEFORE_ATTR_NAME;
           } else if (this.curAttrVal.length < 64) {
@@ -582,7 +603,7 @@ export class StreamingHtmlInjector {
           if (isWhitespace(b)) {
             this.commitAttr();
             this.state = State.BEFORE_ATTR_NAME;
-          } else if (b === 0x3e /* '>' */) {
+          } else if (b === 0x3e) {
             this.commitAttr();
             const found = this.onTagClosed(absPos);
             if (found >= 0) return found;
@@ -591,7 +612,6 @@ export class StreamingHtmlInjector {
           }
           break;
 
-        // Rawtext end-tag parser (supports quoted attributes inside end tags like `</style a=">">`!)
         case State.RAWTEXT: {
           const target = this.rawTextEndTag;
           if (this.rawTextMatchPos < target.length) {
@@ -601,7 +621,7 @@ export class StreamingHtmlInjector {
               this.rawTextMatchPos = b === 0x3c ? 1 : 0;
             }
           } else {
-            if (b === 0x3e /* '>' */) {
+            if (b === 0x3e) {
               this.state = State.DATA;
               this.rawTextMatchPos = 0;
             } else if (isWhitespace(b) || b === 0x2f) {
@@ -631,7 +651,6 @@ export class StreamingHtmlInjector {
     const tag = this.tagName;
     if (!tag) return -1;
 
-    // 1. Inside `<template>`, `<svg>`, or `<math>` skip stack:
     if (this.skipStack.length > 0) {
       if (this.isEndTag) {
         if (this.skipStack[this.skipStack.length - 1] === tag) {
@@ -640,21 +659,17 @@ export class StreamingHtmlInjector {
         return -1;
       }
       if (NESTED_SKIP_TAGS.has(tag)) {
-        // `<svg/>` and `<math/>` are self-closing in HTML5 foreign content; `<template/>` is NOT.
         if (!(this.selfClosing && (tag === 'svg' || tag === 'math'))) {
           this.skipStack.push(tag);
         }
         return -1;
       }
-      // Inside foreign content (`<svg>`/`<math>`), `<title/>`, `<style/>`, `<script/>` are normal
-      // XML-style tags — NEVER enter HTML RAWTEXT mode (fixes `<svg><title/>` swallowing 256 KiB!).
       if (!this.inForeignContent() && (tag === 'script' || RAWTEXT_TAGS.has(tag))) {
         this.enterRawtext(tag);
       }
       return -1;
     }
 
-    // 2. Active `<head>` 1024-byte `<meta charset>` prescan window (when `!hasHttpCharset`):
     if (this.inHeadPrescan) {
       if (!this.isEndTag && tag === 'meta' && this.metaIsCharset) {
         return closeBracketGlobalOffset + 1;
@@ -681,7 +696,6 @@ export class StreamingHtmlInjector {
 
     if (this.isEndTag) return -1;
 
-    // 3. Top-level document elements:
     if (tag === 'head') {
       const afterHead = closeBracketGlobalOffset + 1;
       if (this.hasHttpCharset || afterHead >= this.prescanLimitGlobalOffset) {
@@ -704,7 +718,6 @@ export class StreamingHtmlInjector {
       return -1;
     }
 
-    // Inject IMMEDIATELY before the first executable `<script>` (guarantees ws_patch runs first!).
     if (tag === 'script') {
       return this.tagOpenGlobalOffset;
     }
@@ -724,10 +737,9 @@ export class StreamingHtmlInjector {
 
 export function createHtmlInjectorTransform(
   sandboxOrigin: string,
-  cfg: PatchInjectConfig,
   opts: HtmlInjectorOptions = {}
 ): TransformStream<Uint8Array, Uint8Array> {
-  const injector = new StreamingHtmlInjector(sandboxOrigin, cfg, opts);
+  const injector = new StreamingHtmlInjector(sandboxOrigin, opts);
   return new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       for (const out of injector.push(chunk)) {
@@ -744,8 +756,7 @@ export function createHtmlInjectorTransform(
 
 /**
  * Injects Web Worker bootstrap URL rewrite helper while preserving leading `'use strict';`
- * and UTF-8 BOM. Supports BOTH Classic Workers (`importScripts`) AND ES Module Workers
- * (inline `globalThis.fetch` rewrite when `importScripts` is unavailable).
+ * and UTF-8 BOM. Supports BOTH Classic Workers (`importScripts`) AND ES Module Workers.
  */
 export function injectWorkerBootstrap(
   source: string,

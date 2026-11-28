@@ -160,6 +160,8 @@ jobs:
         run: |
           ARCHIVE_NAME="webrtc-gateway_${RELEASE_TAG}_${TARGET_OS}_${TARGET_ARCH}"
           cp README.md README_en.md LICENSE build_output/
+          mkdir -p build_output/configs
+          cp configs/*.example.yaml build_output/configs/
           if [ "$ARCHIVE_EXT" = "zip" ]; then
             (cd build_output && zip -9 -r "../${ARCHIVE_NAME}.zip" .)
             echo "filename=${ARCHIVE_NAME}.zip" >> "$GITHUB_OUTPUT"

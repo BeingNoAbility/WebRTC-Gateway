@@ -133,9 +133,9 @@ export class StatsCollector {
           rttMs,
           txBps,
           rxBps,
-          activeStreams: mux.getActiveStreamCount(),
+          activeStreams: mux.activeStreamCount,
           candidateType,
-          poolSize: mux.getPoolSize(),
+          poolSize: mux.poolSize,
         });
       } finally {
         this.polling = false;

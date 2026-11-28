@@ -84,6 +84,8 @@ type VisitorSession struct {
 	spakeSess      *SPAKE2PVerifierSession
 	challengeReady bool // True ONLY after DTLS cert FP verified and challenge state populated.
 	authAttempt    bool
+	authDispatched atomic.Bool
+	capInFlight    atomic.Int32
 
 	capScope  *proxy.CapabilityScope
 	capJTI    string
@@ -293,6 +295,8 @@ func (a *Agent) expirySweepLoop() {
 		case <-a.rootCtx.Done():
 			return
 		case now := <-ticker.C:
+			// Reload external CLI changes OUTSIDE a.sessMu so no disk I/O or flock runs under session locks.
+			a.capStore.MaybeReload()
 			nowUnix := now.Unix()
 			var victims []*VisitorSession
 			a.sessMu.Lock()

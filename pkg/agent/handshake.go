@@ -139,7 +139,6 @@ func (a *Agent) completeOffer(msg signaling.OfferRelayDTO, offerSDP string, sess
 
 	m := mux.New(mux.Config{
 		PoolSize:            a.cfg.PoolSize,
-		MaxWSConns:          protocol.DefaultMaxWSConns,
 		MaxGlobalStreams:    a.cfg.MaxGlobalStream,
 		GlobalBudget:        a.globalMem,
 		GlobalActiveStreams: &a.activeStreams,
@@ -149,10 +148,14 @@ func (a *Agent) completeOffer(msg signaling.OfferRelayDTO, offerSDP string, sess
 		OnGoAway: func(code protocol.ErrorCode) {
 			log.Printf("[Agent] Received GOAWAY(%s) from session %s", code, msg.SessionID)
 		},
+		OnProtocolError: func(perr error) {
+			log.Printf("[Agent] Protocol error on session %s (%v); closing", msg.SessionID, perr)
+			go a.closeSession(sess)
+		},
 	})
 	m.SetMaxMessageSize(msg.Desc.MaxMsgSize)
 
-	// Pre-negotiate 1 Control DC (id=0) + 32 Reusable HTTP Pool DCs (id=1..32).
+	// Pre-negotiate 1 Control DC (id=0) + N Multiplexed Ordered Data Lanes (id=1..N, default 12).
 	ordered := true
 	negotiated := true
 	ctrlID := protocol.ControlChannelID
@@ -170,9 +173,9 @@ func (a *Agent) completeOffer(msg signaling.OfferRelayDTO, offerSDP string, sess
 	m.AttachControlDC(ctrlDC)
 
 	for i := 0; i < a.cfg.PoolSize; i++ {
-		slotIdx := i
-		chID := protocol.PoolChannelID(slotIdx)
-		dc, dcErr := pc.CreateDataChannel(protocol.PoolChannelLabel(slotIdx), &webrtc.DataChannelInit{
+		laneIdx := i
+		chID := protocol.PoolChannelID(laneIdx)
+		dc, dcErr := pc.CreateDataChannel(protocol.PoolChannelLabel(laneIdx), &webrtc.DataChannelInit{
 			Ordered:    &ordered,
 			Negotiated: &negotiated,
 			ID:         &chID,
@@ -183,48 +186,26 @@ func (a *Agent) completeOffer(msg signaling.OfferRelayDTO, offerSDP string, sess
 			a.closeSession(sess)
 			return
 		}
-		m.AttachPoolDC(slotIdx, dc)
+		m.AttachLaneDC(laneIdx, dc)
 		dc.OnMessage(func(dm webrtc.DataChannelMessage) {
-			// Hard gate: drop and terminate immediately on any pre-auth frame over Pool DCs.
+			// Hard gate: drop and terminate immediately on any pre-auth frame over data lanes.
 			if !sess.authDone.Load() {
 				go a.closeSession(sess)
 				return
 			}
-			m.HandlePoolMessage(slotIdx, dm.Data)
+			m.HandleLaneMessage(laneIdx, dm.Data)
 		})
 		dc.OnClose(func() {
-			m.HandlePoolClose(slotIdx)
+			m.HandleLaneClose(laneIdx)
 		})
 	}
 
-	// Accept dynamic DCEP "p2pws" WebSocket DataChannels ONLY for authenticated sessions with
-	// strict ordered, fully reliable delivery!
+	// P2PMux V8: All HTTP and WebSocket streams multiplex over pre-negotiated lanes; reject unexpected DCEP DCs Fail-Closed.
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
+		_ = dc.Close()
 		if !sess.authDone.Load() {
-			_ = dc.Close()
 			go a.closeSession(sess)
-			return
 		}
-		if dc.Label() != protocol.WSChannelLabel || !dc.Ordered() ||
-			dc.MaxPacketLifeTime() != nil || dc.MaxRetransmits() != nil {
-			_ = dc.Close()
-			return
-		}
-		onMsg, onClose, aerr := m.AttachDynamicWSDC(dc)
-		if aerr != nil {
-			_ = dc.Close()
-			return
-		}
-		dc.OnMessage(func(dm webrtc.DataChannelMessage) {
-			if !sess.authDone.Load() {
-				_ = dc.Close()
-				return
-			}
-			onMsg(dm.Data)
-		})
-		dc.OnClose(func() {
-			onClose()
-		})
 	})
 
 	sess.mu.Lock()
@@ -435,10 +416,12 @@ func (a *Agent) onControlChannelOpen(sess *VisitorSession, pc *webrtc.PeerConnec
 	}
 }
 
-// HandleCandidate validates SDPMLineIndex bounds and enqueues incoming visitor ICE candidates
+const maxSDPMidBytes = 64
+
+// HandleCandidate validates SDPMLineIndex/SDPMid bounds and enqueues incoming visitor ICE candidates
 // onto a bounded per-session asynchronous queue so signaling reads never stall.
 func (a *Agent) HandleCandidate(msg signaling.CandidateRelayDTO) {
-	if msg.SessionID == "" || len(msg.Candidate) > signaling.MaxCandidateBytes {
+	if msg.SessionID == "" || len(msg.Candidate) > signaling.MaxCandidateBytes || len(msg.SDPMid) > maxSDPMidBytes {
 		return
 	}
 	init := webrtc.ICECandidateInit{Candidate: msg.Candidate}
@@ -598,10 +581,11 @@ func (a *Agent) createHandshakingSession(signalSessionID, clientIP, visitorFP, v
 	sess.unauthTimer = time.AfterFunc(UnauthSessionTimeout, func() {
 		sess.mu.Lock()
 		stillUnauth := sess.state == StateHandshaking
-		ip := sess.clientIP
 		sess.mu.Unlock()
 		if stillUnauth {
-			a.authLimiter.RecordFailure(ip, time.Now())
+			// Do NOT record unauthenticated signaling-only handshake timeouts into
+			// VisitorAuthLimiter.globalRing (prevents global lockout DoS from spoofed Offers).
+			// Per-IP handshake flooding is already bounded by MaxHandshakingPerIP & MaxHandshakingSessions.
 			a.closeSession(sess)
 		}
 	})

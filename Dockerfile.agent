@@ -39,6 +39,6 @@ COPY --from=agent-builder --chown=root:root --chmod=0555 /build/agent /app/agent
 USER 10001:10001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD /app/agent -health || exit 1
+    CMD if [ -n "${METRICS_ADDR:-}${CONFIG_FILE:-}" ]; then /app/agent -health; else kill -0 1; fi || exit 1
 
 ENTRYPOINT ["/app/agent"]

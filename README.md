@@ -33,11 +33,11 @@
 
 ## 核心特性速览
 
-- **DataChannel 池化数据面（P2PMux V7）**：采用单一 `RTCPeerConnection` + 1 条控制通道（`id=0` `p2pctrl`）+ 32 条预协商可复用 HTTP 池通道（`id=1..32` `p2p_01..p2p_32`，每通道单活跃流 5 态 FSM + 单调 `Gen`）+ 动态专用 `"p2pws"` WebSocket 通道，8 字节定长帧头与紧凑二进制 TLV 头编码（内置 `FetchCtx`、`RespFlags` 与行内 Cookie TLV），消除跨流队头阻塞与流式 WebSocket 死锁。
-- **抗信令中间人的密码学边界**：信令仅传输严格校验的结构化 `SessionDescriptor` 并由双端确定性合成 16 行 DataChannel-only SDP；每个 Agent 持久化独立 **Ed25519 身份密钥**，对长度前缀转录做 Pure Ed25519 签名（含 `-allow-public` 模式），并在 DTLS 建连后校验远端证书真实指纹，配合 `#node?pk=` 钉扎与 Fail-Closed `IndexedDB` TOFU；访客口令在 DTLS 控制通道内运行 **RFC 9383 SPAKE2+（P-256、300,000 轮 PBKDF2 + HKDF）双向零知识认证**，并强制校验双方确认值防降级；支持由 Agent 签发可实时吊销、限路径、限只读且持久化吊销状态的 **Ed25519 能力分享令牌**。
-- **三档跨站沙箱隔离、W3C Fetch 抗 CSRF 门禁与内存 CookieMirror**：生产环境支持双固定域（Tier 1 `-portal-domain` + `-sandbox-host`，无需通配符证书）、单域同站通配符（Tier 2 `-allow-same-site-sandbox` + `Origin-Agent-Cluster: ?1`）与双域通配符（Tier 3 `-portal-domain` + `-sandbox-domain`，本机私有盐派生 `sbx-<24hex>`，本地自动 `*.localhost`）；门户 CSP 锁定 `style-src 'self'` 与 `connect-src 'self'`（内容哈希清单内嵌）；SW 强制一次性 `enterNonce` 与 W3C Fetch 抗 CSRF 门禁并下发 `frame-ancestors`，`appFrame` 启用 `sandbox` 防顶层跳转，前端纯内存 `CookieMirror` 配合双池 `ProxyCookieJar` 隔离 `HttpOnly` Cookie 且屏蔽 PWA 误卸载隧道 SW。
-- **纯管道代理与最小 `os.Root` 静态适配器**：HTTP / WebSocket 统一复用严格单目标 `DestinationPolicy`（单一精确目标源、可选 `-upstream-host` 虚拟主机头覆写、WS 302 跳转拦截与 Resolve 后置能力校验）、双池 RFC 6265bis `ProxyCookieJar`、16 KiB 真流式 WebSocket 代理与原生流式 `gzip`（浏览器原生 `DecompressionStream('gzip')`，零第三方解压依赖）；`-dir` / `-file` 采用 Go `os.Root` 逐级 `OpenRoot` 只读处理器，默认对所有静态文件下发 `CSP: sandbox` 并阻断跨根软链与点文件。
-- **单一权威 Go 信令与构建期前端内嵌**：前端内容哈希资产于构建期经 `make build`（`-tags embedweb`）按显式清单嵌入 Go `signal` 单一二进制，支持节点绑定密钥原子持久化（`-bound-keys-file`）与逐节点注册密钥隔离（`-node-secrets-file`）。
+- **统一多路复用数据面（P2PMux V8）**：采用单一 `RTCPeerConnection` + 1 条分片控制通道（`id=0` `p2pctrl`）+ 12 条预协商有序多路复用通道（`id=1..12` `p2p_01..p2p_12`，按单调 `StreamID` 统一承载 HTTP 与流式 WebSocket，无需动态 DCEP 通道），8 字节定长帧头、纯载荷字节 `CREDIT` 流控与紧凑二进制 TLV 头编码（内置 `FetchCtx`、`RespFlags` 与行内 Cookie TLV），消除跨流队头阻塞与微包流控死锁。
+- **抗信令中间人的密码学边界**：信令仅传输严格校验的结构化 `SessionDescriptor` 并由双端确定性合成 16 行 DataChannel-only SDP；每个 Agent 持久化独立 **Ed25519 身份密钥**，对长度前缀转录做 Pure Ed25519 签名（含 `-allow-public` 模式），并在 DTLS 建连后校验远端证书真实指纹（支持 `getRemoteCertificates` 的引擎），配合 `#node?pk=` 钉扎与 Fail-Closed `IndexedDB` TOFU；访客口令在 DTLS 控制通道内运行 **RFC 9383 SPAKE2+（P-256、300,000 轮 PBKDF2 + HKDF）双向零知识认证**，并强制校验双方确认值防降级；支持由 Agent 签发可实时吊销、限路径、限只读且持久化吊销状态的 **Ed25519 能力分享令牌**。
+- **两档沙箱隔离、W3C Fetch 抗 CSRF 门禁与 Transferable 流桥接**：服务端采用启动期显式源配置（`-portal-origin` + `-sandbox-origin`，本地回环使用 `-dev`），提供 **Tier 1 跨站通配符隔离**（不同 eTLD+1 派生 `sbx-<24hex>` 独立源）与 **Tier 2 受限隔离**（固定单域跨站或 `-allow-same-site-sandbox` 同站通配符，门户持续显示 Tier 2 警示条）；门户 CSP 锁定 `style-src 'self'` 与 `connect-src 'self'`（启动期预渲染内容哈希资产与 ETag）；SW 通过原生 Transferable `ReadableStream` 桥接数据流、下发外置 `/__p2p_gw__/boot.js` 并按指令级重写保留上游 CSP，无条件拒绝 `destination=document` 逃逸、按标签页隔离 `clientToTab` 配额并配合 `CookieMirror` / `ProxyCookieJar` 隔离 `HttpOnly` Cookie。
+- **纯管道代理与 Fail-Closed `O_NOFOLLOW` 静态适配器**：HTTP / WebSocket 统一复用严格单目标 `DestinationPolicy`（单一精确目标源、可选 `-upstream-host` 虚拟主机头覆写、WS 302 跳转拦截与 Resolve 后置能力校验）、统一 `ProxyCookieJar`（按 `httpOnly` / `visible` 池分别限额）、16 KiB 真流式 WebSocket 代理与原生流式 `gzip`（浏览器原生 `DecompressionStream('gzip')`，零第三方解压依赖）；`-dir` / `-file` 采用 Go `os.Root` 逐级 `OpenRoot` 只读处理器，默认强制 `O_NOFOLLOW` 拒绝一切软链与点文件（可选 `-follow-symlinks` 仅限根与能力前缀内解析）并对所有静态文件下发 `CSP: sandbox`。
+- **单一权威 Go 信令与构建期前端内嵌**：前端内容哈希资产于构建期经 `make build`（`-tags embedweb`）按显式清单嵌入 Go `signal` 单一二进制，支持节点绑定密钥原子持久化（`-bound-keys-file`）与逐节点注册密钥隔离（`-node-secrets-file`，最小 16 字节）。
 
 ---
 
@@ -49,14 +49,14 @@
 # 1. 构建前端产物与内嵌 Web 资产的 Go 二进制
 make build
 
-# 2. 启动信令服务器（本地回环自动启用 *.localhost 跨站沙箱模式）
-./bin/signal -addr 127.0.0.1:8888 -signal-secret dev-cluster-secret
+# 2. 启动信令服务器（-dev 显式启用本地回环 *.localhost 跨站沙箱模式；密钥不少于 16 字节）
+./bin/signal -addr 127.0.0.1:8888 -dev -signal-secret dev-cluster-secret-16b
 
 # 3. 启动内网 Agent（必须设置 ACCESS_SECRET，或显式传入 -allow-public）
 ACCESS_SECRET=change-me ./bin/agent \
   -id homeserver \
   -signal ws://127.0.0.1:8888/ws \
-  -signal-secret dev-cluster-secret \
+  -signal-secret dev-cluster-secret-16b \
   -target http://127.0.0.1:8080
 ```
 
@@ -64,12 +64,13 @@ ACCESS_SECRET=change-me ./bin/agent \
 
 ### 方式二：生产双域部署与 Docker Compose
 
-非回环生产环境要求显式配置跨站双域名（Tier 1 固定域 `PORTAL_DOMAIN` + `SANDBOX_HOST`，或 Tier 3 泛域 `PORTAL_DOMAIN` + `SANDBOX_DOMAIN`，位于不同站点）以及 `SIGNAL_SECRET`（除非显式声明 `-allow-anonymous-agents`）：
+生产环境要求启动期显式配置跨站源（推荐 Tier 1 跨站通配符 `PORTAL_ORIGIN` + `SANDBOX_ORIGIN=https://*.sandbox.example.net`；或 Tier 2 受限固定单域 `https://app.example.net`）以及不少于 16 字节的 `SIGNAL_SECRET`（除非显式声明 `-allow-anonymous-agents`）：
 
 ```bash
 cat <<'EOF' > .env
-PORTAL_DOMAIN=portal.example.com
-SANDBOX_DOMAIN=sandbox.example.net
+PORTAL_ORIGIN=https://portal.example.com
+SANDBOX_ORIGIN=https://*.sandbox.example.net
+SIGNAL_URL=wss://portal.example.com/ws
 SIGNAL_SECRET=replace-with-strong-cluster-secret
 ACCESS_SECRET=replace-with-strong-visitor-secret
 EOF
@@ -104,14 +105,14 @@ sequenceDiagram
     Signal->>Visitor: 转发 Answer
     Note over Visitor,Agent: 浏览器校验 Ed25519 签名、pk=/TOFU 与真实 DTLS 证书后建联
 
-    Visitor<<->>Agent: 单 PC + p2pctrl + 32 条 HTTP 池 DC + 动态 p2pws DC
+    Visitor<<->>Agent: 单 PC + 分片 p2pctrl + 12 条有序多路复用 DC（统一承载 HTTP 与 WS）
     Visitor<<->>Agent: p2pctrl 内完成 RFC 9383 SPAKE2+ 双向认证 / 能力令牌校验
     Note over Visitor,Agent: 此后所有 HTTP/WS 业务流量仅在端到端 DTLS 通道内传输
 
-    Visitor->>Agent: 跨站沙箱 SW -> TunnelBridge -> P2PMux V7 TLV 请求
+    Visitor->>Agent: 跨站沙箱 SW -> Transferable 流桥接 -> P2PMux V8 TLV 请求
     Agent->>Target: Pure Pipe 单目标反向代理 HTTP/WS（ProxyCookieJar + 路径/能力边界校验）
     Target-->>Agent: 响应头与流式响应体
-    Agent-->>Visitor: 池通道回传（原生流式 Gzip 压缩 + 内存 CookieMirror 同步）
+    Agent-->>Visitor: 多路复用通道回传（原生流式 Gzip 压缩 + 内存 CookieMirror 同步）
 ```
 
 ---
@@ -122,10 +123,10 @@ sequenceDiagram
 - [本地反代协作与典型适配模式](docs/guide/reverse-proxy-recipes.md)
 - [服务端典型用例与部署模板](docs/guide/server-use-cases.md)
 - [系统架构与核心设计](docs/guide/architecture.md)
-- [P2PMux V7 线协议规范](docs/guide/protocol-specification.md)
+- [P2PMux V8 线协议规范](docs/guide/protocol-specification.md)
 - [安全机制与密码学边界](docs/guide/security.md)
 - [Agent 与信令服务端配置](docs/guide/agent-configuration.md)
-- [生产部署与三档沙箱规划](docs/guide/deployment.md)
+- [生产部署与两档沙箱规划](docs/guide/deployment.md)
 - [静态文件与目录只读适配器](docs/guide/file-server.md)
 - [V7 架构决策记录 (RFC)](docs/rfcs/v7.0-architecture.md)
 - [贡献者开发指南 (`CONTRIBUTING.md`)](CONTRIBUTING.md)

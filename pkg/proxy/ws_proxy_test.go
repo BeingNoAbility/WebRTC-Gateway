@@ -47,13 +47,6 @@ func TestProxyV7_WSProxy_NoDeadlockAndBlocks302Escape(t *testing.T) {
 
 	// Test 1: 302 redirect must return 302 and never touch /admin/ws.
 	cm, sm := newTestMuxPair(t)
-	cWSDC, sWSDC := newTestPipePair()
-	srvOnMsg, srvOnClose, err := sm.AttachDynamicWSDC(sWSDC)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer srvOnClose()
-	sWSDC.start(srvOnMsg)
 
 	doneRedir := make(chan struct{})
 	go func() {
@@ -69,12 +62,11 @@ func TestProxyV7_WSProxy_NoDeadlockAndBlocks302Escape(t *testing.T) {
 	reqTLV, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
 		Kind: protocol.StreamKindWS, Method: "GET", Target: "/public/redir",
 	})
-	cs, cliOnMsg, cliOnClose, err := cm.OpenWSStream(context.Background(), cWSDC, reqTLV)
+	cs, err := cm.OpenStream(reqTLV, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cliOnClose()
-	cWSDC.start(cliOnMsg)
+	defer cs.Close()
 
 	respBytes, err := cs.ReadResponseHeaders(context.Background())
 	if err != nil {
@@ -87,14 +79,6 @@ func TestProxyV7_WSProxy_NoDeadlockAndBlocks302Escape(t *testing.T) {
 	<-doneRedir
 
 	// Test 2: Partial WS frame + backend close exits promptly without deadlock.
-	cWSDC2, sWSDC2 := newTestPipePair()
-	srvOnMsg2, srvOnClose2, err := sm.AttachDynamicWSDC(sWSDC2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer srvOnClose2()
-	sWSDC2.start(srvOnMsg2)
-
 	doneClose := make(chan struct{})
 	go func() {
 		defer close(doneClose)
@@ -110,12 +94,11 @@ func TestProxyV7_WSProxy_NoDeadlockAndBlocks302Escape(t *testing.T) {
 		Kind: protocol.StreamKindWS, Method: "GET", Target: "/ws",
 		Headers: []protocol.HeaderField{{Name: "x-forwarded-host", Value: "evil.example.com"}},
 	})
-	cs2, cliOnMsg2, cliOnClose2, err := cm.OpenWSStream(context.Background(), cWSDC2, reqTLV2)
+	cs2, err := cm.OpenStream(reqTLV2, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cliOnClose2()
-	cWSDC2.start(cliOnMsg2)
+	defer cs2.Close()
 
 	rb2, err := cs2.ReadResponseHeaders(context.Background())
 	if err != nil {
@@ -169,13 +152,6 @@ func TestWSProxyStreamingCloseCodesAndDefaultOrigin(t *testing.T) {
 
 	openWS := func(target string) (uint16, []byte, uint16, string) {
 		cm, sm := newTestMuxPair(t)
-		cDC, sDC := newTestPipePair()
-		srvMsg, srvClose, err := sm.AttachDynamicWSDC(sDC)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer srvClose()
-		sDC.start(srvMsg)
 
 		done := make(chan struct{})
 		go func() {
@@ -192,12 +168,11 @@ func TestWSProxyStreamingCloseCodesAndDefaultOrigin(t *testing.T) {
 		reqTLV, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
 			Kind: protocol.StreamKindWS, FetchCtx: protocol.FetchCtxSameOriginClient, Method: "GET", Target: target,
 		})
-		cs, cliMsg, cliClose, err := cm.OpenWSStream(context.Background(), cDC, reqTLV)
+		cs, err := cm.OpenStream(reqTLV, true)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer cliClose()
-		cDC.start(cliMsg)
+		defer cs.Close()
 
 		rb, err := cs.ReadResponseHeaders(context.Background())
 		if err != nil {

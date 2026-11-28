@@ -18,7 +18,15 @@ import (
 	"time"
 
 	"webrtc-gateway/pkg/signaling"
+	"webrtc-gateway/pkg/state"
 )
+
+func decodeStrictBase64URL(s string) ([]byte, error) {
+	if strings.ContainsAny(s, "\r\n") {
+		return nil, errors.New("invalid base64url characters")
+	}
+	return base64.RawURLEncoding.Strict().DecodeString(s)
+}
 
 const (
 	// PKHashChars is the 22-char base64url prefix of SHA-256(pk) (132 bits).
@@ -71,7 +79,7 @@ func loadIdentityFromFile(cleanPath, origPath string) (*Identity, error) {
 }
 
 // LoadOrCreateIdentity loads an Ed25519 PKCS#8 PEM private key from keyPath, or atomically
-// creates and fsyncs a new one (O_CREATE|O_EXCL, 0600) if the file does not exist.
+// creates and fsyncs a new one under a sibling file lock if the file does not exist.
 func LoadOrCreateIdentity(keyPath string) (*Identity, error) {
 	cleanPath := filepath.Clean(keyPath)
 	if id, err := loadIdentityFromFile(cleanPath, keyPath); err == nil {
@@ -80,42 +88,36 @@ func LoadOrCreateIdentity(keyPath string) (*Identity, error) {
 		return nil, err
 	}
 
-	id, err := GenerateEphemeralIdentity()
-	if err != nil {
-		return nil, err
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(id.PrivateKey)
-	if err != nil {
-		return nil, err
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := os.MkdirAll(filepath.Dir(cleanPath), 0700); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(cleanPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 -- operator-configured persistent Ed25519 identity key path
-	if err != nil {
-		if os.IsExist(err) {
-			// Concurrent startup created the key first; load it cleanly without clobbering.
-			return loadIdentityFromFile(cleanPath, keyPath)
+	var result *Identity
+	err := state.WithFileLock(cleanPath+".lock", func() error {
+		// Re-check under file lock in case a concurrent process created the identity first.
+		if id, lerr := loadIdentityFromFile(cleanPath, keyPath); lerr == nil {
+			result = id
+			return nil
+		} else if !os.IsNotExist(lerr) {
+			return lerr
 		}
-		return nil, err
-	}
-	writeErr := func() error {
-		if _, werr := f.Write(pemBytes); werr != nil {
+
+		id, gerr := GenerateEphemeralIdentity()
+		if gerr != nil {
+			return gerr
+		}
+		der, merr := x509.MarshalPKCS8PrivateKey(id.PrivateKey)
+		if merr != nil {
+			return merr
+		}
+		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+		if werr := state.WriteAtomic(cleanPath, pemBytes, 0600); werr != nil {
 			return werr
 		}
-		if serr := f.Sync(); serr != nil {
-			return serr
-		}
-		return f.Close()
-	}()
-	if writeErr != nil {
-		_ = f.Close()
-		_ = os.Remove(cleanPath)
-		return nil, writeErr
+		id.KeyPath = keyPath
+		result = id
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	id.KeyPath = keyPath
-	return id, nil
+	return result, nil
 }
 
 // PublicKeyBase64 returns the raw 32-byte Ed25519 public key encoded as base64url (no padding).
@@ -145,11 +147,11 @@ func (id *Identity) SignAnswerTranscript(nodeID, visitorNonce string, offer, ans
 
 // VerifyAnswerTranscript verifies an Agent's Pure Ed25519 structured Offer/Answer transcript signature.
 func VerifyAnswerTranscript(pkB64, nodeID, visitorNonce string, offer, answer *signaling.SessionDescriptor, sigB64 string) (ed25519.PublicKey, error) {
-	pkBytes, err := base64.RawURLEncoding.DecodeString(pkB64)
+	pkBytes, err := decodeStrictBase64URL(pkB64)
 	if err != nil || len(pkBytes) != ed25519.PublicKeySize {
 		return nil, errors.New("invalid Ed25519 public key")
 	}
-	sigBytes, err := base64.RawURLEncoding.DecodeString(sigB64)
+	sigBytes, err := decodeStrictBase64URL(sigB64)
 	if err != nil || len(sigBytes) != ed25519.SignatureSize {
 		return nil, errors.New("invalid Ed25519 signature")
 	}
@@ -216,11 +218,11 @@ func (id *Identity) VerifyCapability(token, expectedNode string, now time.Time) 
 	if len(parts) != 2 {
 		return nil, errors.New("malformed capability token")
 	}
-	rawJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	rawJSON, err := decodeStrictBase64URL(parts[0])
 	if err != nil || len(rawJSON) == 0 || len(rawJSON) > 4096 {
 		return nil, errors.New("invalid capability payload encoding")
 	}
-	sig, err := base64.RawURLEncoding.DecodeString(parts[1])
+	sig, err := decodeStrictBase64URL(parts[1])
 	if err != nil || len(sig) != ed25519.SignatureSize {
 		return nil, errors.New("invalid capability signature encoding")
 	}

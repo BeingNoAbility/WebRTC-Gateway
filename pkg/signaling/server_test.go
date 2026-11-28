@@ -87,7 +87,7 @@ func registerTestAgent(t *testing.T, wsURL string, secret string, pub ed25519.Pu
 func TestSignalV7_AgentDisconnectNotifiesClientAndVisitorFloodNeverKillsAgent(t *testing.T) {
 	srv, err := NewSignalServer(ServerOptions{
 		Addr:          "127.0.0.1:0",
-		SignalSecret:  "secret-123",
+		SignalSecret:  testStrongSecret,
 		StaticFS:      testDistFS(),
 		MaxIPMessages: 1000,
 	})
@@ -107,13 +107,13 @@ func TestSignalV7_AgentDisconnectNotifiesClientAndVisitorFloodNeverKillsAgent(t 
 	}
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	agentConn := registerTestAgent(t, wsBase+"/ws/agent/nas", "secret-123", pub, priv, "nas", true)
+	agentConn := registerTestAgent(t, wsBase+"/ws/agent/nas", testStrongSecret, pub, priv, "nas", true)
 	defer agentConn.CloseNow()
 
 	// Wrong Ed25519 key for same node must be rejected (NODE_OWNERSHIP_CONFLICT).
 	pub2, priv2, _ := ed25519.GenerateKey(rand.Reader)
 	badConn, _, err := websocket.Dial(ctx, wsBase+"/ws/agent/nas", &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": []string{"Bearer secret-123"}},
+		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + testStrongSecret}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -172,7 +172,7 @@ func TestSignalV7_AgentDisconnectNotifiesClientAndVisitorFloodNeverKillsAgent(t 
 		t.Fatal("visitor flood disconnected legitimate Agent")
 	}
 
-	// Answer with mismatched PK must be rejected by SignalServer itself.
+	// Answer with mismatched PK must be rejected by SignalServer itself (L-10: actually assert PK_MISMATCH!).
 	badAns, _ := json.Marshal(map[string]any{
 		"type":       TypeAnswer,
 		"session_id": joined.SessionID,
@@ -181,6 +181,23 @@ func TestSignalV7_AgentDisconnectNotifiesClientAndVisitorFloodNeverKillsAgent(t 
 		"sig":        "fakesig",
 	})
 	_ = agentConn.Write(ctx, websocket.MessageText, badAns)
+	gotPKMismatch := false
+	for i := 0; i < 80; i++ {
+		rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, raw, rerr := agentConn.Read(rctx)
+		rcancel()
+		if rerr != nil {
+			t.Fatalf("failed reading agentConn while waiting for PK_MISMATCH: %v", rerr)
+		}
+		var ed ErrorDTO
+		if json.Unmarshal(raw, &ed) == nil && ed.Type == TypeError && ed.Code == "PK_MISMATCH" {
+			gotPKMismatch = true
+			break
+		}
+	}
+	if !gotPKMismatch {
+		t.Fatal("agentConn never received PK_MISMATCH error for mismatched Answer PK")
+	}
 
 	// Disconnecting agent must notify client with peer_status offline.
 	_ = agentConn.Close(websocket.StatusNormalClosure, "bye")
@@ -344,7 +361,7 @@ func TestClientPostOfferLifetimeReaped(t *testing.T) {
 func TestBrokerCloseAllBoundedTimeout(t *testing.T) {
 	srv, err := NewSignalServer(ServerOptions{
 		Addr:         "127.0.0.1:0",
-		SignalSecret: "secret",
+		SignalSecret: testStrongSecret,
 		StaticFS:     testDistFS(),
 	})
 	if err != nil {

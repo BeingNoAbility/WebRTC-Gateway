@@ -14,9 +14,12 @@ import (
 )
 
 const (
-	sessionSendQueueSize = 256
-	wsWriteTimeout       = 10 * time.Second
-	offerWindowDuration  = 60 * time.Second
+	sessionSendQueueSize   = 256
+	wsWriteTimeout         = 10 * time.Second
+	wsCloseGraceTimeout    = 500 * time.Millisecond
+	offerWindowDuration    = 60 * time.Second
+	candidateWindowDur     = 60 * time.Second
+	MaxCandidatesPerMinute = 60
 )
 
 var (
@@ -48,16 +51,17 @@ type Session struct {
 	closed      atomic.Bool
 	evicted     atomic.Bool
 
-	stateMu         sync.Mutex
-	joinedAt        time.Time
-	lastActivity    time.Time
-	hasSentOffer    bool
-	firstOfferAt    time.Time
-	offerPendingAt  time.Time
-	offerTimestamps []time.Time
-	candidateCount  int
-	requireVisAuth  bool
-	agentPubKeyB64  string
+	stateMu             sync.Mutex
+	joinedAt            time.Time
+	lastActivity        time.Time
+	hasSentOffer        bool
+	firstOfferAt        time.Time
+	offerPendingAt      time.Time
+	offerTimestamps     []time.Time
+	candidateCount      int
+	candidateTimestamps []time.Time
+	requireVisAuth      bool
+	agentPubKeyB64      string
 }
 
 func NewSession(parentCtx context.Context, conn *websocket.Conn, role SessionRole, nodeID, sessionID, clientIP string) *Session {
@@ -156,17 +160,22 @@ func truncateUTF8Bytes(s string, maxBytes int) string {
 	return s[:n]
 }
 
-// Close closes the WebSocket with a clean status code and stops the writer loop.
+// Close sends a clean RFC 6455 Close frame with a bounded 500ms grace timer BEFORE cancelling
+// s.ctx so peers receive the real close status code without half-open peers stalling cleanup.
 func (s *Session) Close(status websocket.StatusCode, reason string) {
 	s.closeOnce.Do(func() {
 		s.evicted.Store(true)
 		s.closed.Store(true)
-		if s.cancel != nil {
-			s.cancel()
-		}
 		if s.conn != nil {
 			reason = truncateUTF8Bytes(reason, 120)
+			timer := time.AfterFunc(wsCloseGraceTimeout, func() {
+				_ = s.conn.CloseNow()
+			})
 			_ = s.conn.Close(status, reason)
+			timer.Stop()
+		}
+		if s.cancel != nil {
+			s.cancel()
 		}
 	})
 }
@@ -326,8 +335,8 @@ func (s *Session) HasSentOffer() bool {
 	return v
 }
 
-// AllowCandidate enforces post-Offer-only and strict non-resetting candidate quota.
-func (s *Session) AllowCandidate() (allowed bool, preOffer bool) {
+// AllowCandidate enforces post-Offer-only, 60/min burst rate limit, and strict non-resetting lifetime quota.
+func (s *Session) AllowCandidate(now time.Time) (allowed bool, preOffer bool) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	if !s.hasSentOffer {
@@ -336,6 +345,18 @@ func (s *Session) AllowCandidate() (allowed bool, preOffer bool) {
 	if s.candidateCount >= MaxCandidatesPerClient {
 		return false, false
 	}
+	cutoff := now.Add(-candidateWindowDur)
+	kept := s.candidateTimestamps[:0]
+	for _, ts := range s.candidateTimestamps {
+		if ts.After(cutoff) {
+			kept = append(kept, ts)
+		}
+	}
+	if len(kept) >= MaxCandidatesPerMinute {
+		s.candidateTimestamps = kept
+		return false, false
+	}
+	s.candidateTimestamps = append(kept, now)
 	s.candidateCount++
 	return true, false
 }

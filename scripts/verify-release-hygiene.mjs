@@ -279,6 +279,17 @@ for (const fullPath of auditFiles) {
     errors.push(`Markdown file:/// link detected in ${relFile}`);
     leakCount++;
   }
+  // Enforce Zero Private Data Invariant for RFC 1918 LAN IPs outside unit/integration test files
+  // (allow only the well-known standard Docker default bridge CIDR literal 172.17.0.0/16).
+  const isTestFile = /(?:^|\/)(?:test\/|.*_test\.go$|.*\.test\.[cm]?js$)/.test(relFile);
+  if (!isTestFile) {
+    const scrubbedDockerBridge = content.replace(/172\.17\.0\.0\/16/g, '');
+    const rfc1918 = /\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b/;
+    if (rfc1918.test(scrubbedDockerBridge)) {
+      errors.push(`Privacy/secret leak detected: RFC 1918 private IP matched in ${relFile} (use RFC 5737 192.0.2.x / 198.51.100.x / 203.0.113.x)`);
+      leakCount++;
+    }
+  }
 }
 check(
   leakCount === 0,

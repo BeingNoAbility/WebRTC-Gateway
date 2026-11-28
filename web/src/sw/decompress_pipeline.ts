@@ -1,9 +1,10 @@
 /**
- * V7 Native Bounded Streaming Gzip Decompression Pipeline
+ * Native Bounded Streaming Gzip Decompression Pipeline
  * - Peeks first non-empty chunk BEFORE constructing `DecompressionStream('gzip')` so
- *   0-byte empty bodies close cleanly instead of throwing `TypeError` on empty gzip EOF!
- * - Tuned bomb guard (`minOutput = 16 MiB`, `maxRatio = 1024`, `maxOutput = 512 MiB`) so
- *   highly compressible legitimate assets (sparse JSON/CSV/SQL dumps) pass while real bombs abort.
+ *   0-byte empty bodies close cleanly instead of throwing on empty gzip EOF.
+ * - Cancels upstream `source` even if consumer calls `cancel()` BEFORE the first `pull()`.
+ * - Synchronizes `totalIn` / `totalOut` accounting via a 1-chunk-buffered counting stage
+ *   so read-ahead buffering cannot mask decompression bombs.
  */
 
 const MAX_EXPANSION_RATIO = 1024;
@@ -41,6 +42,30 @@ export function pipeThroughBoundedDecompression(
   let decompWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
   let pumpPromise: Promise<void> | null = null;
   let started = false;
+  let cancelled = false;
+
+  const abortAll = (reason: unknown) => {
+    cancelled = true;
+    if (srcReader) {
+      const r = srcReader;
+      srcReader = null;
+      void r.cancel(reason).catch(() => {});
+    } else if (!started) {
+      // Cancel upstream `source` directly when cancelled BEFORE first `pull()`!
+      started = true;
+      void source.cancel(reason).catch(() => {});
+    }
+    if (decompReader) {
+      const dr = decompReader;
+      decompReader = null;
+      void dr.cancel(reason).catch(() => {});
+    }
+    if (decompWriter) {
+      const dw = decompWriter;
+      decompWriter = null;
+      void dw.abort(reason).catch(() => {});
+    }
+  };
 
   const initDecompressorWithFirstChunk = (firstChunk: Uint8Array) => {
     const ds = new DecompressionStream('gzip') as unknown as TransformStream<Uint8Array, Uint8Array>;
@@ -49,34 +74,46 @@ export function pipeThroughBoundedDecompression(
 
     pumpPromise = (async () => {
       try {
+        await decompWriter!.ready;
+        if (cancelled) return;
         totalIn += firstChunk.byteLength;
         await decompWriter!.write(firstChunk);
-        while (srcReader) {
+        while (srcReader && !cancelled) {
+          await decompWriter!.ready;
+          if (!srcReader || cancelled) break;
           const { done, value } = await srcReader.read();
           if (done) break;
           if (!value || value.byteLength === 0) continue;
           totalIn += value.byteLength;
           await decompWriter!.write(value);
         }
-        await decompWriter!.close();
+        if (!cancelled && decompWriter) {
+          await decompWriter.close();
+        }
       } catch (err) {
-        // Cancel upstream source immediately so corrupt gzip never pins an HTTP pool slot!
-        void srcReader?.cancel(err).catch(() => {});
-        await decompWriter!.abort(err).catch(() => {});
+        abortAll(err);
       }
     })();
   };
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
+      if (cancelled) {
+        controller.close();
+        return;
+      }
       if (!started) {
         started = true;
         srcReader = source.getReader();
         // Peek until first non-empty chunk or clean 0-byte EOF (never feeds 0 bytes to DecompressionStream!).
-        while (true) {
+        while (!cancelled && srcReader) {
           const { done, value } = await srcReader.read();
           if (done) {
-            srcReader.releaseLock();
+            try {
+              srcReader.releaseLock();
+            } catch {
+              // ignore
+            }
             srcReader = null;
             controller.close();
             return;
@@ -88,19 +125,17 @@ export function pipeThroughBoundedDecompression(
         }
       }
 
-      if (!decompReader) {
+      if (!decompReader || cancelled) {
         controller.close();
         return;
       }
 
-      // Loop over 0-byte decompressed chunks so pull() NEVER returns without enqueuing or closing!
-      while (true) {
+      while (!cancelled && decompReader) {
         let readRes: ReadableStreamReadResult<Uint8Array>;
         try {
           readRes = await decompReader.read();
         } catch (err) {
-          void srcReader?.cancel(err).catch(() => {});
-          void decompWriter?.abort(err).catch(() => {});
+          abortAll(err);
           controller.error(err);
           return;
         }
@@ -116,15 +151,13 @@ export function pipeThroughBoundedDecompression(
         totalOut += value.byteLength;
         if (totalOut > maxOut) {
           const err = new Error('decompressed response exceeded maximum allowed size');
-          void srcReader?.cancel(err).catch(() => {});
-          void decompReader.cancel(err).catch(() => {});
+          abortAll(err);
           controller.error(err);
           return;
         }
         if (totalOut >= minOut && totalIn > 0 && totalOut / totalIn > maxRatio) {
           const err = new Error('decompression bomb detected (expansion ratio exceeded)');
-          void srcReader?.cancel(err).catch(() => {});
-          void decompReader.cancel(err).catch(() => {});
+          abortAll(err);
           controller.error(err);
           return;
         }
@@ -133,9 +166,7 @@ export function pipeThroughBoundedDecompression(
       }
     },
     cancel(reason) {
-      void srcReader?.cancel(reason).catch(() => {});
-      void decompReader?.cancel(reason).catch(() => {});
-      void decompWriter?.abort(reason).catch(() => {});
+      abortAll(reason);
     },
   });
 }

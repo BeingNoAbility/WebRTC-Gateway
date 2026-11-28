@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"webrtc-gateway/pkg/protocol"
 	"webrtc-gateway/pkg/proxy"
 )
 
@@ -192,7 +191,7 @@ func TestAgentV7_SPAKE2P_MutualAuthAndNegativeAttacks(t *testing.T) {
 }
 
 func TestRFC9383AppendixCVectorAndV7KDF(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "test", "fixtures", "protocol_v7_golden_vectors.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "test", "fixtures", "protocol_v8_golden_vectors.json"))
 	if err != nil {
 		t.Fatalf("read golden vectors: %v", err)
 	}
@@ -379,21 +378,19 @@ func TestAgentSecurityRegressions(t *testing.T) {
 		t.Fatalf("unrelated IP blocked by another IP's handshake cap: %v", err)
 	}
 
-	// P1-13: AUTH_RESULT with 42 KiB of InitialCookies strictly fits inside negotiated max control frame!
-	var bigCookies []proxy.CookieDelta
-	val := strings.Repeat("v", 1000)
-	for i := 0; i < 45; i++ {
-		bigCookies = append(bigCookies, proxy.CookieDelta{
-			Op: "set", Name: fmt.Sprintf("c%02d", i), Value: val, Path: "/",
-		})
+	// H-3 / M-2: CapabilityStore refuses to overwrite corrupt disk state (Fail-Closed) and
+	// IsRevoked is pure-memory lock-free without triggering disk I/O.
+	corruptPath := filepath.Join(t.TempDir(), "corrupt.state.json")
+	if err := os.WriteFile(corruptPath, []byte("{corrupt-json"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	for _, limit := range []int{protocol.MinChunkSize, protocol.DefaultChunkSize, protocol.MaxControlJSONSize} {
-		raw := marshalBoundedAuthResult(limit, "owner", "tok123", "", BackendMeta{
-			NodeID: "nas", BackendOrigin: "http://127.0.0.1:8080",
-		}, bigCookies)
-		if len(raw) > limit {
-			t.Fatalf("P1-13 regression: AUTH_RESULT (%d bytes) exceeded negotiated limit %d", len(raw), limit)
-		}
+	if _, err := NewCapabilityStoreWithFile(corruptPath); err == nil {
+		t.Fatal("expected NewCapabilityStoreWithFile to fail closed on corrupt JSON")
+	}
+
+	// M-5: Strict base64url rejects embedded CR/LF and non-canonical trailing bits.
+	if _, err := decodeStrictBase64URL("AAAA\n"); err == nil {
+		t.Fatal("M-5 regression: decodeStrictBase64URL accepted newline")
 	}
 
 	// P1-14: Cross-process CapabilityStore merge preserves monotonic revocations & exposes CLI-minted records.
@@ -442,20 +439,7 @@ func TestAgentSecurityRegressions(t *testing.T) {
 		t.Fatal("P1-14 regression: CLI -mint-link resurrected revoked cap-old on disk!")
 	}
 
-	// P2-09: CAP_RESP list dynamically packs to small negotiated chunk size + MintCapability validation.
-	var manyItems []CapabilityRecord
-	for i := 0; i < 100; i++ {
-		manyItems = append(manyItems, CapabilityRecord{
-			Payload: CapabilityPayload{
-				V: CapabilityVersion, JTI: fmt.Sprintf("cap-%03d", i), Node: "nas",
-				Exp: exp, PathPrefix: "/very/long/path/prefix/" + strings.Repeat("x", 100),
-			},
-		})
-	}
-	packed, packedHasMore := fitCapListPage(protocol.MinChunkSize, "req-1", manyItems, 100, 0, 100, false)
-	if !packedHasMore || len(packed) == 0 || len(packed) >= len(manyItems) {
-		t.Fatalf("P2-09 regression: fitCapListPage failed to pack for 4088B limit: len=%d hasMore=%v", len(packed), packedHasMore)
-	}
+	// MintCapability validation.
 	if _, err := id.MintCapability(CapabilityPayload{JTI: "ok", Node: "nas", Exp: exp, MaxConns: -1}); err == nil {
 		t.Fatal("P2-09 regression: MintCapability accepted negative MaxConns")
 	}

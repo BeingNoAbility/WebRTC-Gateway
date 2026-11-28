@@ -1,11 +1,11 @@
 /**
- * V7 Portal Application Entrypoint (/__p2p_gw__/portal.js)
- * - 128-bit CSPRNG `tabId` and one-time 128-bit `enterNonce` registered over `bridgePort` before mounting `appFrame`.
- * - Enforces strict iframe `sandbox` (NO `allow-top-navigation*`) & explicit `allow` policy on `appFrame`.
- * - 3-Tier sandbox derivation with per-device/per-node 128-bit salt + one-click "Reset Sandbox" button,
- *   plus per-tab capability origin reuse across silent reconnects.
- * - Continuously merges latest `CookieDelta` updates into `activeMeta.initialCookies` so SW wakeups
- *   never roll back non-HttpOnly cookies.
+ * Portal Application Entrypoint (/__p2p_gw__/portal.js)
+ * - Explicit AbortController-scoped session lifecycle + bfcache pageshow recovery.
+ * - 128-bit CSPRNG `tabId` and one-time 128-bit `enterNonce` bound to exact `(tabId, nextPath)`.
+ * - Prominent Tier 2 restricted-isolation warning banner for both same-site wildcard AND
+ *   fixed single-host sandbox deployments (Tier 1 strictly reserved for cross-site wildcard).
+ * - Continuously merges server & client `CookieDelta` updates so SW sleep/wake never rolls
+ *   back cookies, while Reset Sandbox starts cleanly without re-injecting stale cookies.
  */
 
 import { randomHex } from '../shared/crypto';
@@ -13,11 +13,13 @@ import { resetTofuKey } from '../shared/identity';
 import { isRecord, type BackendMeta, type CookieDelta } from '../shared/ipc';
 import {
   computeSandboxOrigin,
+  isRestrictedSandbox,
   normalizeNodeId,
   resetNodeSandboxSalt,
 } from '../shared/sandbox_origin';
 import { TunnelBridge } from './core/bridge';
 import {
+  icePrefsEqual,
   loadIcePreferences,
   parseRouteHash,
   readPortalMetaConfig,
@@ -37,6 +39,7 @@ const APP_IFRAME_ALLOW = 'clipboard-write; fullscreen';
 const BRIDGE_IFRAME_SANDBOX = 'allow-scripts allow-same-origin';
 
 const metaCfg = readPortalMetaConfig();
+const restrictedSandbox = isRestrictedSandbox(metaCfg);
 let icePrefs: IcePreferences = loadIcePreferences();
 
 const landingEl = document.getElementById('landingView') as HTMLElement;
@@ -57,6 +60,7 @@ const tabId = `tab_${randomHex(16)}`;
 
 const modals = new PortalModals(modalHostEl);
 const statsCollector = new StatsCollector();
+let sessionAbort: AbortController | null = null;
 let transport: PeerSession | null = null;
 let activeBridge: TunnelBridge | null = null;
 let bridgeFrame: HTMLIFrameElement | null = null;
@@ -118,8 +122,10 @@ const pill = new SmartPill(hudHostEl, {
   },
   onSettings: () => {
     modals.showSettingsModal(icePrefs, (next) => {
+      const changed = !icePrefsEqual(icePrefs, next);
       icePrefs = next;
-      if (transport) {
+      // Do NOT tear down and reconnect the active tunnel when only the UI language changed!
+      if (changed && transport) {
         transport.updateIcePreferences(next);
         void transport.connect();
       }
@@ -135,13 +141,18 @@ const pill = new SmartPill(hudHostEl, {
     resetNodeSandboxSalt(activeNodeId);
     activeSandboxOrigin = '';
     liveCookieSnapshot.clear();
+    // Clear initialCookies on cached AuthSuccessInfo so remount does not re-inject stale cookies!
+    activeAuthInfo = {
+      ...activeAuthInfo,
+      meta: { ...activeAuthInfo.meta, initialCookies: [] },
+    };
     if (activeBridge) {
       activeBridge.detachWindowListener();
       activeBridge.destroy();
       activeBridge = null;
     }
     pill.appendLog(`[Portal] Rotated 128-bit sandbox salt for node=${activeNodeId}; remounting`);
-    void mountSandboxAndApp(activeAuthInfo, false);
+    void mountSandboxAndApp(activeAuthInfo, false, true);
   },
 });
 
@@ -149,7 +160,9 @@ function refreshStaticText(): void {
   landingSubEl.textContent = t('landing.subtitle');
   nodeInputEl.placeholder = t('landing.nodePlaceholder');
   connectBtnEl.textContent = t('landing.connect');
-  sameSiteBannerEl.textContent = t('banner.sameSite');
+  sameSiteBannerEl.textContent = metaCfg.sameSiteMode
+    ? t('banner.sameSite')
+    : t('banner.fixedSandbox');
   versionBadgeEl.textContent = metaCfg.version;
   pill.refreshLabels();
 }
@@ -157,8 +170,9 @@ function refreshStaticText(): void {
 subscribeLang(() => refreshStaticText());
 refreshStaticText();
 
-if (metaCfg.sameSiteMode) {
+if (restrictedSandbox) {
   sameSiteBannerEl.style.display = 'block';
+  sameSiteBannerEl.setAttribute('data-sandbox-tier', 'tier2');
 }
 
 function setBanner(visible: boolean, text = '', isError = false): void {
@@ -177,6 +191,10 @@ function showLanding(): void {
 
 function teardownSession(): void {
   mountGeneration++;
+  if (sessionAbort) {
+    sessionAbort.abort();
+    sessionAbort = null;
+  }
   statsCollector.stop();
   modals.close();
   if (transport) {
@@ -206,16 +224,11 @@ function teardownSession(): void {
   recoveringSw = false;
 }
 
-/**
- * Mounts an ephemeral, zero-temporal-overlap `bridgeFrame` strictly when `appFrame` is NOT
- * mounted, transfers a fresh `bridgePort` to the sandbox Service Worker, waits for
- * `P2P_BRIDGE_READY`, and IMMEDIATELY removes `bridgeFrame` from the DOM in `finally`.
- * Guarantees untrusted `appFrame` JS can NEVER access `bridgeFrame` or `window.parent[bridge]`.
- */
 async function attachEphemeralBridge(
   sandboxOrigin: string,
   meta: BackendMeta,
-  myMountGen: number
+  myMountGen: number,
+  signal: AbortSignal
 ): Promise<void> {
   if (!activeBridge) throw new Error('TunnelBridge not initialized');
   if (appFrame) {
@@ -237,6 +250,14 @@ async function attachEphemeralBridge(
   bridgeFrame = bFrame;
 
   const readyPromise = new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error('Session aborted'));
+      return;
+    }
+    const onAbort = () => {
+      cleanup();
+      reject(new Error('Session aborted'));
+    };
     const onMessage = (ev: MessageEvent) => {
       if (ev.isTrusted === false) return;
       if (ev.origin !== sandboxOrigin || ev.source !== bFrame.contentWindow) return;
@@ -252,13 +273,15 @@ async function attachEphemeralBridge(
     const cleanup = () => {
       clearTimeout(timer);
       window.removeEventListener('message', onMessage);
+      signal.removeEventListener('abort', onAbort);
     };
     window.addEventListener('message', onMessage);
+    signal.addEventListener('abort', onAbort, { once: true });
 
     bFrame.addEventListener(
       'load',
       () => {
-        if (myMountGen !== mountGeneration || bridgeFrame !== bFrame || !bFrame.contentWindow || !activeBridge) {
+        if (signal.aborted || myMountGen !== mountGeneration || bridgeFrame !== bFrame || !bFrame.contentWindow || !activeBridge) {
           return;
         }
         const ch = new MessageChannel();
@@ -285,7 +308,6 @@ async function attachEphemeralBridge(
   try {
     await readyPromise;
   } finally {
-    // Destroy bridgeFrame unconditionally BEFORE returning (zero temporal overlap with appFrame!).
     bFrame.remove();
     if (bridgeFrame === bFrame) {
       bridgeFrame = null;
@@ -295,8 +317,7 @@ async function attachEphemeralBridge(
 
 async function recoverEvictedSw(): Promise<void> {
   if (recoveringSw || !activeBridge || !activeAuthInfo || !activeSandboxOrigin || !activeMeta) return;
-  // Verify the SW actually lost its bridgePort before acting (blocks untrusted appFrame DoS!).
-  if (await activeBridge.pingSw(800)) {
+  if (await activeBridge.pingSw(1_500)) {
     return;
   }
   if (recoveringSw || !activeAuthInfo) return;
@@ -308,16 +329,21 @@ async function recoverEvictedSw(): Promise<void> {
       appFrame = null;
       activeBridge.setAppFrame(null);
     }
-    await mountSandboxAndApp(activeAuthInfo, activeIsCap);
+    await mountSandboxAndApp(activeAuthInfo, activeIsCap, false);
   } finally {
     recoveringSw = false;
   }
 }
 
-async function mountSandboxAndApp(info: AuthSuccessInfo, isCap: boolean): Promise<void> {
+async function mountSandboxAndApp(
+  info: AuthSuccessInfo,
+  isCap: boolean,
+  skipInitialCookiesMerge = false
+): Promise<void> {
   const myMountGen = ++mountGeneration;
   const activeTransport = transport;
-  if (!activeTransport) return;
+  const signal = sessionAbort?.signal;
+  if (!activeTransport || !signal || signal.aborted) return;
   const mux = activeTransport.getMux();
   if (!mux) return;
 
@@ -327,7 +353,6 @@ async function mountSandboxAndApp(info: AuthSuccessInfo, isCap: boolean): Promis
   const targetOrigin = info.meta.backendOrigin || `http://${info.meta.nodeId}.internal`;
   let nextSandboxOrigin: string;
   if (isCap && tabCapSandboxOrigin) {
-    // Reuse the per-tab 128-bit capability origin across silent reconnects so `appFrame` stays alive!
     nextSandboxOrigin = tabCapSandboxOrigin;
   } else {
     nextSandboxOrigin = await computeSandboxOrigin(
@@ -341,14 +366,15 @@ async function mountSandboxAndApp(info: AuthSuccessInfo, isCap: boolean): Promis
       tabCapSandboxOrigin = nextSandboxOrigin;
     }
   }
-  if (myMountGen !== mountGeneration || transport !== activeTransport) return;
+  if (signal.aborted || myMountGen !== mountGeneration || transport !== activeTransport) return;
 
-  mergeCookieDeltas(info.meta.initialCookies);
+  if (!skipInitialCookiesMerge) {
+    mergeCookieDeltas(info.meta.initialCookies);
+  }
   activeMeta = {
     ...info.meta,
     initialCookies: exportLiveCookieSnapshot(),
   };
-  const openWSDC = () => activeTransport.openWSDC();
 
   if (!activeBridge) {
     activeBridge = new TunnelBridge({
@@ -369,14 +395,12 @@ async function mountSandboxAndApp(info: AuthSuccessInfo, isCap: boolean): Promis
     activeBridge.attachWindowListener();
   }
 
-  // Silent WebRTC reconnect fast path: if `appFrame` is already mounted on the same sandbox origin
-  // AND the Service Worker still holds our live `bridgePort`, swap the PoolMux seamlessly with zero
-  // DOM flicker and zero `bridgeFrame` remount!
+  // Silent WebRTC reconnect fast path: preserve appFrame when SW still holds our live bridgePort.
   if (activeSandboxOrigin === nextSandboxOrigin && appFrame) {
-    const swAlive = await activeBridge.pingSw(1_500);
-    if (myMountGen !== mountGeneration || transport !== activeTransport) return;
+    const swAlive = await activeBridge.pingSw(3_000);
+    if (signal.aborted || myMountGen !== mountGeneration || transport !== activeTransport) return;
     if (swAlive && appFrame) {
-      activeBridge.setContext(mux, openWSDC, nextSandboxOrigin, activeMeta, appFrame);
+      activeBridge.setContext(mux, nextSandboxOrigin, activeMeta, appFrame);
       setBanner(false);
       return;
     }
@@ -393,35 +417,32 @@ async function mountSandboxAndApp(info: AuthSuccessInfo, isCap: boolean): Promis
     bridgeFrame = null;
   }
 
-  activeBridge.setContext(mux, openWSDC, nextSandboxOrigin, activeMeta, null);
+  activeBridge.setContext(mux, nextSandboxOrigin, activeMeta, null);
 
-  // 1. Ephemeral zero-temporal-overlap bridge handshake: mount -> attach bridgePort -> destroy!
   try {
-    await attachEphemeralBridge(nextSandboxOrigin, activeMeta, myMountGen);
+    await attachEphemeralBridge(nextSandboxOrigin, activeMeta, myMountGen, signal);
   } catch (err) {
-    if (myMountGen !== mountGeneration) return;
+    if (signal.aborted || myMountGen !== mountGeneration) return;
     const msg = err instanceof Error ? err.message : 'Bridge initialization failed';
     setBanner(true, msg, true);
     pill.appendLog(`[Bridge] Error: ${msg}`);
     return;
   }
-  if (myMountGen !== mountGeneration || transport !== activeTransport) return;
+  if (signal.aborted || myMountGen !== mountGeneration || transport !== activeTransport) return;
 
-  // 2. Register one-time 128-bit `enterNonce` over `bridgePort` BEFORE mounting `appFrame`!
   const safePath = currentAppPath.startsWith('/') ? currentAppPath : '/';
   const enterNonce = randomHex(16);
   try {
     await activeBridge.registerEnterNonce(enterNonce, safePath);
   } catch (err) {
-    if (myMountGen !== mountGeneration) return;
+    if (signal.aborted || myMountGen !== mountGeneration) return;
     const msg = err instanceof Error ? err.message : 'Failed to register enter nonce';
     setBanner(true, msg, true);
     pill.appendLog(`[Bridge] Error: ${msg}`);
     return;
   }
-  if (myMountGen !== mountGeneration || transport !== activeTransport) return;
+  if (signal.aborted || myMountGen !== mountGeneration || transport !== activeTransport) return;
 
-  // 3. Mount the isolated sandboxed app iframe (NO allow-top-navigation*, NO sibling bridgeFrame!).
   const aFrame = document.createElement('iframe');
   aFrame.className = 'p2p-app-frame';
   aFrame.setAttribute('sandbox', APP_IFRAME_SANDBOX);
@@ -447,7 +468,6 @@ function startRouteConnection(): void {
     return;
   }
 
-  // Scrub bearer `cap=` from the URL hash immediately so it never lingers in history!
   const cleanedHash = scrubSensitiveHashParams(rawHash);
   if (cleanedHash !== rawHash) {
     try {
@@ -460,6 +480,7 @@ function startRouteConnection(): void {
   pill.appendLog(`[Portal] Connecting to node=${parsed.nodeId} hash=${sanitizeHashForLog(rawHash)}`);
 
   teardownSession();
+  sessionAbort = new AbortController();
   activeNodeId = parsed.nodeId;
   currentAppPath = parsed.initialPath || '/';
   landingEl.style.display = 'none';
@@ -544,6 +565,7 @@ function startRouteConnection(): void {
           pkHash: info.pkHash,
           version: metaCfg.version,
           sameSiteMode: metaCfg.sameSiteMode,
+          restrictedSandbox,
           canResetSandbox: !isCap && metaCfg.sandboxMode !== 'fixed',
         });
         statsCollector.start(
@@ -581,9 +603,15 @@ window.addEventListener('hashchange', () => {
   startRouteConnection();
 });
 
-// Explicitly wipe RAM-only SPAKE2+ (w0, w1) and session state on tab unload / bfcache transition.
+// Explicitly wipe RAM-only SPAKE2+ (w0, w1) and session state on tab unload / bfcache transition,
+// and cleanly re-bootstrap if restored from bfcache!
 window.addEventListener('pagehide', () => {
   teardownSession();
+});
+window.addEventListener('pageshow', (ev: PageTransitionEvent) => {
+  if (ev.persisted) {
+    startRouteConnection();
+  }
 });
 
 // Boot initial route cleanly.

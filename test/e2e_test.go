@@ -279,8 +279,8 @@ func dialLiveVisitor(
 	for i, pdc := range poolDCs {
 		idx := i
 		dc := pdc
-		dc.OnOpen(func() { vMux.AttachPoolDC(idx, dc) })
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) { vMux.HandlePoolMessage(idx, msg.Data) })
+		dc.OnOpen(func() { vMux.AttachLaneDC(idx, dc) })
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) { vMux.HandleLaneMessage(idx, msg.Data) })
 	}
 
 	var wsWriteMu sync.Mutex
@@ -541,7 +541,7 @@ func TestFullV7Tunnel_HTTP_Cookie_WS_ClientIP_E2E(t *testing.T) {
 		t.Fatal("agent failed to register with live SignalServer")
 	}
 
-	pc, vMux, _, _, cleanup := dialLiveVisitor(
+	_, vMux, _, _, cleanup := dialLiveVisitor(
 		t, ctx, sigHTTP.URL, "e2enode", "owner-pass-e2e",
 		http.Header{"X-Forwarded-For": {"198.51.100.77"}},
 	)
@@ -551,9 +551,9 @@ func TestFullV7Tunnel_HTTP_Cookie_WS_ClientIP_E2E(t *testing.T) {
 		reqTLV, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
 			Kind: protocol.StreamKindHTTP, FetchCtx: protocol.FetchCtxSameOriginClient, Method: "GET", Target: target,
 		})
-		st, err := vMux.OpenHTTPStream(ctx, reqTLV, true)
+		st, err := vMux.OpenStream(reqTLV, false)
 		if err != nil {
-			t.Fatalf("OpenHTTPStream(%s): %v", target, err)
+			t.Fatalf("OpenStream(%s): %v", target, err)
 		}
 		defer st.Close()
 		hdrRaw, err := st.ReadResponseHeaders(ctx)
@@ -607,30 +607,15 @@ func TestFullV7Tunnel_HTTP_Cookie_WS_ClientIP_E2E(t *testing.T) {
 		t.Fatalf("SHA-256 mismatch: got=%s want=%s", gotHash, wantHash)
 	}
 
-	// Step D: Real dynamic DCEP "p2pws" DataChannel WebSocket echo!
-	ord := true
-	wsDC, err := pc.CreateDataChannel(protocol.WSChannelLabel, &webrtc.DataChannelInit{Ordered: &ord})
-	if err != nil {
-		t.Fatalf("CreateDataChannel(p2pws): %v", err)
-	}
-	wsOpen := make(chan struct{})
-	wsDC.OnOpen(func() { close(wsOpen) })
-	select {
-	case <-wsOpen:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for dynamic p2pws DC open")
-	}
-
+	// Step D: Multiplexed WebSocket echo over pre-negotiated V8 lanes (zero dynamic DCEP overhead)!
 	wsReqTLV, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
 		Kind: protocol.StreamKindWS, Method: "GET", Target: "/ws",
 	})
-	wsSt, onMsg, onClose, err := vMux.OpenWSStream(ctx, wsDC, wsReqTLV)
+	wsSt, err := vMux.OpenStream(wsReqTLV, true)
 	if err != nil {
-		t.Fatalf("OpenWSStream: %v", err)
+		t.Fatalf("OpenStream(ws): %v", err)
 	}
-	defer onClose()
-	wsDC.OnMessage(func(m webrtc.DataChannelMessage) { onMsg(m.Data) })
-	wsDC.OnClose(onClose)
+	defer wsSt.Close()
 
 	wsRespRaw, err := wsSt.ReadResponseHeaders(ctx)
 	if err != nil {
@@ -640,8 +625,8 @@ func TestFullV7Tunnel_HTTP_Cookie_WS_ClientIP_E2E(t *testing.T) {
 	if err != nil || wsResp.Status != 101 {
 		t.Fatalf("WS handshake expected 101, got err=%v resp=%+v", err, wsResp)
 	}
-	if err := wsSt.WriteWSMessage(false, []byte("ping-ws")); err != nil {
-		t.Fatalf("WS WriteWSMessage: %v", err)
+	if err := wsSt.WriteWSChunk(ctx, protocol.TypeWSText, true, []byte("ping-ws")); err != nil {
+		t.Fatalf("WS WriteWSChunk: %v", err)
 	}
 	var echoBuf bytes.Buffer
 	for {

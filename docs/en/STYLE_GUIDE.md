@@ -72,10 +72,10 @@ flowchart LR
 ### 1. Formatting and Sanitized Examples
 
 - **Spacing**: In Chinese prose, place one space between CJK characters and Latin letters, digits, or inline code; omit spaces next to CJK punctuation.
-- **Inline code and casing**: Wrap commands, paths, CLI flags, env vars, and symbols in backticks (`scripts/gate.sh`, `-sandbox-domain`, `MemoryBudget`); keep product/protocol names (WebRTC, TypeScript, Docker, Service Worker, Nginx) in official casing without backticks.
+- **Inline code and casing**: Wrap commands, paths, CLI flags, env vars, and symbols in backticks (`scripts/gate.sh`, `-sandbox-origin`, `MemoryBudget`); keep product/protocol names (WebRTC, TypeScript, Docker, Service Worker, Nginx) in official casing without backticks.
 - **Reserved examples**: Use only RFC 2606 / 6761 domains (`example.com`, `*.example`) and RFC 5737 IPs (`192.0.2.x`, `198.51.100.x`, `203.0.113.x`); `127.0.0.1` is valid for loopback defaults.
 - **Avoid brittle counts**: Do not hardcode test counts or dictionary key counts; describe how to run the verifying command instead.
-- **Protocol and tags**: Reference the current wire protocol version defined in `protocol-specification.md` (e.g., P2PMux V7); format container tags with a leading `v` (`vX.Y.Z`).
+- **Protocol and tags**: Reference the current wire protocol version defined in `protocol-specification.md` (e.g., P2PMux V8); format container tags with a leading `v` (`vX.Y.Z`).
 
 ### 2. Code Blocks, Mermaid, and Links
 

@@ -139,13 +139,14 @@ func (t *AuthLockoutTable) RecordFailure(rawIP string, now time.Time) bool {
 
 	t.pruneExpiredLocked(now)
 
+	// Check alreadyLocked BEFORE recording into globalRing so a single locked-out IP cannot
+	// keep pumping the global sliding ring and DoS legitimate users from other IPs.
+	if _, alreadyLocked := t.locked[key]; alreadyLocked {
+		return true
+	}
 	if len(t.globalRing) > 0 {
 		t.globalRing[t.globalHead] = now
 		t.globalHead = (t.globalHead + 1) % len(t.globalRing)
-	}
-
-	if _, alreadyLocked := t.locked[key]; alreadyLocked {
-		return true
 	}
 	if len(t.locked) >= t.maxLocked {
 		return true // Fail-Closed immediately when locked table is saturated.

@@ -508,23 +508,24 @@ test('V7 Suite 1: Embedded DistFS & 3-Tier Sandbox Deployment (Local / Tier 1 Fi
 
   const localSig = spawnLoggedProcess(signalBin, [
     '-addr', `127.0.0.1:${localPort}`,
-    '-signal-secret', 's1-secret',
+    '-dev',
+    '-signal-secret', 's1-secret-16bytes-ok',
   ]);
   const tier1Sig = spawnLoggedProcess(signalBin, [
     '-addr', `127.0.0.1:${tier1Port}`,
-    '-portal-domain', `portal.example.com:${tier1Port}`,
-    '-sandbox-host', `app.example.net:${tier1Port}`,
+    '-portal-origin', `https://portal.example.com:${tier1Port}`,
+    '-sandbox-origin', `https://app.example.net:${tier1Port}`,
     '-tls-cert', tlsCert.certPath,
     '-tls-key', tlsCert.keyPath,
-    '-signal-secret', 's1-secret',
+    '-signal-secret', 's1-secret-16bytes-ok',
   ]);
   const tier3Sig = spawnLoggedProcess(signalBin, [
     '-addr', `127.0.0.1:${tier3Port}`,
-    '-portal-domain', `portal.example.com:${tier3Port}`,
-    '-sandbox-domain', `sandbox.example.net:${tier3Port}`,
+    '-portal-origin', `https://portal.example.com:${tier3Port}`,
+    '-sandbox-origin', `https://*.sandbox.example.net:${tier3Port}`,
     '-tls-cert', tlsCert.certPath,
     '-tls-key', tlsCert.keyPath,
-    '-signal-secret', 's1-secret',
+    '-signal-secret', 's1-secret-16bytes-ok',
   ]);
 
   let localAgent = null;
@@ -554,9 +555,15 @@ test('V7 Suite 1: Embedded DistFS & 3-Tier Sandbox Deployment (Local / Tier 1 Fi
     const portalSw = await fetch(`http://localhost:${localPort}/__p2p_gw__/sw.js`);
     assert.equal(portalSw.status, 404, 'Portal origin MUST NOT serve sw.js');
     await portalSw.body?.cancel();
-    const sbxSw = await fetch(`http://sbx-check.localhost:${localPort}/__p2p_gw__/sw.js`);
-    assert.equal(sbxSw.status, 200, 'Sandbox origin must serve embedded sw.js');
+    const sbxSwPlain = await fetch(`http://sbx-check.localhost:${localPort}/__p2p_gw__/sw.js`);
+    assert.equal(sbxSwPlain.status, 403, 'M-20: plain fetch of sw.js without Service-Worker/Sec-Fetch-Dest must return 403');
+    await sbxSwPlain.body?.cancel();
+    const sbxSw = await fetch(`http://sbx-check.localhost:${localPort}/__p2p_gw__/sw.js`, {
+      headers: { 'Service-Worker': 'script' },
+    });
+    assert.equal(sbxSw.status, 200, 'Sandbox origin must serve embedded sw.js to Service-Worker fetch');
     assert.equal(sbxSw.headers.get('service-worker-allowed'), '/');
+    assert.equal(sbxSw.headers.get('cross-origin-resource-policy'), 'same-origin');
     const swBody = await sbxSw.text();
     const patchMatch = swBody.match(/\/__p2p_gw__\/assets\/patch\.[0-9a-f]{10}\.js/);
     assert.ok(patchMatch, 'Embedded sw.js preamble must reference /__p2p_gw__/assets/patch.<hash>.js');
@@ -567,15 +574,14 @@ test('V7 Suite 1: Embedded DistFS & 3-Tier Sandbox Deployment (Local / Tier 1 Fi
     assert.ok((patchAsSw.headers.get('vary') || '').toLowerCase().includes('sec-fetch-dest'));
     await patchAsSw.body?.cancel();
 
-    // Start 3 agents (local ws://, Tier 1 wss:// via CONNECT proxy -> portal.example.com, Tier 3 wss://)
+    // Start 3 agents (local ws:// with default mDNS=true to exercise H-20, Tier 2 fixed wss://, Tier 1 wildcard wss://)
     localAgent = spawnLoggedProcess(agentBin, [
       '-id', 'localnode',
       '-signal', `ws://127.0.0.1:${localPort}/ws`,
-      '-signal-secret', 's1-secret',
+      '-signal-secret', 's1-secret-16bytes-ok',
       '-allow-public',
       '-identity-key', path.join(workDir, 's1-local.key'),
       '-target', `http://127.0.0.1:${backend.port}`,
-      '-ice-mdns=false',
     ]);
     const proxyEnv = {
       SSL_CERT_FILE: tlsCert.certPath,
@@ -587,7 +593,7 @@ test('V7 Suite 1: Embedded DistFS & 3-Tier Sandbox Deployment (Local / Tier 1 Fi
     tier1Agent = spawnLoggedProcess(agentBin, [
       '-id', 'tier1node',
       '-signal', `wss://portal.example.com:${tier1Port}/ws`,
-      '-signal-secret', 's1-secret',
+      '-signal-secret', 's1-secret-16bytes-ok',
       '-allow-public',
       '-identity-key', path.join(workDir, 's1-tier1.key'),
       '-target', `http://127.0.0.1:${backend.port}`,
@@ -596,7 +602,7 @@ test('V7 Suite 1: Embedded DistFS & 3-Tier Sandbox Deployment (Local / Tier 1 Fi
     tier3Agent = spawnLoggedProcess(agentBin, [
       '-id', 'tier3node',
       '-signal', `wss://portal.example.com:${tier3Port}/ws`,
-      '-signal-secret', 's1-secret',
+      '-signal-secret', 's1-secret-16bytes-ok',
       '-allow-public',
       '-identity-key', path.join(workDir, 's1-tier3.key'),
       '-target', `http://127.0.0.1:${backend.port}`,
@@ -628,33 +634,44 @@ test('V7 Suite 1: Embedded DistFS & 3-Tier Sandbox Deployment (Local / Tier 1 Fi
     assert.deepEqual(localTab.getExceptions(), []);
     await localTab.close();
 
-    // 1B. Tier 1 Fixed Dual-Domain (https://portal.example.com -> https://app.example.net)
+    // 1B. Tier 2 Restricted Fixed Dual-Domain (https://portal.example.com -> https://app.example.net)
     const tier1Tab = await openPageTab(chrome.client, `https://portal.example.com:${tier1Port}/#tier1node`);
     const tier1SbxSrc = await waitFor(
       () => tier1Tab.eval(`document.querySelector('iframe.p2p-app-frame')?.src || null`),
       15_000,
-      'tier1 fixed appFrame'
+      'tier2 fixed appFrame'
     );
     const tier1Origin = new URL(tier1SbxSrc).origin;
-    assert.equal(tier1Origin, `https://app.example.net:${tier1Port}`, 'Tier 1 MUST mount exact fixed sandboxHost');
+    assert.equal(tier1Origin, `https://app.example.net:${tier1Port}`, 'Fixed sandbox MUST mount exact configured origin');
+    const fixedBannerState = await tier1Tab.eval(`(() => {
+      const b = document.getElementById('sameSiteBanner');
+      return { visible: b && getComputedStyle(b).display !== 'none', tier: b?.getAttribute('data-sandbox-tier') || '' };
+    })()`);
+    assert.equal(fixedBannerState.visible, true, 'Fixed single-host sandbox MUST show Tier 2 restricted warning banner');
+    assert.equal(fixedBannerState.tier, 'tier2');
     const tier1Ready = await waitFor(
       () => tier1Tab.evalInChildFrame((u) => u.startsWith(tier1Origin) && !u.includes('/__p2p_gw__/'), `document.getElementById('app-status')?.textContent === 'READY'`),
       15_000,
-      'tier1 READY'
+      'tier2 fixed READY'
     );
     assert.equal(tier1Ready, true);
     assert.deepEqual(tier1Tab.getGatewayErrors(), []);
     assert.deepEqual(tier1Tab.getExceptions(), []);
     await tier1Tab.close();
 
-    // 1C. Tier 3 Wildcard Dual-Domain (https://portal.example.com -> https://sbx-<24hex>.sandbox.example.net)
+    // 1C. Tier 1 Cross-Site Wildcard Dual-Domain (https://portal.example.com -> https://sbx-<24hex>.sandbox.example.net)
     const tier3Tab = await openPageTab(chrome.client, `https://portal.example.com:${tier3Port}/#tier3node`);
     const tier3SbxSrc = await waitFor(
       () => tier3Tab.eval(`document.querySelector('iframe.p2p-app-frame')?.src || null`),
       15_000,
-      'tier3 wildcard appFrame'
+      'tier1 wildcard appFrame'
     );
-    assert.match(tier3SbxSrc, /^https:\/\/sbx-[0-9a-f]{24}\.sandbox\.example\.net:/, 'Tier 3 MUST derive 96-bit HMAC sandbox origin');
+    assert.match(tier3SbxSrc, /^https:\/\/sbx-[0-9a-f]{24}\.sandbox\.example\.net:/, 'Tier 1 wildcard MUST derive 96-bit HMAC sandbox origin');
+    const wildcardBannerVisible = await tier3Tab.eval(`(() => {
+      const b = document.getElementById('sameSiteBanner');
+      return Boolean(b && getComputedStyle(b).display !== 'none');
+    })()`);
+    assert.equal(wildcardBannerVisible, false, 'Tier 1 cross-site wildcard MUST NOT show Tier 2 restricted warning banner');
     const tier3Origin = new URL(tier3SbxSrc).origin;
     const tier3Ready = await waitFor(
       () => tier3Tab.evalInChildFrame((u) => u.startsWith(tier3Origin) && !u.includes('/__p2p_gw__/'), `document.getElementById('app-status')?.textContent === 'READY'`),
@@ -690,7 +707,8 @@ test('V7 Suites 2 & 3: SPAKE2+, 40x 204 POST, WS send+close/1008/1011/2.5MiB, Sp
 
   const signalProc = spawnLoggedProcess(signalBin, [
     '-addr', `127.0.0.1:${sigPort}`,
-    '-signal-secret', 's23-secret',
+    '-dev',
+    '-signal-secret', 's23-secret-16bytes-ok',
   ]);
   let agentProc = null;
   let chrome = null;
@@ -706,7 +724,7 @@ test('V7 Suites 2 & 3: SPAKE2+, 40x 204 POST, WS send+close/1008/1011/2.5MiB, Sp
     agentProc = spawnLoggedProcess(agentBin, [
       '-id', 'demo',
       '-signal', `ws://127.0.0.1:${sigPort}/ws`,
-      '-signal-secret', 's23-secret',
+      '-signal-secret', 's23-secret-16bytes-ok',
       '-access-secret', 'cdp-owner-pass',
       '-identity-key', path.join(workDir, 's23-demo.key'),
       '-target', `http://127.0.0.1:${backend.port}`,
@@ -875,7 +893,12 @@ test('V7 Suites 2 & 3: SPAKE2+, 40x 204 POST, WS send+close/1008/1011/2.5MiB, Sp
     assert.equal(suite3Res.htmlAttStatus, 200);
     assert.ok(suite3Res.htmlAttCD.includes("filename*=UTF-8''"));
     assert.ok(suite3Res.htmlAttText.includes('RAW-ATTACHMENT-HTML'));
-    assert.ok(!suite3Res.htmlAttText.includes('patch.js') && !suite3Res.htmlAttText.includes('data-p2p-boot'), 'HTML attachment MUST NOT receive patch.js or data-p2p-boot');
+    assert.ok(
+      !suite3Res.htmlAttText.includes('patch.js') &&
+        !suite3Res.htmlAttText.includes('boot.js') &&
+        !suite3Res.htmlAttText.includes('data-p2p-boot'),
+      'HTML attachment MUST NOT receive boot.js, patch.js, or data-p2p-boot'
+    );
 
     // Suite 3 Chinese path + no HTTP charset=<meta charset="utf-8"> prescan verification:
     const cnTab = await openPageTab(
@@ -919,14 +942,14 @@ test('V7 Suite 4: Adversarial CSRF Matrix, Worker/Back/Reload, top.location Bloc
   const chromeProfile = path.join(workDir, 'suite4-profile');
   fs.mkdirSync(chromeProfile, { recursive: true });
 
-  // Run Tier 1 Fixed Dual-Domain so the evil attacker knows the EXACT fixed sandbox origin (`https://app.example.net`)!
+  // Run Tier 2 Fixed Dual-Domain so the evil attacker knows the EXACT fixed sandbox origin (`https://app.example.net`)!
   const signalProc = spawnLoggedProcess(signalBin, [
     '-addr', `127.0.0.1:${sigPort}`,
-    '-portal-domain', `portal.example.com:${sigPort}`,
-    '-sandbox-host', `app.example.net:${sigPort}`,
+    '-portal-origin', `https://portal.example.com:${sigPort}`,
+    '-sandbox-origin', `https://app.example.net:${sigPort}`,
     '-tls-cert', tlsCert.certPath,
     '-tls-key', tlsCert.keyPath,
-    '-signal-secret', 's4-secret',
+    '-signal-secret', 's4-secret-16bytes-ok',
   ]);
   const keyPath = path.join(workDir, 's4-demo.key');
   const startDemoAgent = () =>
@@ -935,7 +958,7 @@ test('V7 Suite 4: Adversarial CSRF Matrix, Worker/Back/Reload, top.location Bloc
       [
         '-id', 'demo',
         '-signal', `wss://portal.example.com:${sigPort}/ws`,
-        '-signal-secret', 's4-secret',
+        '-signal-secret', 's4-secret-16bytes-ok',
         '-access-secret', 's4-owner-pass',
         '-identity-key', keyPath,
         '-target', `http://127.0.0.1:${backend.port}`,
@@ -1293,19 +1316,21 @@ test('V7 Suite 5: Capability Live Revocation, Restart Persistence, StaticFS Hard
 
   const signalProc = spawnLoggedProcess(signalBin, [
     '-addr', `127.0.0.1:${sigPort}`,
-    '-signal-secret', 's5-secret',
+    '-dev',
+    '-signal-secret', 's5-secret-16bytes-ok',
     '-allow-force-rekey',
   ]);
   const keyPath1 = path.join(workDir, 's5-key-1.ed25519.key');
   const keyPath2 = path.join(workDir, 's5-key-2.ed25519.key');
   const statePath = path.join(workDir, 's5-demo-state.json');
   const staticKeyPath = path.join(workDir, 's5-static.ed25519.key');
+  const singleFileKeyPath = path.join(workDir, 's5-file.ed25519.key');
 
   const startDemoAgent = (keyPath, extraFlags = []) =>
     spawnLoggedProcess(agentBin, [
       '-id', 'demo',
       '-signal', `ws://127.0.0.1:${sigPort}/ws`,
-      '-signal-secret', 's5-secret',
+      '-signal-secret', 's5-secret-16bytes-ok',
       '-access-secret', 's5-owner-pass',
       '-identity-key', keyPath,
       '-state-file', statePath,
@@ -1316,6 +1341,7 @@ test('V7 Suite 5: Capability Live Revocation, Restart Persistence, StaticFS Hard
 
   let agentProc = null;
   let staticAgentProc = null;
+  let singleFileAgentProc = null;
   let chrome = null;
   const portalOrigin = `http://localhost:${sigPort}`;
 
@@ -1330,14 +1356,24 @@ test('V7 Suite 5: Capability Live Revocation, Restart Persistence, StaticFS Hard
     staticAgentProc = spawnLoggedProcess(agentBin, [
       '-id', 'staticnode',
       '-signal', `ws://127.0.0.1:${sigPort}/ws`,
-      '-signal-secret', 's5-secret',
+      '-signal-secret', 's5-secret-16bytes-ok',
       '-allow-public',
       '-identity-key', staticKeyPath,
       '-dir', staticDir,
       '-ice-mdns=false',
     ]);
+    singleFileAgentProc = spawnLoggedProcess(agentBin, [
+      '-id', 'filenode',
+      '-signal', `ws://127.0.0.1:${sigPort}/ws`,
+      '-signal-secret', 's5-secret-16bytes-ok',
+      '-allow-public',
+      '-identity-key', singleFileKeyPath,
+      '-file', path.join(staticDir, '100%_report.txt'),
+      '-ice-mdns=false',
+    ]);
     await waitFor(() => agentProc.getLogs().includes('Registered node=demo'), 10_000, 's5 demo reg');
     await waitFor(() => staticAgentProc.getLogs().includes('Registered node=staticnode'), 10_000, 's5 static reg');
+    await waitFor(() => singleFileAgentProc.getLogs().includes('Registered node=filenode'), 10_000, 's5 file reg');
 
     chrome = await launchHeadlessChrome(chromeProfile);
     const ownerTab = await openPageTab(chrome.client, `${portalOrigin}/#demo`);
@@ -1398,24 +1434,32 @@ test('V7 Suite 5: Capability Live Revocation, Restart Persistence, StaticFS Hard
     assert.equal(capResults.postBlocked, 403);
     assert.equal(capResults.secretBlocked, 403);
 
-    // 5B. Live Capability Revocation -> active visitor session MUST fail immediately!
+    // 5B. Live Capability Revocation -> active visitor session MUST fail immediately (L-11: no catch-all swallow)!
     await waitFor(() => ownerTab.eval(`Boolean(document.querySelector('.p2p-cap-row .p2p-btn-danger'))`), 5_000, 'Revoke button');
     await ownerTab.eval(`document.querySelector('.p2p-cap-row .p2p-btn-danger').click()`);
     await waitFor(() => ownerTab.eval(`Boolean(document.querySelector('.p2p-cap-row .p2p-badge-muted'))`), 8_000, 'Revoked badge');
 
-    const revokedImmediateFail = await waitFor(
+    const revokedOutcome = await waitFor(
       async () => {
-        try {
-          const st = await capTab.evalInChildFrame(isCapFrame, `fetch('/public/ok?after=revoke').then(r => r.status).catch(() => -1)`);
-          return st !== 200;
-        } catch {
-          return true;
+        const probe = await capTab.evalInChildFrame(
+          isCapFrame,
+          `fetch('/public/ok?after=revoke').then(r => ({ kind: 'http', status: r.status })).catch(e => ({ kind: 'network-error', msg: String(e) }))`
+        );
+        if (probe && probe.kind === 'http' && (probe.status === 403 || probe.status === 502 || probe.status === 503)) {
+          return probe;
         }
+        if (probe && probe.kind === 'network-error') {
+          return probe;
+        }
+        return null;
       },
       10_000,
       'live capability revocation enforcement'
     );
-    assert.equal(revokedImmediateFail, true, 'Revoked capability MUST immediately fail on live session');
+    assert.ok(
+      revokedOutcome && (revokedOutcome.kind === 'network-error' || [403, 502, 503].includes(revokedOutcome.status)),
+      `Revoked capability MUST return 403/502/503 or reset stream, got ${JSON.stringify(revokedOutcome)}`
+    );
     await capTab.close();
 
     // 5C. Agent Restart Persistence: restart Agent with same -state-file -> revoked token stays permanently rejected.
@@ -1536,10 +1580,36 @@ test('V7 Suite 5: Capability Live Revocation, Restart Persistence, StaticFS Hard
     assert.deepEqual(staticTab.getGatewayErrors(), []);
     assert.deepEqual(staticTab.getExceptions(), []);
     await staticTab.close();
+
+    // 5F. Single-File Mode (`-file`): serves exact file with CSP: sandbox and rejects other paths with 404
+    const fileTab = await openPageTab(chrome.client, `${portalOrigin}/#filenode`);
+    const fileSbxSrc = await waitFor(
+      () => fileTab.eval(`document.querySelector('iframe.p2p-app-frame')?.src || null`),
+      15_000,
+      'filenode appFrame'
+    );
+    const fileOrigin = new URL(fileSbxSrc).origin;
+    const fileResp = await waitFor(
+      () => fileTab.getCapturedResponses().find((r) => r.url === `${fileOrigin}/`),
+      15_000,
+      'filenode / response'
+    );
+    assert.equal(fileResp.status, 200);
+    assert.match(fileResp.headers['content-security-policy'] || '', /\bsandbox\b/i);
+    const fileBody = await waitFor(
+      () => fileTab.evalInChildFrame((u) => u === `${fileOrigin}/`, `(document.body?.textContent || '').trim()`),
+      10_000,
+      'filenode body'
+    );
+    assert.equal(fileBody, 'percent-file-ok');
+    assert.deepEqual(fileTab.getGatewayErrors(), []);
+    assert.deepEqual(fileTab.getExceptions(), []);
+    await fileTab.close();
   } finally {
     if (chrome) await chrome.close();
     if (agentProc) await agentProc.stop();
     if (staticAgentProc) await staticAgentProc.stop();
+    if (singleFileAgentProc) await singleFileAgentProc.stop();
     await signalProc.stop();
     await backend.close();
   }

@@ -10,11 +10,19 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"webrtc-gateway/pkg/mux"
 	"webrtc-gateway/pkg/protocol"
 )
+
+var proxyCopyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
+}
 
 const (
 	defaultTLSHandshakeTimeout   = 10 * time.Second
@@ -94,21 +102,22 @@ func (p *HTTPProxy) HandleStream(
 	}()
 
 	method := strings.ToUpper(reqHdr.Method)
+	isHead := method == http.MethodHead
 	if method == http.MethodTrace || method == http.MethodConnect {
-		p.writeSimpleError(stream, http.StatusMethodNotAllowed, "method not allowed")
+		p.writeSimpleError(stream, isHead, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	// Step 1: Resolve & canonicalize destination before capability validation.
 	dest, err := p.policy.Resolve(reqHdr.Target, false)
 	if err != nil {
-		p.writeSimpleError(stream, http.StatusForbidden, "destination not allowed")
+		p.writeSimpleError(stream, isHead, http.StatusForbidden, "destination not allowed")
 		return
 	}
 
-	// Step 2: Enforce capability token scope against canonical decoded destination!
+	// Step 2: Enforce capability token scope against canonical decoded destination + RawPath!
 	if !capScope.AllowsDestination(protocol.StreamKindHTTP, method, dest) {
-		p.writeSimpleError(stream, http.StatusForbidden, "forbidden by share capability scope")
+		p.writeSimpleError(stream, isHead, http.StatusForbidden, "forbidden by share capability scope")
 		return
 	}
 
@@ -131,12 +140,12 @@ func (p *HTTPProxy) HandleStream(
 		case "content-length":
 			n, perr := parseStrictContentLength(f.Value)
 			if perr != nil {
-				p.writeSimpleError(stream, http.StatusBadRequest, "invalid Content-Length header")
+				p.writeSimpleError(stream, isHead, http.StatusBadRequest, "invalid Content-Length header")
 				return
 			}
 			if sawContentLen && n != declaredContentLen {
 				// Reject conflicting duplicate Content-Length (RFC 9112 §6.3 request smuggling defense).
-				p.writeSimpleError(stream, http.StatusBadRequest, "conflicting Content-Length headers")
+				p.writeSimpleError(stream, isHead, http.StatusBadRequest, "conflicting Content-Length headers")
 				return
 			}
 			sawContentLen = true
@@ -152,32 +161,38 @@ func (p *HTTPProxy) HandleStream(
 	upstreamHeaders := p.policy.SanitizeRequestHeaders(
 		reqHdr.Headers, reqHdr.FetchCtx, method, dest, clientIP, jar, false, readonly,
 	)
-	if clientAcceptsGzip && !clientAcceptsSSE && !hasRangeHeader && method != http.MethodHead && upstreamHeaders.Get("Accept-Encoding") == "" {
+	if clientAcceptsGzip && !clientAcceptsSSE && !hasRangeHeader && !isHead && upstreamHeaders.Get("Accept-Encoding") == "" {
 		upstreamHeaders.Set("Accept-Encoding", "gzip")
 	}
 
-	// Step 3: Gate request body strictly on stream.HasRequestBody() (!headersHadFin) so a fast
-	// response never races with a short request body; wrap with io.NopCloser so Transport closing
-	// req.Body never closes the P2P response stream.
+	// Step 3: Gate request body strictly on stream.HasRequestBody() (!headersHadFin).
 	var bodyReader io.Reader
-	if method == http.MethodGet || method == http.MethodHead {
-		// Drop body AND strip Content-Length on GET/HEAD so upstream never waits for an unsent body.
+	if method == http.MethodGet || isHead {
 		upstreamHeaders.Del("Content-Length")
 	} else if declaredContentLen == 0 {
-		// Explicit Content-Length: 0 -> pass nil body cleanly.
+		upstreamHeaders.Del("Content-Length")
 		bodyReader = nil
 	} else if stream.HasRequestBody() {
+		upstreamHeaders.Del("Content-Length")
 		bodyReader = io.NopCloser(stream)
+	} else if declaredContentLen > 0 {
+		// M-15: Non-GET/HEAD with Content-Length > 0 and no request body is 400 Bad Request, not 502.
+		p.writeSimpleError(stream, isHead, http.StatusBadRequest, "missing request body for declared Content-Length")
+		return
 	}
 
-	httpReq, err := http.NewRequestWithContext(stream.Context(), method, dest.URL.String(), bodyReader)
+	reqCtx := stream.Context()
+	if capScope != nil && capScope.PathPrefix != "" {
+		reqCtx = WithStaticPathPrefix(reqCtx, capScope.PathPrefix)
+	}
+	httpReq, err := http.NewRequestWithContext(reqCtx, method, dest.URL.String(), bodyReader)
 	if err != nil {
-		p.writeSimpleError(stream, http.StatusBadRequest, "invalid request")
+		p.writeSimpleError(stream, isHead, http.StatusBadRequest, "invalid request")
 		return
 	}
 	httpReq.Header = upstreamHeaders
 	httpReq.Host = p.policy.EffectiveHost()
-	if method != http.MethodGet && method != http.MethodHead && sawContentLen {
+	if method != http.MethodGet && !isHead && sawContentLen {
 		httpReq.ContentLength = declaredContentLen
 	}
 
@@ -186,7 +201,7 @@ func (p *HTTPProxy) HandleStream(
 		if stream.Context().Err() != nil {
 			return
 		}
-		p.writeSimpleError(stream, http.StatusBadGateway, "upstream request failed")
+		p.writeSimpleError(stream, isHead, http.StatusBadGateway, "upstream request failed")
 		return
 	}
 	stopCancelClose := context.AfterFunc(stream.Context(), func() {
@@ -257,16 +272,13 @@ func (p *HTTPProxy) HandleStream(
 	if swDecompressGzip {
 		respFlags |= protocol.RespFlagDecompressGzip
 	}
-	statusCode := uint16(http.StatusBadGateway)
-	if resp.StatusCode >= 100 && resp.StatusCode <= 599 {
-		statusCode = uint16(resp.StatusCode)
+	if resp.StatusCode < 100 || resp.StatusCode > 599 {
+		p.writeSimpleError(stream, isHead, http.StatusBadGateway, "invalid upstream HTTP status")
+		return
 	}
-	respTLV, err := protocol.EncodeResponseHeaders(&protocol.ResponseHeaders{
-		Status:       statusCode,
-		RespFlags:    respFlags,
-		Headers:      outFields,
-		CookieDeltas: cookieDeltasToEntries(cookieDeltas),
-	})
+	statusCode := uint16(resp.StatusCode)
+	cookieEntries := dedupCookieEntries(cookieDeltasToEntries(cookieDeltas))
+	respTLV, err := encodeBoundedResponseHeaders(statusCode, respFlags, outFields, cookieEntries)
 	if err != nil {
 		stream.Reset(protocol.ErrCodeFrameSizeError)
 		return
@@ -288,8 +300,9 @@ func (p *HTTPProxy) HandleStream(
 		dst = gzW
 	}
 
-	copyBuf := make([]byte, 32*1024)
-	_, copyErr := io.CopyBuffer(dst, resp.Body, copyBuf)
+	bufPtr := proxyCopyBufPool.Get().(*[]byte)
+	_, copyErr := io.CopyBuffer(dst, resp.Body, *bufPtr)
+	proxyCopyBufPool.Put(bufPtr)
 	if copyErr != nil {
 		if gzW != nil {
 			gzW.Abort()
@@ -305,7 +318,60 @@ func (p *HTTPProxy) HandleStream(
 	}
 }
 
-func (p *HTTPProxy) writeSimpleError(stream *mux.Stream, status uint16, msg string) {
+func dedupCookieEntries(in []protocol.CookieEntry) []protocol.CookieEntry {
+	if len(in) <= 1 {
+		return in
+	}
+	type ck struct{ name, path string }
+	idx := make(map[ck]int, len(in))
+	out := make([]protocol.CookieEntry, 0, len(in))
+	for _, e := range in {
+		k := ck{name: e.Name, path: e.Path}
+		if pos, exists := idx[k]; exists {
+			out[pos] = e
+		} else {
+			idx[k] = len(out)
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func encodeBoundedResponseHeaders(status uint16, respFlags uint8, headers []protocol.HeaderField, deltas []protocol.CookieEntry) ([]byte, error) {
+	raw, err := protocol.EncodeResponseHeaders(&protocol.ResponseHeaders{
+		Status:       status,
+		RespFlags:    respFlags,
+		Headers:      headers,
+		CookieDeltas: deltas,
+	})
+	if err == nil || len(deltas) == 0 {
+		return raw, err
+	}
+	// Gracefully trim excess non-HttpOnly cookie deltas if header block exceeded 64 KiB (M-15).
+	lo, hi := 0, len(deltas)
+	var best []byte
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		cand, cerr := protocol.EncodeResponseHeaders(&protocol.ResponseHeaders{
+			Status:       status,
+			RespFlags:    respFlags,
+			Headers:      headers,
+			CookieDeltas: deltas[:mid],
+		})
+		if cerr == nil {
+			best = cand
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if best != nil {
+		return best, nil
+	}
+	return nil, err
+}
+
+func (p *HTTPProxy) writeSimpleError(stream *mux.Stream, isHead bool, status uint16, msg string) {
 	body := []byte(msg + "\n")
 	respTLV, err := protocol.EncodeResponseHeaders(&protocol.ResponseHeaders{
 		Status: status,
@@ -317,6 +383,10 @@ func (p *HTTPProxy) writeSimpleError(stream *mux.Stream, status uint16, msg stri
 	})
 	if err != nil {
 		stream.Reset(protocol.ErrCodeInternalError)
+		return
+	}
+	if isHead {
+		_ = stream.WriteHeaders(respTLV, true)
 		return
 	}
 	if err := stream.WriteHeaders(respTLV, false); err != nil {

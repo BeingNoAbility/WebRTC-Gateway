@@ -1,12 +1,9 @@
 /**
- * PeerSession — WebRTC / SDP / ICE / DTLS Lifecycle & Unified Silent Reconnect
- * - Hooks `SignalingClient.onJoined` for seamless signaling-reconnect recovery.
- * - Single-flight connection lock (`pcInFlight`) prevents duplicate PeerConnections.
- * - Buffers early local `onicecandidate` emissions until after `sendOffer` succeeds.
- * - Synchronously buffers control DC frames inside `ctrlDC.onopen` before async DTLS cert verify
- *   so early `SETTINGS`/`AUTH_CHALLENGE` frames are never dropped.
- * - Unified silent reconnect rebuilds a clean PeerConnection & PoolMux while preserving `appFrame`
- *   and reusing RAM-cached `(w0, w1)` + `cookieResumeToken` via `AuthClient`.
+ * PeerSession — WebRTC / SDP / ICE / DTLS Lifecycle & Unified Silent Reconnect (P2PMux V8)
+ * - Pre-negotiates 1 chunked Control DC (`p2pctrl`, id=0) + 12 ordered lanes (`p2p_01..p2p_12`)
+ *   multiplexing both HTTP and WebSocket streams with zero dynamic DCEP channel overhead.
+ * - Closes signaling WebSocket immediately on auth success OR initial ICE failure (zero leaks).
+ * - Synchronously buffers control DC frames inside `ctrlDC.onopen` before async DTLS cert verify.
  */
 
 import {
@@ -15,7 +12,6 @@ import {
   DEFAULT_CHUNK_SIZE,
   DEFAULT_POOL_SIZE,
   FrameType,
-  WS_CHANNEL_LABEL,
   poolChannelId,
   poolChannelLabel,
   type Frame,
@@ -109,15 +105,13 @@ export class PeerSession {
         onAuthRequired: callbacks.onAuthRequired,
         onAuthFailed: (code, msg, retryAfter) => {
           this.teardownPeerConnection('auth rejected');
-          this.signaling?.close();
-          this.signaling = null;
+          this.closeSignaling();
           callbacks.onAuthFailed(code, msg, retryAfter);
         },
         onFatalSecurityError: (reason) => {
           this.cancelSilentReconnect();
           this.teardownPeerConnection(reason);
-          this.signaling?.close();
-          this.signaling = null;
+          this.closeSignaling();
           callbacks.onStatus('error', reason);
         },
         onAuthenticated: (info, mux) => {
@@ -128,11 +122,8 @@ export class PeerSession {
             clearTimeout(this.handshakeWatchdogTimer);
             this.handshakeWatchdogTimer = null;
           }
-          // Strictly short-lived signaling: close WS immediately once DTLS tunnel is authenticated!
-          if (this.signaling) {
-            this.signaling.close();
-            this.signaling = null;
-          }
+          // Strictly short-lived signaling: close WS immediately once DTLS tunnel is authenticated.
+          this.closeSignaling();
           callbacks.onAuthenticated(info, mux);
         },
       }
@@ -147,17 +138,15 @@ export class PeerSession {
     return this.mux;
   }
 
-  openWSDC(): DataChannelLike {
-    if (!this.pc || !this.authClient.isAuthenticated()) {
-      throw new Error('PeerConnection is not authenticated');
-    }
-    const dc = this.pc.createDataChannel(WS_CHANNEL_LABEL, { ordered: true });
-    dc.binaryType = 'arraybuffer';
-    return dc as unknown as DataChannelLike;
-  }
-
   updateIcePreferences(prefs: IcePreferences): void {
     this.icePrefs = prefs;
+  }
+
+  private closeSignaling(): void {
+    if (this.signaling) {
+      this.signaling.close();
+      this.signaling = null;
+    }
   }
 
   async connect(isSilentReconnect = false): Promise<void> {
@@ -165,10 +154,7 @@ export class PeerSession {
     const gen = ++this.generation;
     this.cancelSilentReconnect();
     this.teardownPeerConnection('reconnecting');
-    if (this.signaling) {
-      this.signaling.close();
-      this.signaling = null;
-    }
+    this.closeSignaling();
     this.pcInFlight = false;
     this.waitingForPasswordBeforePC = false;
     this.joinedAgentPk = '';
@@ -225,6 +211,7 @@ export class PeerSession {
           this.scheduleSilentReconnect(`Signaling error: ${msg.error}`);
         } else {
           this.teardownPeerConnection(`Signaling error: ${msg.error}`);
+          this.closeSignaling();
           this.callbacks.onStatus('error', msg.error);
         }
       },
@@ -295,6 +282,7 @@ export class PeerSession {
           );
           this.cancelSilentReconnect();
           this.teardownPeerConnection('Agent identity key mismatch');
+          this.closeSignaling();
           this.callbacks.onKeyMismatch(preCheck, preCheck.status === 'pinned_mismatch');
           return;
         }
@@ -314,6 +302,7 @@ export class PeerSession {
       if (this.everAuthenticated) {
         this.scheduleSilentReconnect(msg);
       } else {
+        this.closeSignaling();
         this.callbacks.onStatus('error', msg);
       }
     } finally {
@@ -368,10 +357,7 @@ export class PeerSession {
     this.generation++;
     this.cancelSilentReconnect();
     this.teardownPeerConnection('client destroyed');
-    if (this.signaling) {
-      this.signaling.close();
-      this.signaling = null;
-    }
+    this.closeSignaling();
     this.authClient.destroy();
   }
 
@@ -458,14 +444,13 @@ export class PeerSession {
         } else {
           this.callbacks.onLog('[Tunnel] Initial WebRTC handshake timed out');
           this.teardownPeerConnection('WebRTC handshake timed out');
-          this.signaling?.close();
-          this.signaling = null;
+          this.closeSignaling();
           this.callbacks.onStatus('error', 'WebRTC handshake timed out');
         }
       }
     }, watchdogMs);
 
-    // Pre-negotiate 1 Control DC (id=0) + 32 Reusable HTTP Pool DCs (id=1..32).
+    // Pre-negotiate 1 Control DC (id=0) + 12 unified HTTP/WS ordered data lanes (id=1..12).
     const ctrlDC = pc.createDataChannel(CONTROL_CHANNEL_LABEL, {
       negotiated: true,
       id: CONTROL_CHANNEL_ID,
@@ -473,7 +458,7 @@ export class PeerSession {
     });
     ctrlDC.binaryType = 'arraybuffer';
 
-    const poolDCs: RTCDataChannel[] = [];
+    const laneDCs: RTCDataChannel[] = [];
     for (let i = 0; i < DEFAULT_POOL_SIZE; i++) {
       const dc = pc.createDataChannel(poolChannelLabel(i), {
         negotiated: true,
@@ -481,15 +466,13 @@ export class PeerSession {
         ordered: true,
       });
       dc.binaryType = 'arraybuffer';
-      poolDCs.push(dc);
+      laneDCs.push(dc);
     }
 
     let muxStarted = false;
     ctrlDC.onopen = () => {
       if (this.generation !== gen || this.pc !== pc || muxStarted) return;
       muxStarted = true;
-      // SYNCHRONOUSLY buffer early control frames before async DTLS cert verification,
-      // and serialize control frame handling strictly in wire order!
       const earlyControlFrames: Frame[] = [];
       let dtlsVerified = false;
       let authGen = -1;
@@ -502,30 +485,38 @@ export class PeerSession {
         });
       };
 
-      const mux = new PoolMux(
-        {
-          onControlFrame: (frame) => {
-            if (this.generation !== gen || this.pc !== pc) return;
-            if (!dtlsVerified) {
-              if (earlyControlFrames.length < 32) {
-                earlyControlFrames.push(frame);
-              }
-              return;
+      const mux = new PoolMux(laneDCs.length, {
+        onControlFrame: (frame) => {
+          if (this.generation !== gen || this.pc !== pc) return;
+          if (!dtlsVerified) {
+            if (earlyControlFrames.length < 32) {
+              earlyControlFrames.push(frame);
             }
-            enqueueControlFrame(frame);
-          },
-          onGoAway: () => {
-            if (this.generation !== gen || this.pc !== pc) return;
-            this.callbacks.onLog('[Mux] Received GOAWAY — rebuilding tunnel silently');
-            this.teardownPeerConnection('Agent requested tunnel rotation (GOAWAY)');
-            this.scheduleSilentReconnect('Agent requested tunnel rotation (GOAWAY)');
-          },
+            return;
+          }
+          enqueueControlFrame(frame);
         },
-        poolDCs.length
-      );
+        onGoAway: () => {
+          if (this.generation !== gen || this.pc !== pc) return;
+          this.callbacks.onLog('[Mux] Received GOAWAY — rebuilding tunnel silently');
+          this.teardownPeerConnection('Agent requested tunnel rotation (GOAWAY)');
+          this.scheduleSilentReconnect('Agent requested tunnel rotation (GOAWAY)');
+        },
+        onProtocolError: (err) => {
+          if (this.generation !== gen || this.pc !== pc) return;
+          this.callbacks.onLog(`[Mux] Protocol error: ${err.message}`);
+          this.teardownPeerConnection(err.message);
+          if (this.everAuthenticated) {
+            this.scheduleSilentReconnect(err.message);
+          } else {
+            this.closeSignaling();
+            this.callbacks.onStatus('error', err.message);
+          }
+        },
+      });
       mux.attachControlDC(ctrlDC as unknown as DataChannelLike);
-      for (let i = 0; i < poolDCs.length; i++) {
-        mux.attachPoolDC(i, poolDCs[i] as unknown as DataChannelLike);
+      for (let i = 0; i < laneDCs.length; i++) {
+        mux.attachLaneDC(i, laneDCs[i] as unknown as DataChannelLike);
       }
       this.mux = mux;
 
@@ -540,8 +531,7 @@ export class PeerSession {
           this.callbacks.onLog(`[Security] BLOCKED: ${reason}`);
           this.cancelSilentReconnect();
           this.teardownPeerConnection(reason);
-          this.signaling?.close();
-          this.signaling = null;
+          this.closeSignaling();
           this.callbacks.onStatus('error', reason);
           return;
         }
@@ -571,7 +561,7 @@ export class PeerSession {
             FrameType.SETTINGS,
             textEncoder.encode(
               JSON.stringify({
-                max_frame_payload: mux.effectiveChunkSize() || DEFAULT_CHUNK_SIZE,
+                max_frame_payload: mux.chunkSize || DEFAULT_CHUNK_SIZE,
               })
             )
           );
@@ -579,7 +569,6 @@ export class PeerSession {
           // ignore
         }
 
-        // Drain early frames sequentially BEFORE flipping dtlsVerified=true so late frames cannot overtake them!
         while (earlyControlFrames.length > 0) {
           const batch = earlyControlFrames.splice(0);
           for (const early of batch) {
@@ -598,13 +587,11 @@ export class PeerSession {
       if (this.everAuthenticated) {
         this.scheduleSilentReconnect('Control DataChannel closed');
       } else {
-        this.signaling?.close();
-        this.signaling = null;
+        this.closeSignaling();
         this.callbacks.onDisconnected('Control DataChannel closed', false);
       }
     };
 
-    // Buffer local ICE candidates until AFTER sendOffer() succeeds so signaling never returns PRE_OFFER_CANDIDATE!
     pc.onicecandidate = (ev) => {
       if (this.generation !== gen || this.pc !== pc || !ev.candidate) return;
       const item = {
@@ -651,6 +638,7 @@ export class PeerSession {
         if (this.everAuthenticated) {
           this.scheduleSilentReconnect(`WebRTC ICE connection ${st}`);
         } else {
+          this.closeSignaling();
           this.callbacks.onDisconnected(`WebRTC ICE connection ${st}`, false);
         }
       }
@@ -669,9 +657,8 @@ export class PeerSession {
 
     this.signaling.sendOffer({ desc: offerDesc, nonce: visitorNonce });
     this.offerSent = true;
-    this.callbacks.onLog(`[WebRTC] Sent structured Offer (${DEFAULT_POOL_SIZE} pool DCs + p2pctrl)`);
+    this.callbacks.onLog(`[WebRTC] Sent structured Offer (${DEFAULT_POOL_SIZE} V8 lanes + p2pctrl)`);
 
-    // Flush any early ICE candidates gathered between setLocalDescription and sendOffer!
     for (const c of this.pendingLocalCandidates.splice(0)) {
       if (!this.signaling?.isOpen()) break;
       try {
@@ -688,6 +675,7 @@ export class PeerSession {
 
     if (!validateSessionDescriptor(msg.desc, false)) {
       this.teardownPeerConnection('Invalid answer SessionDescriptor');
+      this.closeSignaling();
       this.callbacks.onStatus('error', 'Invalid answer descriptor from Agent');
       return;
     }
@@ -697,6 +685,7 @@ export class PeerSession {
       this.callbacks.onLog(`[Security] BLOCKED: ${reason}`);
       this.cancelSilentReconnect();
       this.teardownPeerConnection(reason);
+      this.closeSignaling();
       this.callbacks.onStatus('error', reason);
       return;
     }
@@ -721,6 +710,7 @@ export class PeerSession {
       this.callbacks.onLog(`[Security] BLOCKED: ${reason}`);
       this.cancelSilentReconnect();
       this.teardownPeerConnection(reason);
+      this.closeSignaling();
       this.callbacks.onStatus('error', reason);
       return;
     }
@@ -741,6 +731,7 @@ export class PeerSession {
       const reason = err instanceof Error ? err.message : 'TOFU identity store error';
       this.cancelSilentReconnect();
       this.teardownPeerConnection(reason);
+      this.closeSignaling();
       this.callbacks.onStatus('error', reason);
       return;
     }
@@ -752,6 +743,7 @@ export class PeerSession {
       );
       this.cancelSilentReconnect();
       this.teardownPeerConnection('Agent identity key mismatch');
+      this.closeSignaling();
       this.callbacks.onKeyMismatch(keyRes, keyRes.status === 'pinned_mismatch');
       return;
     }
@@ -777,6 +769,7 @@ export class PeerSession {
       if (this.everAuthenticated) {
         this.scheduleSilentReconnect(reason);
       } else {
+        this.closeSignaling();
         this.callbacks.onStatus('error', reason);
       }
     }

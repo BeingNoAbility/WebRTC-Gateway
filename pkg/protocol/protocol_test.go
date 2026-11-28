@@ -22,7 +22,7 @@ type goldenFile struct {
 	Version     int `json:"version"`
 	ValidFrames []struct {
 		Name       string `json:"name"`
-		Gen        uint32 `json:"gen"`
+		StreamID   uint32 `json:"stream_id"`
 		Type       uint8  `json:"type"`
 		Flags      uint8  `json:"flags"`
 		PayloadHex string `json:"payload_hex"`
@@ -66,8 +66,8 @@ type goldenFile struct {
 	} `json:"invalid_tlv_responses"`
 }
 
-func TestV7GoldenVectors(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", "test", "fixtures", "protocol_v7_golden_vectors.json"))
+func TestV8GoldenVectors(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "test", "fixtures", "protocol_v8_golden_vectors.json"))
 	if err != nil {
 		t.Fatalf("read golden vectors: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestV7GoldenVectors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			f := &Frame{Gen: tc.Gen, Type: tc.Type, Flags: tc.Flags, Payload: payload}
+			f := &Frame{StreamID: tc.StreamID, Type: tc.Type, Flags: tc.Flags, Payload: payload}
 			gotWire, err := f.Encode()
 			if err != nil {
 				t.Fatalf("Encode failed: %v", err)
@@ -101,7 +101,7 @@ func TestV7GoldenVectors(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Decode failed: %v", err)
 			}
-			if dec.Gen != tc.Gen || dec.Type != tc.Type || dec.Flags != tc.Flags || !bytes.Equal(dec.Payload, payload) {
+			if dec.StreamID != tc.StreamID || dec.Type != tc.Type || dec.Flags != tc.Flags || !bytes.Equal(dec.Payload, payload) {
 				t.Fatalf("decoded mismatch: %+v", dec)
 			}
 		})
@@ -198,10 +198,10 @@ func TestV7GoldenVectors(t *testing.T) {
 	}
 }
 
-func TestFrameBoundariesAndV7Validation(t *testing.T) {
+func TestFrameBoundariesAndV8Validation(t *testing.T) {
 	// Exact 65535-byte DATA payload must succeed; 65536 must fail.
 	maxData := make([]byte, MaxPayloadSize)
-	f := &Frame{Gen: 1, Type: TypeData, Payload: maxData}
+	f := &Frame{StreamID: 1, Type: TypeData, Payload: maxData}
 	wire, err := f.Encode()
 	if err != nil {
 		t.Fatalf("exact MaxPayloadSize failed: %v", err)
@@ -209,17 +209,44 @@ func TestFrameBoundariesAndV7Validation(t *testing.T) {
 	if dec, err := Decode(wire); err != nil || len(dec.Payload) != MaxPayloadSize {
 		t.Fatalf("decode exact MaxPayloadSize failed: %v", err)
 	}
-	fOver := &Frame{Gen: 1, Type: TypeData, Payload: make([]byte, MaxPayloadSize+1)}
+	fOver := &Frame{StreamID: 1, Type: TypeData, Payload: make([]byte, MaxPayloadSize+1)}
 	if _, err := fOver.Encode(); err == nil {
 		t.Fatal("expected MaxPayloadSize+1 to fail")
 	}
 
-	// Pool channel IDs & labels (1..32 -> p2p_01..p2p_32).
-	if PoolChannelID(0) != 1 || PoolChannelLabel(0) != "p2p_01" {
-		t.Fatalf("unexpected slot 0: id=%d label=%s", PoolChannelID(0), PoolChannelLabel(0))
+	// H-6a: EncodeRequestHeaders with 65535B Target and 0 headers MUST fail 64 KiB cap!
+	if _, err := EncodeRequestHeaders(&RequestHeaders{
+		Kind:   StreamKindHTTP,
+		Method: "GET",
+		Target: "/" + strings.Repeat("a", 65534),
+	}); err == nil {
+		t.Fatal("H-6a regression: EncodeRequestHeaders allowed >64 KiB block with 0 headers")
 	}
-	if PoolChannelID(31) != 32 || PoolChannelLabel(31) != "p2p_32" {
-		t.Fatalf("unexpected slot 31: id=%d label=%s", PoolChannelID(31), PoolChannelLabel(31))
+
+	// H-6c: ExpiresMs > MaxSafeExpiresMs (2^53 - 1) MUST fail encode.
+	if _, err := EncodeRequestHeaders(&RequestHeaders{
+		Kind:   StreamKindHTTP,
+		Method: "GET",
+		Target: "/",
+		CookieMutations: []CookieEntry{
+			{Op: CookieOpSet, Name: "a", Value: "1", Path: "/", ExpiresMs: MaxSafeExpiresMs + 1},
+		},
+	}); err == nil {
+		t.Fatal("H-6c regression: expected ExpiresMs > 2^53-1 to fail encode")
+	}
+
+	// H-6d: EncodeWSClosePayload sanitizes invalid UTF-8 so DecodeWSClosePayload always accepts it.
+	badUTF8Close := EncodeWSClosePayload(1000, "bad\xff\xfeutf8")
+	if c, _, derr := DecodeWSClosePayload(badUTF8Close); derr != nil || c != 1000 {
+		t.Fatalf("H-6d regression: EncodeWSClosePayload produced invalid UTF-8 payload: err=%v", derr)
+	}
+
+	// Pool channel IDs & labels (1..12 -> p2p_01..p2p_12).
+	if PoolChannelID(0) != 1 || PoolChannelLabel(0) != "p2p_01" {
+		t.Fatalf("unexpected lane 0: id=%d label=%s", PoolChannelID(0), PoolChannelLabel(0))
+	}
+	if PoolChannelID(11) != 12 || PoolChannelLabel(11) != "p2p_12" {
+		t.Fatalf("unexpected lane 11: id=%d label=%s", PoolChannelID(11), PoolChannelLabel(11))
 	}
 
 	// Target validation: must start with '/', no space, no backslash, no CTL.

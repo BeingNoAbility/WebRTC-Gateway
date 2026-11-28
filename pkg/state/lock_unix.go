@@ -49,7 +49,14 @@ func WithFileLock(lockPath string, fn func() error) error {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
 	}()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+		if err == nil {
+			break
+		}
+		if err == syscall.EINTR {
+			continue
+		}
 		return fmt.Errorf("state: flock %q: %w", lockPath, err)
 	}
 	return fn()

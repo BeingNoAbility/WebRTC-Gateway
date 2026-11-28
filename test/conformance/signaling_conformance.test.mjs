@@ -263,8 +263,8 @@ test('Go Signal V7 Conformance: HTTP air-gap, double-decode block, exact bridge 
       [
         '-addr', `127.0.0.1:${port}`,
         '-static', staticDir,
-        '-portal-domain', portalHost,
-        '-sandbox-domain', `sandbox.example.net:${port}`,
+        '-portal-origin', `http://${portalHost}`,
+        '-sandbox-origin', `http://*.sandbox.example.net:${port}`,
         '-bound-keys-file', boundKeysFile,
         '-node-secrets-file', nodeSecretsFile,
       ],
@@ -330,8 +330,18 @@ test('Go Signal V7 Conformance: HTTP air-gap, double-decode block, exact bridge 
     extraHeaders: { 'Sec-Fetch-Dest': 'serviceworker', 'Service-Worker': 'script' },
   });
   assert.equal(swResp.status, 200);
-  assert.ok((swResp.headers['vary'] || '').toLowerCase().includes('x-forwarded-proto'));
+  assert.equal(swResp.headers['cross-origin-resource-policy'], 'same-origin');
+  assert.ok(swResp.headers['etag'], 'pre-rendered sw.js must include SHA-256 ETag');
   assert.equal(swResp.headers['service-worker-allowed'], '/');
+
+  // Non-SW script/fetch reads of sw.js MUST be rejected (403).
+  const swPlain = await rawHttpRequest({
+    port,
+    hostHeader: sandboxHost,
+    rawPath: '/__p2p_gw__/sw.js',
+    extraHeaders: { 'Sec-Fetch-Dest': 'script' },
+  });
+  assert.equal(swPlain.status, 403, 'sw.js must reject plain script/fetch reads');
 
   // 3b. Sandbox /__p2p_gw__/assets/* serves normal script requests with Vary, and blocks ServiceWorker registration!
   const patchOk = await rawHttpRequest({

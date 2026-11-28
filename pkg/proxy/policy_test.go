@@ -157,7 +157,7 @@ func TestProxyV7_SingleTargetPolicyAndUpstreamHost(t *testing.T) {
 		tlv, _ := protocol.EncodeRequestHeaders(&protocol.RequestHeaders{
 			Kind: protocol.StreamKindHTTP, FetchCtx: protocol.FetchCtxSameOriginClient, Method: "GET", Target: target, Headers: hdrs,
 		})
-		s, err := cm.OpenHTTPStream(context.Background(), tlv, true)
+		s, err := cm.OpenStream(tlv, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -201,15 +201,8 @@ func TestProxyV7_SingleTargetPolicyAndUpstreamHost(t *testing.T) {
 		t.Fatalf("virtual-host cookie/Host mismatch: status=%d body=%q", respCheck.Status, bodyCheck)
 	}
 
-	// Subsequent WS request also sends virtual-host Host, Origin, and HttpOnly cookie.
+	// Subsequent WS request also sends virtual-host Host, Origin, and HttpOnly cookie over multiplexed lanes.
 	cmWS, smWS := newTestMuxPair(t)
-	cWSDC, sWSDC := newTestPipePair()
-	srvOnMsg, srvOnClose, err := smWS.AttachDynamicWSDC(sWSDC)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer srvOnClose()
-	sWSDC.start(srvOnMsg)
 	doneWS := make(chan struct{})
 	go func() {
 		defer close(doneWS)
@@ -226,12 +219,11 @@ func TestProxyV7_SingleTargetPolicyAndUpstreamHost(t *testing.T) {
 			{Name: "origin", Value: "https://sbx-test.sandbox.example"},
 		},
 	})
-	csWS, cliOnMsg, cliOnClose, err := cmWS.OpenWSStream(context.Background(), cWSDC, wsTLV)
+	csWS, err := cmWS.OpenStream(wsTLV, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cliOnClose()
-	cWSDC.start(cliOnMsg)
+	defer csWS.Close()
 	rbWS, err := csWS.ReadResponseHeaders(context.Background())
 	if err != nil {
 		t.Fatal(err)

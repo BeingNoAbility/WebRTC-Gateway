@@ -131,6 +131,15 @@ test('Release hygiene gate: rejects GitHub PAT, Ed25519 private key, and file://
     const fileLink = ['file:', '', '', 'c:', 'mock', 'leak.txt'].join('/');
     fs.writeFileSync(path.join(tmpRoot, 'docs', 'link_leak.md'), `Link: ${fileLink}\n`);
     assert.throws(() => runGate([], { HYGIENE_ROOT_DIR: tmpRoot }));
+    fs.unlinkSync(path.join(tmpRoot, 'docs', 'link_leak.md'));
+
+    // RFC 1918 private LAN IP in docs/configs must be rejected (use RFC 5737 instead).
+    const fakeLanIp = ['192', '168', '10', '42'].join('.');
+    fs.writeFileSync(path.join(tmpRoot, 'docs', 'lan_leak.md'), `Target: http://${fakeLanIp}:8080\n`);
+    assert.throws(
+      () => runGate([], { HYGIENE_ROOT_DIR: tmpRoot }),
+      (err) => ((err.stdout || '') + (err.stderr || '')).includes('RFC 1918 private IP')
+    );
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }

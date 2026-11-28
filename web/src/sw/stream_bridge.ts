@@ -1,27 +1,21 @@
 /**
- * Service Worker Per-Request Stream Bridge
- * - Never retries non-idempotent requests (POST/PUT/PATCH/DELETE) on ACK timeout,
- *   and gives non-idempotent requests a 15s ACK timeout so background-tab timer
- *   throttling never falsely aborts uploads.
- * - Uses `ByteLengthQueuingStrategy({ highWaterMark: 512 * 1024 })` on response `ReadableStream`
- *   for exact byte-accurate backpressure.
- * - Reuses `registry.ensureLivePort(swScope, session.tabId)` so detached ports recover cleanly.
+ * Service Worker Per-Request Stream Bridge (Native Transferable ReadableStream)
+ * - Transfers JS-backed ReadableStream<Uint8Array> directly over MessagePort for BOTH
+ *   uploads and downloads — eliminating manual IPC chunk/credit loops while preserving
+ *   native pull-based backpressure end-to-end.
+ * - Handles Firefox's `request.body === undefined` via `request.arrayBuffer()` fallback.
+ * - Invokes `onAck` immediately on `REQ_ACK` so cookie mutations commit as soon as the
+ *   tunnel transmits the request headers instead of waiting for slow HTTP responses.
  */
 
 import type { HeaderField } from '../protocol/tlv';
 import type { ClientCookieMutation, CookieDelta, RequestPortDownMsg } from '../shared/ipc';
 import { isRecord } from '../shared/ipc';
-import type { SessionRegistry, TabSession } from './session_registry';
+import { BRIDGE_PING_TIMEOUT_MS, type SessionRegistry, type TabSession } from './session_registry';
 
-const IDEMPOTENT_ACK_TIMEOUT_MS = 1_500;
+const IDEMPOTENT_ACK_TIMEOUT_MS = 3_000;
 const MUTATING_ACK_TIMEOUT_MS = 15_000;
 const RESP_HEAD_TIMEOUT_MS = 120_000;
-const UPLOAD_CREDIT_INITIAL = 256 * 1024;
-const MAX_UPLOAD_SLICE_BYTES = 64 * 1024;
-const UPLOAD_CREDIT_TIMEOUT_MS = 30_000;
-const DOWNLOAD_CREDIT_BATCH = 128 * 1024;
-const DOWNLOAD_STREAM_HWM_BYTES = 512 * 1024;
-
 const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 export interface TunnelResponseHead {
@@ -35,19 +29,80 @@ export interface TunnelResponseHead {
   cancel: () => void;
 }
 
-export function toSafeTransferableBuffer(chunk: Uint8Array): {
-  buffer: ArrayBuffer;
-  offset: number;
-  length: number;
-} {
-  const isShared =
-    typeof SharedArrayBuffer !== 'undefined' && chunk.buffer instanceof SharedArrayBuffer;
-  if (!isShared && chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength) {
-    return { buffer: chunk.buffer as ArrayBuffer, offset: 0, length: chunk.byteLength };
+export class DeadBridgePortError extends Error {
+  constructor() {
+    super('bridge port did not acknowledge request within timeout');
   }
-  const copy = new Uint8Array(chunk.byteLength);
-  copy.set(chunk);
-  return { buffer: copy.buffer, offset: 0, length: copy.byteLength };
+}
+
+/**
+ * Extracts a guaranteed-transferable ReadableStream<Uint8Array> from a Fetch Request.
+ * Works across Chromium, Safari, and Firefox (including Firefox where FetchEvent.request.body
+ * can be `undefined` on body-bearing POST/PUT/PATCH requests).
+ */
+export async function createTransferableRequestBody(
+  request: Request
+): Promise<{ hasBody: boolean; bodyStream?: ReadableStream<Uint8Array> }> {
+  const method = request.method.toUpperCase();
+  if (method === 'GET' || method === 'HEAD') {
+    return { hasBody: false };
+  }
+
+  const rawBody = request.body;
+  if (rawBody !== null && rawBody !== undefined) {
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    const transferable = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          if (!reader) {
+            reader = rawBody.getReader();
+          }
+          const { done, value } = await reader.read();
+          if (done) {
+            try {
+              reader.releaseLock();
+            } catch {
+              // ignore
+            }
+            reader = null;
+            controller.close();
+            return;
+          }
+          if (value && value.byteLength > 0) {
+            controller.enqueue(value);
+          }
+        },
+        cancel(reason) {
+          const r = reader;
+          reader = null;
+          if (r) {
+            return r.cancel(reason).catch(() => {});
+          }
+          return rawBody.cancel(reason).catch(() => {});
+        },
+      },
+      new CountQueuingStrategy({ highWaterMark: 4 })
+    );
+    return { hasBody: true, bodyStream: transferable };
+  }
+
+  // Firefox FetchEvent.request.body === undefined fallback: read via arrayBuffer().
+  if (rawBody === undefined) {
+    const ab = await request.arrayBuffer();
+    if (ab.byteLength === 0) {
+      return { hasBody: false };
+    }
+    const bytes = new Uint8Array(ab);
+    const bodyStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    });
+    return { hasBody: true, bodyStream };
+  }
+
+  return { hasBody: false };
 }
 
 let reqSeq = 0;
@@ -63,17 +118,22 @@ export async function executeTunnelRequest(
   request: Request,
   target: string,
   headers: HeaderField[],
-  hasBody: boolean,
   fetchCtx = 0,
-  cookieMutations: ClientCookieMutation[] = []
+  cookieMutations: ClientCookieMutation[] = [],
+  onAck?: () => void
 ): Promise<{ session: TabSession; response: TunnelResponseHead }> {
-  const method = request.method.toUpperCase();
-  const isIdempotent = !hasBody && IDEMPOTENT_METHODS.has(method);
+  if (request.signal?.aborted) {
+    throw new DOMException('Request aborted', 'AbortError');
+  }
 
   if (!session.port) {
     registry.evictDeadPort(session.tabId, null);
     throw new DeadBridgePortError();
   }
+
+  const { hasBody, bodyStream } = await createTransferableRequestBody(request);
+  const method = request.method.toUpperCase();
+  const isIdempotent = !hasBody && IDEMPOTENT_METHODS.has(method);
 
   try {
     const resp = await sendSingleAttempt(
@@ -82,25 +142,21 @@ export async function executeTunnelRequest(
       target,
       headers,
       hasBody,
+      bodyStream,
       isIdempotent,
       fetchCtx,
-      cookieMutations
+      cookieMutations,
+      onAck
     );
     return { session, response: resp };
   } catch (err) {
     if (err instanceof DeadBridgePortError) {
-      const alive = await registry.pingBridgePort(session, 500);
+      const alive = await registry.pingBridgePort(session, BRIDGE_PING_TIMEOUT_MS);
       if (!alive) {
         registry.evictDeadPort(session.tabId, session.port);
       }
     }
     throw err;
-  }
-}
-
-export class DeadBridgePortError extends Error {
-  constructor() {
-    super('bridge port did not acknowledge request within timeout');
   }
 }
 
@@ -110,13 +166,16 @@ function sendSingleAttempt(
   target: string,
   headers: HeaderField[],
   hasBody: boolean,
+  bodyStream: ReadableStream<Uint8Array> | undefined,
   allowAckRetry: boolean,
   fetchCtx: number,
-  cookieMutations: ClientCookieMutation[]
+  cookieMutations: ClientCookieMutation[],
+  onAck?: () => void
 ): Promise<TunnelResponseHead> {
   return new Promise<TunnelResponseHead>((resolveHead, rejectHead) => {
     const bridgePort = session.port;
     if (!bridgePort) {
+      void bodyStream?.cancel().catch(() => {});
       rejectHead(new DeadBridgePortError());
       return;
     }
@@ -129,32 +188,27 @@ function sendSingleAttempt(
     let acked = false;
     let headResolved = false;
     let closed = false;
-    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
-    let unackedDownBytes = 0;
+    let ackTimer: ReturnType<typeof setTimeout> | undefined;
+    let headTimer: ReturnType<typeof setTimeout> | undefined;
 
     let resolveDone!: () => void;
     const donePromise = new Promise<void>((r) => {
       resolveDone = r;
     });
 
-    // Upload backpressure state
-    let uploadCredit = UPLOAD_CREDIT_INITIAL;
-    let uploadCreditWaiter: {
-      resolve: () => void;
-      reject: (e: Error) => void;
-      timer: ReturnType<typeof setTimeout>;
-    } | null = null;
-    let uploadStarted = false;
-    let uploadAborted = false;
-    let uploadReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-    // Declare timer handles BEFORE cleanupPort() so early-abort paths never hit TDZ ReferenceError!
-    let ackTimer: ReturnType<typeof setTimeout> | undefined;
-    let headTimer: ReturnType<typeof setTimeout> | undefined;
+    const fireAck = () => {
+      if (acked) return;
+      acked = true;
+      if (ackTimer !== undefined) {
+        clearTimeout(ackTimer);
+        ackTimer = undefined;
+      }
+      onAck?.();
+    };
 
     const cleanupPort = () => {
       if (closed) return;
       closed = true;
-      uploadAborted = true;
       if (ackTimer !== undefined) {
         clearTimeout(ackTimer);
         ackTimer = undefined;
@@ -162,16 +216,6 @@ function sendSingleAttempt(
       if (headTimer !== undefined) {
         clearTimeout(headTimer);
         headTimer = undefined;
-      }
-      if (uploadCreditWaiter) {
-        clearTimeout(uploadCreditWaiter.timer);
-        uploadCreditWaiter.reject(new Error('request closed'));
-        uploadCreditWaiter = null;
-      }
-      if (uploadReader) {
-        const r = uploadReader;
-        uploadReader = null;
-        void r.cancel().catch(() => {});
       }
       if (request.signal) {
         request.signal.removeEventListener('abort', onRequestAbort);
@@ -201,13 +245,6 @@ function sendSingleAttempt(
       if (!headResolved) {
         headResolved = true;
         rejectHead(err);
-      } else if (streamController) {
-        try {
-          streamController.error(err);
-        } catch {
-          // ignore
-        }
-        streamController = null;
       }
     };
 
@@ -216,6 +253,7 @@ function sendSingleAttempt(
     };
 
     if (request.signal?.aborted) {
+      void bodyStream?.cancel().catch(() => {});
       try {
         remotePort.close();
       } catch {
@@ -250,74 +288,6 @@ function sendSingleAttempt(
       }
     }, RESP_HEAD_TIMEOUT_MS);
 
-    const startUploadPump = async () => {
-      if (!hasBody || uploadStarted || !request.body) return;
-      uploadStarted = true;
-      const reader = request.body.getReader();
-      uploadReader = reader;
-      try {
-        while (!uploadAborted && !closed) {
-          const { done, value } = await reader.read();
-          if (done) {
-            if (!closed) {
-              localPort.postMessage({ type: 'REQ_BODY_END' });
-            }
-            return;
-          }
-          if (!value || value.byteLength === 0) continue;
-
-          let off = 0;
-          while (off < value.byteLength && !uploadAborted && !closed) {
-            while (uploadCredit <= 0 && !uploadAborted && !closed) {
-              await new Promise<void>((resolve, reject) => {
-                const timer = setTimeout(() => {
-                  uploadCreditWaiter = null;
-                  reject(new Error('upload backpressure credit timeout'));
-                }, UPLOAD_CREDIT_TIMEOUT_MS);
-                uploadCreditWaiter = {
-                  resolve: () => {
-                    clearTimeout(timer);
-                    uploadCreditWaiter = null;
-                    resolve();
-                  },
-                  reject: (e) => {
-                    clearTimeout(timer);
-                    uploadCreditWaiter = null;
-                    reject(e);
-                  },
-                  timer,
-                };
-              });
-            }
-            if (uploadAborted || closed) return;
-
-            const sliceLen = Math.min(value.byteLength - off, MAX_UPLOAD_SLICE_BYTES, uploadCredit);
-            const piece = value.subarray(off, off + sliceLen);
-            off += sliceLen;
-            uploadCredit -= sliceLen;
-
-            const xfer = toSafeTransferableBuffer(piece);
-            localPort.postMessage(
-              { type: 'REQ_BODY_CHUNK', buffer: xfer.buffer, offset: xfer.offset, length: xfer.length },
-              [xfer.buffer]
-            );
-          }
-        }
-      } catch (err) {
-        if (!uploadAborted && !closed) {
-          const error = err instanceof Error ? err : new Error(String(err));
-          failRequest(error);
-        }
-      } finally {
-        uploadReader = null;
-        try {
-          reader.releaseLock();
-        } catch {
-          // ignore
-        }
-      }
-    };
-
     localPort.onmessage = (ev: MessageEvent) => {
       if (closed) return;
       const msg = ev.data as RequestPortDownMsg;
@@ -325,115 +295,37 @@ function sendSingleAttempt(
 
       switch (msg.type) {
         case 'REQ_ACK':
-          if (!acked) {
-            acked = true;
-            clearTimeout(ackTimer);
-            if (hasBody) {
-              void startUploadPump();
-            }
-          }
-          break;
-
-        case 'REQ_BODY_CREDIT':
-          if (typeof msg.bytes === 'number' && msg.bytes > 0) {
-            uploadCredit += msg.bytes;
-            if (uploadCredit > 0 && uploadCreditWaiter) {
-              uploadCreditWaiter.resolve();
-            }
-          }
+          fireAck();
           break;
 
         case 'RESP_START': {
           if (headResolved) return;
-          acked = true;
+          fireAck();
           headResolved = true;
-          clearTimeout(ackTimer);
-          clearTimeout(headTimer);
-
-          let bodyStream: ReadableStream<Uint8Array> | null = null;
-          if (msg.hasBody) {
-            const queuingStrategy =
-              typeof ByteLengthQueuingStrategy === 'function'
-                ? new ByteLengthQueuingStrategy({ highWaterMark: DOWNLOAD_STREAM_HWM_BYTES })
-                : undefined;
-            bodyStream = new ReadableStream<Uint8Array>(
-              {
-                start(controller) {
-                  streamController = controller;
-                },
-                pull() {
-                  if (!closed && unackedDownBytes >= DOWNLOAD_CREDIT_BATCH) {
-                    const delta = unackedDownBytes;
-                    unackedDownBytes = 0;
-                    try {
-                      localPort.postMessage({ type: 'RESP_BODY_CREDIT', bytes: delta });
-                    } catch {
-                      // ignore
-                    }
-                  }
-                },
-                cancel() {
-                  streamController = null;
-                  sendCancelAndCleanup();
-                },
-              },
-              queuingStrategy
-            );
-          } else {
+          if (headTimer !== undefined) {
+            clearTimeout(headTimer);
+            headTimer = undefined;
+          }
+          const respStream = msg.hasBody && msg.bodyStream ? msg.bodyStream : null;
+          if (!respStream) {
             cleanupPort();
           }
-
           resolveHead({
             status: msg.status,
             respFlags: typeof msg.respFlags === 'number' ? msg.respFlags : 0,
             headers: msg.headers,
             cookieDeltas: Array.isArray(msg.cookieDeltas) ? msg.cookieDeltas : [],
-            hasBody: msg.hasBody,
-            bodyStream,
+            hasBody: Boolean(respStream),
+            bodyStream: respStream,
             done: donePromise,
             cancel: sendCancelAndCleanup,
           });
           break;
         }
 
-        case 'RESP_CHUNK': {
-          if (!streamController) return;
-          const bytes = new Uint8Array(msg.buffer, msg.offset, msg.length);
-          unackedDownBytes += bytes.byteLength;
-          try {
-            streamController.enqueue(bytes);
-          } catch {
-            sendCancelAndCleanup();
-            return;
-          }
-          if (
-            unackedDownBytes >= DOWNLOAD_CREDIT_BATCH &&
-            (streamController.desiredSize ?? 1) > 0
-          ) {
-            const delta = unackedDownBytes;
-            unackedDownBytes = 0;
-            try {
-              localPort.postMessage({ type: 'RESP_BODY_CREDIT', bytes: delta });
-            } catch {
-              // ignore
-            }
-          }
-          break;
-        }
-
-        case 'RESP_END': {
-          const ctrl = streamController;
-          streamController = null;
+        case 'RESP_DONE':
           cleanupPort();
-          if (ctrl) {
-            try {
-              ctrl.close();
-            } catch {
-              // ignore
-            }
-          }
           break;
-        }
 
         case 'RESP_ERROR': {
           const message = msg.message || `Gateway error (${msg.status || 502})`;
@@ -456,13 +348,18 @@ function sendSingleAttempt(
               cancel: () => {},
             });
           } else {
-            failRequest(new Error(message));
+            cleanupPort();
           }
           break;
         }
       }
     };
     localPort.start?.();
+
+    const transferList: Transferable[] = [remotePort];
+    if (bodyStream) {
+      transferList.push(bodyStream as unknown as Transferable);
+    }
 
     try {
       bridgePort.postMessage(
@@ -474,12 +371,14 @@ function sendSingleAttempt(
           target,
           headers,
           hasBody,
+          bodyStream,
           fetchCtx,
           cookieMutations,
         },
-        [remotePort]
+        transferList
       );
     } catch {
+      void bodyStream?.cancel().catch(() => {});
       try {
         remotePort.close();
       } catch {

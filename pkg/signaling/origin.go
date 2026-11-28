@@ -28,22 +28,27 @@ const (
 	SandboxModeWildcard SandboxMode = "wildcard"
 )
 
-// DomainPolicy enforces 3-tier host classification, exact Portal origin isolation,
-// strict Host allowlisting (421), Origin validation (CSWSH prevention),
-// and single-pass canonical URL path normalization.
+// DomainPolicy enforces explicit startup-origin classification (Tier 1 cross-site wildcard,
+// Tier 2 restricted fixed-host / same-site wildcard, or loopback LocalDev), strict Host
+// allowlisting (421), Origin validation (CSWSH prevention), and single-pass path normalization.
+// No runtime X-Forwarded-Proto guessing is ever performed.
 type DomainPolicy struct {
-	Mode                 SandboxMode
-	PortalDomain         string // lowercase host[:port], e.g. "portal.example.com"
-	PortalHost           string // lowercase host without port
-	PortalPort           string // optional explicit port (digits 1..65535)
-	SandboxDomain        string // wildcard base domain (Tier 2/3) or exact fixed host[:port] (Tier 1)
-	SandboxHost          string // lowercase host without port
-	SandboxPort          string // optional explicit port
-	AllowSameSiteSandbox bool   // Tier 2 CLI opt-in
-	IsSameSite           bool   // True ONLY when active sandbox actually shares eTLD+1 with portal (Tier 2)
-	LocalDevMode         bool   // automatic RFC 6761 *.localhost on loopback
-	AllowAllOrigins      bool
-	TrustedProxies       []netip.Prefix
+	Mode              SandboxMode
+	Scheme            string   // "http" or "https" (fixed at startup)
+	PortalOrigin      string   // Canonical origin, e.g. "https://portal.example.com" (empty in LocalDev)
+	PortalDomain      string   // Canonical host[:port] without default port
+	PortalHost        string   // Lowercase host without port
+	PortalPort        string   // Non-default port only, e.g. "8443" (empty if default for Scheme)
+	SandboxOrigin     string   // Canonical origin, e.g. "https://*.sandbox.example.net" or "https://app.example.net"
+	SandboxDomain     string   // Canonical host[:port] without "*." and without default port
+	SandboxHost       string   // Lowercase host without port or "*."
+	SandboxPort       string   // Non-default port only (empty if default for Scheme)
+	RestrictedSandbox bool     // True for Tier 2 (fixed single sandbox host OR same-site wildcard)
+	IsSameSite        bool     // True ONLY when active sandbox shares eTLD+1 with portal (emits Origin-Agent-Cluster)
+	LocalDevMode      bool     // RFC 6761 *.localhost on loopback
+	LocalPort         string   // Explicit listen port in LocalDev (empty only when listenAddr uses :0)
+	LocalPortalHosts  []string // Allowed loopback hosts strictly bound to listen address family
+	AllowAllOrigins   bool
 }
 
 type HostClass int
@@ -55,9 +60,9 @@ const (
 )
 
 var (
-	ErrInvalidDomainConfig = errors.New("signaling: invalid portal/sandbox domain configuration")
-	ErrSameSiteRequiresOpt = errors.New("signaling: sandbox_domain shares eTLD+1 with portal_domain; use a distinct registrable domain or set -allow-same-site-sandbox")
-	ErrPublicRequiresDom   = errors.New("signaling: non-loopback bind requires -portal-domain with -sandbox-host (Tier 1) or -sandbox-domain (Tier 2/3)")
+	ErrInvalidOriginConfig   = errors.New("signaling: invalid portal/sandbox origin configuration")
+	ErrSameSiteRequiresOpt   = errors.New("signaling: sandbox origin shares eTLD+1 with portal origin; use a distinct registrable domain or set -allow-same-site-sandbox")
+	ErrPublicRequiresOrigins = errors.New("signaling: non-loopback bind requires explicit -portal-origin and -sandbox-origin")
 )
 
 func isValidPortString(p string) bool {
@@ -73,47 +78,28 @@ func isValidPortString(p string) bool {
 	return err == nil && n >= 1 && n <= 65535
 }
 
-// ValidateDomainInput validates and normalizes a domain string ("host" or "host:port").
-func ValidateDomainInput(raw string) (full, host, port string, err error) {
-	s := strings.ToLower(strings.TrimSpace(raw))
-	if s == "" {
-		return "", "", "", nil
+func defaultPort(scheme string) string {
+	if scheme == "https" {
+		return "443"
 	}
-	if strings.ContainsAny(s, "/\\?*#@ \t\r\n;,'\"") {
-		return "", "", "", fmt.Errorf("%w: illegal character in %q", ErrInvalidDomainConfig, raw)
+	return "80"
+}
+
+func effectivePort(scheme, port string) string {
+	if port == "" {
+		return defaultPort(scheme)
 	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x20 || s[i] == 0x7f {
-			return "", "", "", fmt.Errorf("%w: control char in %q", ErrInvalidDomainConfig, raw)
-		}
+	return port
+}
+
+func formatOriginHostPort(scheme, host, port string) string {
+	if port != "" && port != defaultPort(scheme) {
+		return net.JoinHostPort(host, port)
 	}
-	h := s
-	if strings.Contains(s, ":") {
-		var splitErr error
-		h, port, splitErr = net.SplitHostPort(s)
-		if splitErr != nil || !isValidPortString(port) {
-			return "", "", "", fmt.Errorf("%w: invalid host:port %q", ErrInvalidDomainConfig, raw)
-		}
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
 	}
-	if !originHostRegex.MatchString(h) || strings.Contains(h, "..") {
-		return "", "", "", fmt.Errorf("%w: malformed hostname %q", ErrInvalidDomainConfig, raw)
-	}
-	if _, ipErr := netip.ParseAddr(h); ipErr == nil {
-		return "", "", "", fmt.Errorf("%w: IP literal %q cannot be used as portal/sandbox domain", ErrInvalidDomainConfig, raw)
-	}
-	if HasSandboxLabel(h) {
-		return "", "", "", fmt.Errorf("%w: reserved sbx- label in %q", ErrInvalidDomainConfig, raw)
-	}
-	if h != "localhost" && !strings.HasSuffix(h, ".localhost") {
-		etld, eErr := publicsuffix.EffectiveTLDPlusOne(h)
-		if eErr != nil || etld == "" {
-			return "", "", "", fmt.Errorf("%w: %q is a public suffix or single-label host", ErrInvalidDomainConfig, raw)
-		}
-	}
-	if port != "" {
-		return h + ":" + port, h, port, nil
-	}
-	return h, h, "", nil
+	return host
 }
 
 // HasSandboxLabel reports whether ANY DNS label in host starts with "sbx-".
@@ -142,99 +128,224 @@ func IsLoopbackBindAddr(addr string) bool {
 	return err == nil && ip.IsLoopback()
 }
 
-// NewDomainPolicy constructs and strictly validates the V7 3-tier domain isolation policy:
-//   - LocalDev: loopback bind with no domains (localhost / 127.0.0.1 / [::1] + *.localhost)
-//   - Tier 1 (Fixed): -portal-domain + -sandbox-host (distinct eTLD+1, no wildcard cert needed)
-//   - Tier 2 (Same-Site Wildcard): -portal-domain + -sandbox-domain + -allow-same-site-sandbox (adds Origin-Agent-Cluster: ?1)
-//   - Tier 3 (Cross-Site Wildcard): -portal-domain + -sandbox-domain (distinct eTLD+1)
+type parsedOrigin struct {
+	canonical string
+	scheme    string
+	domain    string // host[:nonDefaultPort]
+	host      string
+	port      string // non-default port only
+	wildcard  bool
+}
+
+func parseConfiguredOrigin(raw string, allowWildcard bool) (parsedOrigin, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return parsedOrigin{}, fmt.Errorf("%w: empty origin", ErrInvalidOriginConfig)
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return parsedOrigin{}, fmt.Errorf("%w: control char in %q", ErrInvalidOriginConfig, raw)
+		}
+	}
+	lower := strings.ToLower(s)
+	var scheme, rest string
+	switch {
+	case strings.HasPrefix(lower, "https://"):
+		scheme = "https"
+		rest = lower[len("https://"):]
+	case strings.HasPrefix(lower, "http://"):
+		scheme = "http"
+		rest = lower[len("http://"):]
+	default:
+		return parsedOrigin{}, fmt.Errorf("%w: origin %q must start with https:// or http://", ErrInvalidOriginConfig, raw)
+	}
+
+	wildcard := false
+	if strings.HasPrefix(rest, "*.") {
+		if !allowWildcard {
+			return parsedOrigin{}, fmt.Errorf("%w: wildcard not permitted in portal origin %q", ErrInvalidOriginConfig, raw)
+		}
+		wildcard = true
+		rest = rest[2:]
+	}
+
+	if rest == "" || strings.ContainsAny(rest, "/\\?*#@ \t\r\n;,'\"") {
+		return parsedOrigin{}, fmt.Errorf("%w: illegal character or path in origin %q", ErrInvalidOriginConfig, raw)
+	}
+
+	host := rest
+	port := ""
+	if strings.Contains(rest, ":") {
+		h, p, err := net.SplitHostPort(rest)
+		if err != nil || !isValidPortString(p) {
+			return parsedOrigin{}, fmt.Errorf("%w: invalid host:port in origin %q", ErrInvalidOriginConfig, raw)
+		}
+		host, port = h, p
+	}
+	if !originHostRegex.MatchString(host) || strings.Contains(host, "..") {
+		return parsedOrigin{}, fmt.Errorf("%w: malformed hostname %q in origin %q", ErrInvalidOriginConfig, host, raw)
+	}
+	if _, ipErr := netip.ParseAddr(host); ipErr == nil {
+		return parsedOrigin{}, fmt.Errorf("%w: IP literal %q cannot be used as portal/sandbox origin", ErrInvalidOriginConfig, raw)
+	}
+	if HasSandboxLabel(host) {
+		return parsedOrigin{}, fmt.Errorf("%w: reserved sbx- label in %q", ErrInvalidOriginConfig, raw)
+	}
+	if host != "localhost" && !strings.HasSuffix(host, ".localhost") {
+		etld, eErr := publicsuffix.EffectiveTLDPlusOne(host)
+		if eErr != nil || etld == "" {
+			return parsedOrigin{}, fmt.Errorf("%w: %q is a public suffix or single-label host", ErrInvalidOriginConfig, raw)
+		}
+	}
+
+	if port == defaultPort(scheme) {
+		port = ""
+	}
+	domain := formatOriginHostPort(scheme, host, port)
+	canon := scheme + "://" + domain
+	if wildcard {
+		canon = scheme + "://*." + domain
+	}
+	return parsedOrigin{
+		canonical: canon,
+		scheme:    scheme,
+		domain:    domain,
+		host:      host,
+		port:      port,
+		wildcard:  wildcard,
+	}, nil
+}
+
+func resolveLocalDevHostsAndPort(listenAddr string) ([]string, string, error) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
+	if err != nil {
+		return nil, "", fmt.Errorf("%w: invalid listen address %q", ErrInvalidOriginConfig, listenAddr)
+	}
+	if port == "0" {
+		port = ""
+	} else if !isValidPortString(port) {
+		return nil, "", fmt.Errorf("%w: invalid listen port %q", ErrInvalidOriginConfig, listenAddr)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return []string{"localhost"}, port, nil
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil || !ip.IsLoopback() {
+		return nil, "", ErrPublicRequiresOrigins
+	}
+	ip = ip.WithZone("").Unmap()
+	if ip.Is4() {
+		// Strictly bind IPv4 loopback only — never cross-trust [::1] on IPv4-only listeners.
+		return []string{"localhost", ip.String()}, port, nil
+	}
+	// Strictly bind IPv6 loopback only — never cross-trust 127.0.0.1 on IPv6-only listeners.
+	return []string{"localhost", ip.String()}, port, nil
+}
+
+// NewDomainPolicy constructs and strictly validates explicit startup origin isolation:
+//   - LocalDev (-dev or loopback bind with no origins): *.localhost sandbox + address-family-scoped loopback portal.
+//   - Tier 1 (Full Isolation): -portal-origin https://gw.example.com + -sandbox-origin https://*.sandbox.example.net (distinct eTLD+1).
+//   - Tier 2 (Restricted Isolation):
+//     a) Fixed cross-site sandbox: -portal-origin https://gw.example.com + -sandbox-origin https://app.example.net (distinct eTLD+1, RestrictedSandbox=true).
+//     b) Same-site wildcard sandbox: -portal-origin https://gw.example.com + -sandbox-origin https://*.sbx.example.com + -allow-same-site-sandbox (RestrictedSandbox=true, Origin-Agent-Cluster).
 func NewDomainPolicy(
 	listenAddr string,
-	portalDomainRaw string,
-	sandboxDomainRaw string,
-	sandboxHostRaw string,
+	portalOriginRaw string,
+	sandboxOriginRaw string,
+	devMode bool,
+	tlsEnabled bool,
 	allowSameSiteSandbox bool,
 	allowAllOrigins bool,
-	trustedProxies []netip.Prefix,
 ) (*DomainPolicy, error) {
-	pFull, pHost, pPort, err := ValidateDomainInput(portalDomainRaw)
-	if err != nil {
-		return nil, err
-	}
-	sDomFull, sDomHost, sDomPort, err := ValidateDomainInput(sandboxDomainRaw)
-	if err != nil {
-		return nil, err
-	}
-	sFixFull, sFixHost, sFixPort, err := ValidateDomainInput(sandboxHostRaw)
-	if err != nil {
-		return nil, err
+	pRaw := strings.TrimSpace(portalOriginRaw)
+	sRaw := strings.TrimSpace(sandboxOriginRaw)
+
+	if devMode {
+		if pRaw != "" || sRaw != "" {
+			return nil, fmt.Errorf("%w: -dev cannot be combined with -portal-origin or -sandbox-origin", ErrInvalidOriginConfig)
+		}
+		if !IsLoopbackBindAddr(listenAddr) {
+			return nil, fmt.Errorf("%w: -dev requires a loopback -addr (e.g. 127.0.0.1:8888)", ErrInvalidOriginConfig)
+		}
 	}
 
-	if sDomHost != "" && sFixHost != "" {
-		return nil, fmt.Errorf("%w: -sandbox-domain and -sandbox-host are mutually exclusive", ErrInvalidDomainConfig)
+	if devMode || (pRaw == "" && sRaw == "") {
+		if !IsLoopbackBindAddr(listenAddr) {
+			return nil, ErrPublicRequiresOrigins
+		}
+		localHosts, localPort, err := resolveLocalDevHostsAndPort(listenAddr)
+		if err != nil {
+			return nil, err
+		}
+		scheme := "http"
+		if tlsEnabled {
+			scheme = "https"
+		}
+		if localPort == defaultPort(scheme) {
+			localPort = ""
+		}
+		return &DomainPolicy{
+			Mode:             SandboxModeLocal,
+			Scheme:           scheme,
+			LocalDevMode:     true,
+			LocalPort:        localPort,
+			LocalPortalHosts: localHosts,
+			AllowAllOrigins:  allowAllOrigins,
+		}, nil
 	}
+
+	if pRaw == "" || sRaw == "" {
+		return nil, fmt.Errorf("%w: both -portal-origin and -sandbox-origin must be configured together", ErrInvalidOriginConfig)
+	}
+
+	p, err := parseConfiguredOrigin(pRaw, false)
+	if err != nil {
+		return nil, err
+	}
+	s, err := parseConfiguredOrigin(sRaw, true)
+	if err != nil {
+		return nil, err
+	}
+	if p.scheme != s.scheme {
+		return nil, fmt.Errorf("%w: -portal-origin (%s) and -sandbox-origin (%s) must use the same scheme", ErrInvalidOriginConfig, p.scheme, s.scheme)
+	}
+
+	pSite := effectiveSite(p.host)
+	sSite := effectiveSite(s.host)
 
 	dp := &DomainPolicy{
-		PortalDomain:         pFull,
-		PortalHost:           pHost,
-		PortalPort:           pPort,
-		AllowSameSiteSandbox: allowSameSiteSandbox,
-		AllowAllOrigins:      allowAllOrigins,
-		TrustedProxies:       trustedProxies,
+		Scheme:          p.scheme,
+		PortalOrigin:    p.canonical,
+		PortalDomain:    p.domain,
+		PortalHost:      p.host,
+		PortalPort:      p.port,
+		SandboxOrigin:   s.canonical,
+		SandboxDomain:   s.domain,
+		SandboxHost:     s.host,
+		SandboxPort:     s.port,
+		AllowAllOrigins: allowAllOrigins,
 	}
 
-	// LocalDev mode (loopback only, no configured domains).
-	if pHost == "" && sDomHost == "" && sFixHost == "" {
-		if !IsLoopbackBindAddr(listenAddr) {
-			return nil, ErrPublicRequiresDom
-		}
-		dp.Mode = SandboxModeLocal
-		dp.LocalDevMode = true
-		return dp, nil
-	}
-
-	if pHost == "" {
-		return nil, fmt.Errorf("%w: -sandbox-domain / -sandbox-host requires -portal-domain", ErrInvalidDomainConfig)
-	}
-
-	// Tier 1: Dual Fixed Domains (no wildcard DNS/TLS required; strictly distinct eTLD+1).
-	if sFixHost != "" {
-		if sFixHost == pHost {
-			return nil, fmt.Errorf("%w: -sandbox-host must differ from -portal-domain", ErrInvalidDomainConfig)
-		}
-		if effectiveSite(pHost) == effectiveSite(sFixHost) {
-			return nil, fmt.Errorf("%w: Tier 1 -sandbox-host must use a distinct eTLD+1 from -portal-domain", ErrInvalidDomainConfig)
+	if !s.wildcard {
+		// Tier 2 Restricted Fixed Single-Host Sandbox: cross-site against Portal is still mandatory.
+		if s.host == p.host || pSite == sSite {
+			return nil, fmt.Errorf("%w: fixed -sandbox-origin must use a distinct eTLD+1 from -portal-origin", ErrInvalidOriginConfig)
 		}
 		dp.Mode = SandboxModeFixed
-		dp.SandboxDomain = sFixFull
-		dp.SandboxHost = sFixHost
-		dp.SandboxPort = sFixPort
+		dp.RestrictedSandbox = true
 		dp.IsSameSite = false
 		return dp, nil
 	}
 
-	// Tier 2 / Tier 3: Wildcard Sandbox Domain.
-	if sDomHost == "" {
-		if !allowSameSiteSandbox {
-			return nil, fmt.Errorf("%w: cross-site mode requires -sandbox-domain or -sandbox-host (or pass -allow-same-site-sandbox)", ErrInvalidDomainConfig)
-		}
-		dp.Mode = SandboxModeWildcard
-		dp.SandboxDomain = pFull
-		dp.SandboxHost = pHost
-		dp.SandboxPort = pPort
-		dp.IsSameSite = true
-		return dp, nil
-	}
-
-	pSite := effectiveSite(pHost)
-	sSite := effectiveSite(sDomHost)
-	if pSite == sSite && !allowSameSiteSandbox {
-		return nil, ErrSameSiteRequiresOpt
-	}
+	// Wildcard Sandbox Origin: Tier 1 (cross-site) or Tier 2 (same-site with explicit opt-in).
 	dp.Mode = SandboxModeWildcard
-	dp.SandboxDomain = sDomFull
-	dp.SandboxHost = sDomHost
-	dp.SandboxPort = sDomPort
-	dp.IsSameSite = pSite == sSite
+	if pSite == sSite {
+		if !allowSameSiteSandbox {
+			return nil, ErrSameSiteRequiresOpt
+		}
+		dp.IsSameSite = true
+		dp.RestrictedSandbox = true
+	}
 	return dp, nil
 }
 
@@ -249,8 +360,6 @@ func effectiveSite(host string) string {
 	return etld
 }
 
-// splitHostPortLower parses rawHost into lowercase host + strictly numeric port (1..65535).
-// Rejects trailing colons, non-numeric ports, and any CSP/header metacharacters.
 func splitHostPortLower(rawHost string) (host, port string, ok bool) {
 	s := strings.ToLower(strings.TrimSpace(rawHost))
 	if s == "" || strings.ContainsAny(s, " \t\r\n;,'\"/\\") {
@@ -289,18 +398,6 @@ func splitHostPortLower(rawHost string) (host, port string, ok bool) {
 	return s, "", true
 }
 
-func formatOriginHostPort(scheme, host, port string) string {
-	// Canonically omit standard scheme default ports (https:443, http:80) so browser
-	// Origin / CSP frame-ancestors / frame-src exact-match rules always align.
-	if port != "" && port != defaultPort(scheme) {
-		return net.JoinHostPort(host, port)
-	}
-	if strings.Contains(host, ":") {
-		return "[" + host + "]"
-	}
-	return host
-}
-
 func isSingleLabelSubdomain(host, base string) (label string, ok bool) {
 	suffix := "." + base
 	if !strings.HasSuffix(host, suffix) {
@@ -313,24 +410,29 @@ func isSingleLabelSubdomain(host, base string) (label string, ok bool) {
 	return lbl, true
 }
 
-func portMatchesConfigured(gotPort, configuredPort string) bool {
+func portMatchesConfigured(gotPort, configuredPort, scheme string) bool {
 	if configuredPort != "" {
-		if gotPort == configuredPort {
-			return true
-		}
-		// Browsers omit default ports (:443 / :80) from HTTP Host headers even if operator
-		// explicitly configured portal.example.com:443 or portal.example.com:80.
-		if gotPort == "" && (configuredPort == "443" || configuredPort == "80") {
-			return true
-		}
-		return false
+		return gotPort == configuredPort
 	}
-	// When no explicit port is configured in production, accept only implicit or standard HTTP(S) ports.
-	return gotPort == "" || gotPort == "443" || gotPort == "80"
+	return gotPort == "" || gotPort == defaultPort(scheme)
+}
+
+func (dp *DomainPolicy) isAllowedLocalHost(host string) bool {
+	for _, h := range dp.LocalPortalHosts {
+		if host == h {
+			return true
+		}
+	}
+	return false
+}
+
+// IsHTTPS reports whether the configured external origin uses HTTPS.
+func (dp *DomainPolicy) IsHTTPS() bool {
+	return dp.Scheme == "https"
 }
 
 // ClassifyHost determines whether r.Host is the EXACT authorized Portal host, an authorized
-// Sandbox host (Tier 1 fixed host or Tier 2/3/Local strict sbx-[a-z0-9]+ single-label subdomain), or rejected (421).
+// Sandbox host (fixed host or strict sbx-[a-z0-9]+ single-label subdomain), or rejected (421).
 func (dp *DomainPolicy) ClassifyHost(rawHost string) HostClass {
 	host, port, ok := splitHostPortLower(rawHost)
 	if !ok {
@@ -338,7 +440,10 @@ func (dp *DomainPolicy) ClassifyHost(rawHost string) HostClass {
 	}
 
 	if dp.LocalDevMode {
-		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		if dp.LocalPort != "" && !portMatchesConfigured(port, dp.LocalPort, dp.Scheme) {
+			return HostRejected
+		}
+		if dp.isAllowedLocalHost(host) {
 			return HostPortal
 		}
 		if lbl, sub := isSingleLabelSubdomain(host, "localhost"); sub && sbxLabelRegex.MatchString(lbl) {
@@ -347,16 +452,16 @@ func (dp *DomainPolicy) ClassifyHost(rawHost string) HostClass {
 		return HostRejected
 	}
 
-	if host == dp.PortalHost && portMatchesConfigured(port, dp.PortalPort) {
+	if host == dp.PortalHost && portMatchesConfigured(port, dp.PortalPort, dp.Scheme) {
 		return HostPortal
 	}
 	if dp.Mode == SandboxModeFixed {
-		if host == dp.SandboxHost && portMatchesConfigured(port, dp.SandboxPort) {
+		if host == dp.SandboxHost && portMatchesConfigured(port, dp.SandboxPort, dp.Scheme) {
 			return HostSandbox
 		}
 		return HostRejected
 	}
-	if lbl, sub := isSingleLabelSubdomain(host, dp.SandboxHost); sub && portMatchesConfigured(port, dp.SandboxPort) {
+	if lbl, sub := isSingleLabelSubdomain(host, dp.SandboxHost); sub && portMatchesConfigured(port, dp.SandboxPort, dp.Scheme) {
 		if sbxLabelRegex.MatchString(lbl) {
 			return HostSandbox
 		}
@@ -364,37 +469,8 @@ func (dp *DomainPolicy) ClassifyHost(rawHost string) HostClass {
 	return HostRejected
 }
 
-// IsHTTPS strictly determines whether the client connection used TLS.
-// Reads RIGHTMOST X-Forwarded-Proto ONLY when remote peer is a verified trusted proxy.
-func (dp *DomainPolicy) IsHTTPS(r *http.Request) bool {
-	if r.TLS != nil {
-		return true
-	}
-	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		remoteHost = strings.TrimSpace(r.RemoteAddr)
-	}
-	if !IsTrustedProxy(remoteHost, dp.TrustedProxies) {
-		return false
-	}
-	vals := r.Header.Values("X-Forwarded-Proto")
-	if len(vals) == 0 {
-		return false
-	}
-	for i := len(vals) - 1; i >= 0; i-- {
-		parts := strings.Split(vals[i], ",")
-		for j := len(parts) - 1; j >= 0; j-- {
-			v := strings.TrimSpace(parts[j])
-			if v != "" {
-				return strings.EqualFold(v, "https")
-			}
-		}
-	}
-	return false
-}
-
 // CheckWSOrigin strictly validates browser Origin headers for /ws/* endpoints.
-// Rejects multiple Origin headers Fail-Closed; allows absent Origin for non-browser CLI/Agent clients.
+// Absent Origin is allowed (non-browser CLI/Agent); present empty or multiple Origin headers fail closed.
 func (dp *DomainPolicy) CheckWSOrigin(r *http.Request) bool {
 	if dp.ClassifyHost(r.Host) != HostPortal {
 		return false
@@ -408,10 +484,11 @@ func (dp *DomainPolicy) CheckWSOrigin(r *http.Request) bool {
 	}
 	origin := strings.TrimSpace(origins[0])
 	if origin == "" {
-		return true
+		return false
 	}
 	u, err := url.Parse(origin)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return false
 	}
 	oHost := strings.ToLower(u.Hostname())
@@ -431,96 +508,59 @@ func (dp *DomainPolicy) CheckWSOrigin(r *http.Request) bool {
 		return true
 	}
 
-	reqHTTPS := dp.IsHTTPS(r)
-	if reqHTTPS && u.Scheme != "https" {
-		return false
-	}
-
-	rHost, rPort, ok := splitHostPortLower(r.Host)
-	if !ok {
+	if u.Scheme != dp.Scheme {
 		return false
 	}
 
 	if dp.LocalDevMode {
-		if effectivePort(u.Scheme, oPort) == effectivePort(schemeFromBool(reqHTTPS), rPort) {
-			if oHost == "localhost" || oHost == "127.0.0.1" || oHost == "::1" {
-				return true
-			}
+		rHost, rPort, ok := splitHostPortLower(r.Host)
+		if !ok {
+			return false
 		}
-		return false
+		// Require exact loopback host & port match (no 127.0.0.1 <-> localhost cross-origin WS).
+		return oHost == rHost && effectivePort(u.Scheme, oPort) == effectivePort(dp.Scheme, rPort)
 	}
 
-	expectedPort := dp.PortalPort
-	if expectedPort == "" {
-		expectedPort = defaultPort(schemeFromBool(reqHTTPS))
-	}
-	return oHost == dp.PortalHost && oHost == rHost && effectivePort(u.Scheme, oPort) == expectedPort
+	canonOrigin := u.Scheme + "://" + formatOriginHostPort(u.Scheme, oHost, oPort)
+	return canonOrigin == dp.PortalOrigin
 }
 
 // SandboxFrameSrc returns the exact CSP frame-src directive value for Portal pages.
-func (dp *DomainPolicy) SandboxFrameSrc(r *http.Request) string {
-	scheme := schemeFromBool(dp.IsHTTPS(r))
-	if dp.LocalDevMode {
-		_, rPort, ok := splitHostPortLower(r.Host)
-		if ok && rPort != "" && rPort != defaultPort(scheme) {
-			return fmt.Sprintf("%s://*.localhost:%s", scheme, rPort)
-		}
-		return fmt.Sprintf("%s://*.localhost", scheme)
+// portOverride is used only in ephemeral LocalDev (:0) mode.
+func (dp *DomainPolicy) SandboxFrameSrc(portOverride string) string {
+	if !dp.LocalDevMode {
+		return dp.SandboxOrigin
 	}
-	if dp.Mode == SandboxModeFixed {
-		return fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(scheme, dp.SandboxHost, dp.SandboxPort))
+	port := dp.LocalPort
+	if port == "" {
+		port = portOverride
 	}
-	if dp.SandboxPort != "" && dp.SandboxPort != defaultPort(scheme) {
-		return fmt.Sprintf("%s://*.%s:%s", scheme, dp.SandboxHost, dp.SandboxPort)
+	if port != "" && port != defaultPort(dp.Scheme) {
+		return fmt.Sprintf("%s://*.localhost:%s", dp.Scheme, port)
 	}
-	return fmt.Sprintf("%s://*.%s", scheme, dp.SandboxHost)
+	return fmt.Sprintf("%s://*.localhost", dp.Scheme)
 }
 
 // AllowedPortalOriginsList returns the exact list of authorized Portal origins allowed to
-// embed /__p2p_gw__/bridge.html and send P2P_PORTAL_INIT.
-// CRITICAL: NEVER includes *.localhost or *.portalHost!
-func (dp *DomainPolicy) AllowedPortalOriginsList(r *http.Request) []string {
-	scheme := schemeFromBool(dp.IsHTTPS(r))
-	if dp.LocalDevMode {
-		_, rPort, ok := splitHostPortLower(r.Host)
-		if !ok {
-			rPort = ""
-		}
-		return []string{
-			fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(scheme, "localhost", rPort)),
-			fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(scheme, "127.0.0.1", rPort)),
-			fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(scheme, "::1", rPort)),
-		}
+// embed /__p2p_gw__/bridge.html and send P2P_PORTAL_INIT. NEVER includes wildcards.
+func (dp *DomainPolicy) AllowedPortalOriginsList(portOverride string) []string {
+	if !dp.LocalDevMode {
+		return []string{dp.PortalOrigin}
 	}
-	return []string{
-		fmt.Sprintf("%s://%s", scheme, formatOriginHostPort(scheme, dp.PortalHost, dp.PortalPort)),
+	port := dp.LocalPort
+	if port == "" {
+		port = portOverride
 	}
+	out := make([]string, 0, len(dp.LocalPortalHosts))
+	for _, h := range dp.LocalPortalHosts {
+		out = append(out, fmt.Sprintf("%s://%s", dp.Scheme, formatOriginHostPort(dp.Scheme, h, port)))
+	}
+	return out
 }
 
 // PortalFrameAncestors returns the exact CSP frame-ancestors directive for /__p2p_gw__/bridge.html.
-func (dp *DomainPolicy) PortalFrameAncestors(r *http.Request) string {
-	return strings.Join(dp.AllowedPortalOriginsList(r), " ")
-}
-
-func defaultPort(scheme string) string {
-	if scheme == "https" {
-		return "443"
-	}
-	return "80"
-}
-
-func effectivePort(scheme, port string) string {
-	if port == "" {
-		return defaultPort(scheme)
-	}
-	return port
-}
-
-func schemeFromBool(https bool) string {
-	if https {
-		return "https"
-	}
-	return "http"
+func (dp *DomainPolicy) PortalFrameAncestors(portOverride string) string {
+	return strings.Join(dp.AllowedPortalOriginsList(portOverride), " ")
 }
 
 // CanonicalizeHTTPPath performs a SINGLE-PASS decode and normalization on an already-escaped

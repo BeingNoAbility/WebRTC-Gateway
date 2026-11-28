@@ -27,8 +27,8 @@ ACCESS_SECRET=change-me TURN_PASS=your-turn-pass ./bin/agent \
 
 | 报错关键词 | 原因 | 解决方法 |
 | :--- | :--- | :--- |
-| `SIGNAL_SECRET is required` | 信令端未配置集群准入密钥 | 设置 `SIGNAL_SECRET` / `SIGNAL_SECRET_FILE`，或仅限开发期显式加 `-allow-anonymous-agents` |
-| `non-loopback bind requires -portal-domain with -sandbox-host (Tier 1) or -sandbox-domain (Tier 2/3)` | 非回环监听未配置跨站双域 | 配置 `-portal-domain` 搭配 `-sandbox-host`（Tier 1）或 `-sandbox-domain`（Tier 3；单根域同站需显式加 `-allow-same-site-sandbox`） |
+| `SIGNAL_SECRET is required` / `at least 16 bytes` | 信令端未配置准入密钥或长度不足 16 字节 | 设置不少于 16 字节的 `SIGNAL_SECRET` / `SIGNAL_SECRET_FILE`，或仅限开发期显式加 `-allow-anonymous-agents` |
+| `both -portal-origin and -sandbox-origin are required` | 未配置显式源且未开启本地 `-dev` | 生产环境配置 `-portal-origin` + `-sandbox-origin`（单根域同站需加 `-allow-same-site-sandbox`）；本地回环开发显式传入 `-dev` |
 | `ACCESS_SECRET is required` | Agent 未配置访客密钥 | 设置 `ACCESS_SECRET` / `ACCESS_SECRET_FILE`，或确需公开时显式加 `-allow-public` |
 | `Specify exactly ONE of -target, -dir, or -file` | 未指定或同时指定了多个工作模式 | 启动时明确传入 `-target`、`-dir`、`-file` 三者之一 |
 | `unknown field ...` | YAML 配置文件存在拼写错误或非法字段 | 对照 `configs/*.example.yaml` 修正字段名（配置加载启用了 `KnownFields(true)`） |
@@ -43,8 +43,8 @@ ACCESS_SECRET=change-me TURN_PASS=your-turn-pass ./bin/agent \
 
 ### 4. 浏览器 WebSocket 握手报 `403 Forbidden` 或 `421 Misdirected Request`
 
-- **`421 Misdirected Request`**：请求的 `Host` 头不在 `PORTAL_DOMAIN` / `SANDBOX_DOMAIN` / `SANDBOX_HOST`（或本地 `localhost` / `*.localhost`）白名单内。确认反向代理透传了原始 `Host` 头，且未通过裸 IP 或未授权域名直连。
-- **`403 Forbidden`（反代后方）**：信令端默认 `-trusted-proxies` 仅信任回环地址（`127.0.0.0/8,::1/128`），反代位于容器网桥或其他主机时会忽略 `X-Forwarded-Proto` 导致同源判定失败。在 `-trusted-proxies` 中添加反代真实 CIDR。
+- **`421 Misdirected Request`**：请求的 `Host` 头不在 `PORTAL_ORIGIN` / `SANDBOX_ORIGIN`（或 `-dev` 模式下的 `localhost` / `*.localhost`）白名单内。确认反向代理透传了原始 `Host` 头，且未通过裸 IP 或未授权域名直连。
+- **`403 Forbidden`（反代后方）**：浏览器发送的 `Origin` 头与服务端启动期配置的 `-portal-origin`（含协议与端口）不完全一致。核对反代对外协议/端口是否与 `-portal-origin` 一致；若访客全部触发同一 IP 限流，再在 `-trusted-proxies` 中添加反代真实 CIDR。
 - **`403 Forbidden`（直接访问沙箱域名）**：直接打开或外站探测沙箱域名会触发 SW W3C Fetch 抗 CSRF 门禁；请始终通过 Portal URL（如 `https://portal.example.com/#node`）接入。
 
 ### 5. Docker 容器内 Agent 无法访问宿主机 `127.0.0.1:8080`

@@ -2,7 +2,7 @@
 # Load explicitly via `-config /path/to/server.yaml` or `CONFIG_FILE=/path/to/server.yaml`.
 # Never auto-loads config files from the current working directory.
 
-addr: "0.0.0.0:8888"
+addr: "127.0.0.1:8888"
 
 # Optional external directory overriding embedded web assets (leave empty to serve embedded assets).
 static_dir: ""
@@ -12,10 +12,10 @@ tls_auto: false
 tls_cert: ""
 tls_key: ""
 
-# Cluster admission secret for Agent HTTP Upgrade Bearer authentication (Fail-Closed unless allow_anonymous_agents: true).
+# Cluster admission secret (>= 16 bytes) for Agent HTTP Upgrade Bearer authentication (Fail-Closed unless allow_anonymous_agents: true).
 # Leave empty here and pass via SIGNAL_SECRET_FILE or SIGNAL_SECRET env in production.
 signal_secret: ""
-# Optional YAML/JSON map of `node_id: secret` for per-node registration secret isolation.
+# Optional YAML/JSON map of `node_id: secret` (>= 16 bytes each) for per-node registration secret isolation.
 node_secrets_file: ""
 # Allow authenticated agents to rotate bound Ed25519 node keys via -force-rekey.
 # Defaults to false under a shared SIGNAL_SECRET and true under isolated per-node node_secrets_file.
@@ -26,13 +26,22 @@ allow_anonymous_agents: false
 # Optional JSON file path to persist Ed25519 node-to-key bindings across server restarts.
 bound_keys_file: "/var/lib/webrtc-gateway/bound-keys.json"
 
-# 3-Tier Cross-Site Sandbox Deployment (non-loopback production):
-#   Tier 1 (no wildcard cert): set portal_domain + sandbox_host (distinct eTLD+1)
-#   Tier 2 (single root wildcard): set portal_domain + sandbox_domain (same eTLD+1) + allow_same_site_sandbox: true
-#   Tier 3 (dual root wildcard, recommended): set portal_domain + sandbox_domain (distinct eTLD+1)
-portal_domain: "portal.example.com"
-sandbox_domain: "sandbox.example.net"
-sandbox_host: ""
+# Explicit Startup Origins (no runtime X-Forwarded-Proto guessing):
+#   Tier 1 (Full Cross-Site Wildcard Isolation, recommended):
+#     portal_origin: "https://portal.example.com"
+#     sandbox_origin: "https://*.sandbox.example.net"
+#   Tier 2 (Restricted Same-Site Wildcard, adds Origin-Agent-Cluster):
+#     portal_origin: "https://portal.example.com"
+#     sandbox_origin: "https://*.sbx.example.com"
+#     allow_same_site_sandbox: true
+#   Tier 2 (Restricted Fixed Single-Host Sandbox, distinct eTLD+1):
+#     portal_origin: "https://portal.example.com"
+#     sandbox_origin: "https://app.example.net"
+#   LocalDev (loopback only, *.localhost):
+#     dev: true (leave portal_origin and sandbox_origin empty)
+portal_origin: "https://portal.example.com"
+sandbox_origin: "https://*.sandbox.example.net"
+dev: false
 allow_same_site_sandbox: false
 allow_all_origins: false
 

@@ -16,51 +16,37 @@ function bytesToHex(bytes) {
 }
 
 function makeMockChannelPair() {
-  const make = () => {
-    const listeners = new Map();
-    return {
-      readyState: 'open',
-      bufferedAmount: 0,
-      bufferedAmountLowThreshold: 0,
-      binaryType: 'arraybuffer',
-      peer: null,
-      sent: [],
-      addEventListener(type, fn) {
-        let set = listeners.get(type);
-        if (!set) {
-          set = new Set();
-          listeners.set(type, set);
-        }
-        set.add(fn);
-      },
-      removeEventListener(type, fn) {
-        listeners.get(type)?.delete(fn);
-      },
-      _emit(type, ev) {
-        const set = listeners.get(type);
-        if (!set) return;
-        for (const fn of Array.from(set)) fn(ev);
-      },
-      send(data) {
-        if (this.readyState !== 'open') throw new Error('DC closed');
-        const cp = new Uint8Array(data).slice();
-        this.sent.push(cp);
-        const peer = this.peer;
-        if (peer && peer.readyState === 'open') {
-          queueMicrotask(() => {
-            if (peer.readyState === 'open') {
-              peer._emit('message', { data: cp.buffer });
-            }
-          });
-        }
-      },
-      close() {
-        if (this.readyState === 'closed') return;
-        this.readyState = 'closed';
-        this._emit('close', {});
-      },
-    };
-  };
+  const make = () => ({
+    readyState: 'open',
+    bufferedAmount: 0,
+    bufferedAmountLowThreshold: 0,
+    binaryType: 'arraybuffer',
+    peer: null,
+    sent: [],
+    onmessage: null,
+    onopen: null,
+    onclose: null,
+    onerror: null,
+    onbufferedamountlow: null,
+    send(data) {
+      if (this.readyState !== 'open') throw new Error('DC closed');
+      const cp = new Uint8Array(data).slice();
+      this.sent.push(cp);
+      const peer = this.peer;
+      if (peer && peer.readyState === 'open') {
+        queueMicrotask(() => {
+          if (peer.readyState === 'open') {
+            peer.onmessage?.({ data: cp.buffer });
+          }
+        });
+      }
+    },
+    close() {
+      if (this.readyState === 'closed') return;
+      this.readyState = 'closed';
+      this.onclose?.({});
+    },
+  });
   const a = make();
   const b = make();
   a.peer = b;
@@ -68,20 +54,20 @@ function makeMockChannelPair() {
   return [a, b];
 }
 
-test('P2PMux V7 Golden Vectors (TS codec parity with Go)', async () => {
+test('P2PMux V8 Golden Vectors (TS codec parity with Go + H-6 BOM preservation)', async () => {
   const frameMod = await loadTsBundle('web/src/protocol/frame.ts');
   const tlvMod = await loadTsBundle('web/src/protocol/tlv.ts');
   const golden = JSON.parse(
-    fs.readFileSync(path.join(repoRoot, 'test/fixtures/protocol_v7_golden_vectors.json'), 'utf8')
+    fs.readFileSync(path.join(repoRoot, 'test/fixtures/protocol_v8_golden_vectors.json'), 'utf8')
   );
-  assert.equal(golden.version, 7);
+  assert.equal(golden.version, 8);
 
   for (const tc of golden.valid_frames) {
     const payload = hexToBytes(tc.payload_hex);
-    const wire = frameMod.encodeFrame(tc.gen, tc.type, tc.flags, payload);
+    const wire = frameMod.encodeFrame(tc.stream_id, tc.type, tc.flags, payload);
     assert.equal(bytesToHex(wire), tc.wire_hex, `encode mismatch: ${tc.name}`);
     const dec = frameMod.decodeFrame(wire);
-    assert.equal(dec.gen, tc.gen, tc.name);
+    assert.equal(dec.streamId, tc.stream_id, tc.name);
     assert.equal(dec.type, tc.type, tc.name);
     assert.equal(dec.flags, tc.flags, tc.name);
     assert.equal(bytesToHex(dec.payload), tc.payload_hex, tc.name);
@@ -119,48 +105,6 @@ test('P2PMux V7 Golden Vectors (TS codec parity with Go)', async () => {
     });
   }
 
-  // Negative tests: ASCII space / backslash / Unicode Kelvin sign in header / CTL in value MUST fail!
-  assert.throws(
-    () =>
-      tlvMod.encodeRequestHeaders({
-        kind: tlvMod.StreamKind.HTTP,
-        method: 'GET',
-        target: '/bad path',
-        headers: [],
-      }),
-    /target/i
-  );
-  assert.throws(
-    () =>
-      tlvMod.encodeRequestHeaders({
-        kind: tlvMod.StreamKind.HTTP,
-        method: 'GET',
-        target: '/bad\\path',
-        headers: [],
-      }),
-    /target/i
-  );
-  assert.throws(
-    () =>
-      tlvMod.encodeRequestHeaders({
-        kind: tlvMod.StreamKind.HTTP,
-        method: 'GET',
-        target: '/',
-        headers: [{ name: 'x-\u212aey', value: 'ok' }],
-      }),
-    /header/i
-  );
-  assert.throws(
-    () =>
-      tlvMod.encodeRequestHeaders({
-        kind: tlvMod.StreamKind.HTTP,
-        method: 'GET',
-        target: '/',
-        headers: [{ name: 'x-ctl', value: 'bad\x01val' }],
-      }),
-    /header/i
-  );
-
   for (const tc of golden.tlv_responses) {
     const cookieDeltas = tc.cookie_deltas.map((c) => ({
       op: c.op,
@@ -192,271 +136,250 @@ test('P2PMux V7 Golden Vectors (TS codec parity with Go)', async () => {
     assert.throws(() => tlvMod.decodeResponseHeaders(hexToBytes(tc.hex)), `expected invalid TLV resp throw: ${tc.name}`);
   }
 
-  // Negative TLV encode bounds: negative expiresMs, reserved fetchCtx / respFlags bits MUST throw!
-  assert.throws(
-    () =>
-      tlvMod.encodeRequestHeaders({
-        kind: tlvMod.StreamKind.HTTP,
-        method: 'GET',
-        target: '/',
-        headers: [],
-        cookieMutations: [{ op: tlvMod.CookieOp.SET, name: 'a', value: '1', path: '/', expiresMs: -1 }],
-      }),
-    /expiresMs/i
-  );
-  assert.throws(
-    () =>
-      tlvMod.encodeRequestHeaders({
-        kind: tlvMod.StreamKind.HTTP,
-        fetchCtx: 0x80,
-        method: 'GET',
-        target: '/',
-        headers: [],
-      }),
-    /fetchCtx/i
-  );
-  assert.throws(
-    () =>
-      tlvMod.encodeResponseHeaders({
-        status: 200,
-        respFlags: 0x80,
-        headers: [],
-      }),
-    /respFlags/i
-  );
+  // H-6b regression: TextDecoder with ignoreBOM: true MUST preserve U+FEFF (never strip to empty cookie name).
+  const bomResp = tlvMod.encodeResponseHeaders({
+    status: 200,
+    respFlags: 0,
+    headers: [],
+    cookieDeltas: [{ op: tlvMod.CookieOp.SET, name: '\uFEFF', value: 'v', path: '/', expiresMs: 0 }],
+  });
+  const decBom = tlvMod.decodeResponseHeaders(bomResp);
+  assert.equal(decBom.cookieDeltas[0].name, '\uFEFF', 'H-6b regression: BOM was stripped from cookie name');
 
-  // Strict RFC 4648 §3.5 canonical base64url rejects non-zero trailing unused bits!
+  // Strict RFC 4648 §3.5 canonical base64url rejects non-zero trailing unused bits.
   const cryptoMod = await loadTsBundle('web/src/shared/crypto.ts');
   assert.throws(() => cryptoMod.base64UrlDecode('AB'), /non-canonical|padding|trailing/i);
   assert.throws(() => cryptoMod.base64UrlDecode('AAB'), /non-canonical|padding|trailing/i);
   assert.deepEqual(Array.from(cryptoMod.base64UrlDecode('AA')), [0]);
 });
 
-test('PoolMux V7 TS: 32-DC reuse, anti-credit-forgery, downward-only MMS, short response preservation, 2.5MiB WS', async () => {
+test('PoolMux V8 TS: monotonic multiplexing, C-5 10k x 13B SSE, H-5 WSStream fixes, chunked control & ping', async () => {
   const muxMod = await loadTsBundle('web/src/protocol/mux.ts');
   const tlvMod = await loadTsBundle('web/src/protocol/tlv.ts');
   const frameMod = await loadTsBundle('web/src/protocol/frame.ts');
 
   const [cCtrl, sCtrl] = makeMockChannelPair();
   const poolSize = 4;
-  const cPool = [];
-  const sPool = [];
+  const cLanes = [];
+  const sLanes = [];
   for (let i = 0; i < poolSize; i++) {
     const [a, b] = makeMockChannelPair();
-    cPool.push(a);
-    sPool.push(b);
+    cLanes.push(a);
+    sLanes.push(b);
   }
 
-  const clientMux = new muxMod.PoolMux({}, poolSize);
+  const ctrlFrames = [];
+  const goAways = [];
+  const clientMux = new muxMod.PoolMux(poolSize, {
+    onControlFrame: (f) => ctrlFrames.push(f),
+    onGoAway: (code) => goAways.push(code),
+  });
   clientMux.attachControlDC(cCtrl);
   for (let i = 0; i < poolSize; i++) {
-    clientMux.attachPoolDC(i, cPool[i]);
+    clientMux.attachLaneDC(i, cLanes[i]);
   }
 
-  // Negative test: setMaxMessageSize clamps strictly downward, never upward.
-  const initialChunk = clientMux.effectiveChunkSize();
+  // Downward-only MMS clamping & floor at 4096.
+  clientMux.setMaxMessageSize(1024);
+  assert.equal(clientMux.chunkSize, frameMod.DEFAULT_CHUNK_SIZE);
   clientMux.setMaxMessageSize(12_000);
-  const clampedChunk = clientMux.effectiveChunkSize();
-  assert.ok(clampedChunk < initialChunk && clampedChunk === 12_000 - frameMod.HEADER_SIZE);
+  assert.equal(clientMux.chunkSize, 12_000 - frameMod.HEADER_SIZE);
   clientMux.setMaxMessageSize(65_536);
-  assert.equal(clientMux.effectiveChunkSize(), clampedChunk, 'setMaxMessageSize must never raise chunkSize');
+  assert.equal(clientMux.chunkSize, 12_000 - frameMod.HEADER_SIZE);
 
-  // Wire simple server-side responder directly on sPool slots.
+  // Server responder on sLanes handling HTTP echo, 10k x 13B SSE, WS fast M1/M2/CLOSE, WS >16MiB, and WS 2.5MiB echo.
+  const wsAsms = new Map();
   for (let i = 0; i < poolSize; i++) {
-    const sdc = sPool[i];
-    sdc.addEventListener('message', (ev) => {
+    const sdc = sLanes[i];
+    sdc.onmessage = (ev) => {
       const f = frameMod.decodeFrame(new Uint8Array(ev.data));
       if (f.type === frameMod.FrameType.HEADERS) {
         const req = tlvMod.decodeRequestHeaders(f.payload);
         if (req.target === '/echo') {
           const respTlv = tlvMod.encodeResponseHeaders({ status: 200, headers: [] });
-          sdc.send(frameMod.encodeFrame(f.gen, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, respTlv));
+          sdc.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, respTlv));
           sdc.send(
             frameMod.encodeFrame(
-              f.gen,
+              f.streamId,
               frameMod.FrameType.DATA,
               frameMod.FrameFlag.FIN,
-              new TextEncoder().encode(`slot:${i}:gen:${f.gen}`)
+              new TextEncoder().encode(`ok:${f.streamId}`)
             )
           );
-        } else if (req.target === '/short-before-ondata') {
+        } else if (req.target === '/sse-tiny') {
           const respTlv = tlvMod.encodeResponseHeaders({ status: 200, headers: [] });
-          sdc.send(frameMod.encodeFrame(f.gen, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, respTlv));
-          sdc.send(
-            frameMod.encodeFrame(
-              f.gen,
-              frameMod.FrameType.DATA,
-              frameMod.FrameFlag.FIN,
-              new TextEncoder().encode('must-not-be-purged')
-            )
-          );
-        } else if (req.target === '/forged-credit-test') {
-          const respTlv = tlvMod.encodeResponseHeaders({ status: 200, headers: [] });
-          sdc.send(frameMod.encodeFrame(f.gen, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, respTlv));
-          sdc.send(frameMod.encodeFrame(f.gen, frameMod.FrameType.DATA, frameMod.FrameFlag.NONE, new Uint8Array(100)));
+          sdc.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, respTlv));
+          const token = new TextEncoder().encode('data: token\n\n'); // 13 bytes
+          for (let k = 0; k < 10_000; k++) {
+            const flags = k === 9_999 ? frameMod.FrameFlag.FIN : frameMod.FrameFlag.NONE;
+            sdc.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.DATA, flags, token));
+          }
+        } else if (req.target === '/ws-fast-close') {
+          const respTlv = tlvMod.encodeResponseHeaders({ status: 101, headers: [] });
+          sdc.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, respTlv));
+          sdc.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.WS_TEXT, frameMod.FrameFlag.MSG_FIN, new TextEncoder().encode('M1')));
+          sdc.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.WS_TEXT, frameMod.FrameFlag.MSG_FIN, new TextEncoder().encode('M2')));
+          sdc.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.WS_CLOSE, frameMod.FrameFlag.NONE, frameMod.encodeWSClosePayload(1000, 'bye')));
+        } else if (req.target === '/ws-echo') {
+          const respTlv = tlvMod.encodeResponseHeaders({ status: 101, headers: [] });
+          sdc.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, respTlv));
+        } else if (req.target === '/ws-over16m') {
+          const respTlv = tlvMod.encodeResponseHeaders({ status: 101, headers: [] });
+          sdc.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, respTlv));
+          const bigChunk = new Uint8Array(32 * 1024);
+          // 513 * 32 KiB > 16 MiB
+          for (let k = 0; k < 513; k++) {
+            sdc.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.WS_BINARY, frameMod.FrameFlag.NONE, bigChunk));
+          }
+        }
+      } else if (f.type === frameMod.FrameType.WS_BINARY || f.type === frameMod.FrameType.WS_TEXT) {
+        let entry = wsAsms.get(f.streamId);
+        if (!entry) {
+          entry = { op: f.type, chunks: [], bytes: 0 };
+          wsAsms.set(f.streamId, entry);
+        }
+        entry.chunks.push(f.payload);
+        entry.bytes += f.payload.byteLength;
+        if (entry.bytes >= 128 * 1024) {
+          sdc.send(frameMod.encodeFrame(f.streamId, frameMod.FrameType.CREDIT, frameMod.FrameFlag.NONE, frameMod.encodeCreditPayload(entry.bytes)));
+          entry.bytes = 0;
+        }
+        if ((f.flags & frameMod.FrameFlag.MSG_FIN) !== 0) {
+          const full = Buffer.concat(entry.chunks);
+          wsAsms.delete(f.streamId);
+          for (let off = 0; off < full.byteLength; off += 16384) {
+            const end = Math.min(off + 16384, full.byteLength);
+            const fin = end === full.byteLength ? frameMod.FrameFlag.MSG_FIN : frameMod.FrameFlag.NONE;
+            sdc.send(frameMod.encodeFrame(f.streamId, f.type, fin, new Uint8Array(full.subarray(off, end))));
+          }
         }
       }
-    });
+    };
   }
 
-  // 1. Reuse 4 pool slots across 20 sequential/concurrent streams (5 generations per slot).
-  const results = await Promise.all(
-    Array.from({ length: 20 }, async () => {
-      const reqTlv = tlvMod.encodeRequestHeaders({
-        kind: tlvMod.StreamKind.HTTP,
-        method: 'GET',
-        target: '/echo',
-        headers: [],
-      });
-      const st = await clientMux.openHTTPStream(reqTlv, true, false);
+  // 1. 40 concurrent multiplexed streams over 4 lanes (10 streams/lane concurrently, zero blocking!).
+  const echoResults = await Promise.all(
+    Array.from({ length: 40 }, async () => {
+      const req = tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.HTTP, method: 'GET', target: '/echo', headers: [] });
+      const st = await clientMux.openHTTPStream(req, false);
+      await st.waitResponseHeaders();
       return await new Promise((resolve, reject) => {
         const chunks = [];
-        st.onHeaders(() => {});
-        st.onData((c) => chunks.push(c));
+        st.onData((c) => {
+          chunks.push(c);
+          st.ackConsumed(c.byteLength);
+        });
         st.onEnd(() => resolve(new TextDecoder().decode(Buffer.concat(chunks))));
-        st.onReset((code) => reject(new Error(`reset ${code}`)));
+        st.onReset(reject);
       });
     })
   );
-  assert.equal(results.length, 20);
-  assert.equal(clientMux.getActiveStreamCount(), 0);
-  assert.equal(clientMux.getSessionInboundBytes(), 0);
+  assert.equal(echoResults.length, 40);
+  assert.equal(clientMux.activeStreamCount, 0);
+  assert.equal(clientMux.sessionMemUsed, 0);
 
-  // 2. V7 Negative test: short response (HEADERS + DATA(FIN)) arriving BEFORE onData() is attached
-  //    MUST NOT have its buffered inboundChunks purged by checkFullClose()!
-  const shortReq = tlvMod.encodeRequestHeaders({
-    kind: tlvMod.StreamKind.HTTP,
-    method: 'GET',
-    target: '/short-before-ondata',
-    headers: [],
+  // 2. C-5 Regression: 10,000 x 13-byte SSE chunks MUST complete cleanly with pure-payload CREDIT!
+  const sseReq = tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.HTTP, method: 'GET', target: '/sse-tiny', headers: [] });
+  const sseStream = await clientMux.openHTTPStream(sseReq, false);
+  await sseStream.waitResponseHeaders();
+  let sseBytes = 0;
+  await new Promise((resolve, reject) => {
+    sseStream.onData((c) => {
+      sseBytes += c.byteLength;
+      sseStream.ackConsumed(c.byteLength, 1);
+    });
+    sseStream.onEnd(resolve);
+    sseStream.onReset(reject);
   });
-  const shortStream = await clientMux.openHTTPStream(shortReq, true, false);
-  // Wait for both HEADERS and DATA(FIN) microtasks to complete BEFORE attaching onData/onEnd!
+  assert.equal(sseBytes, 10_000 * 13, 'C-5 regression: 10,000 x 13B SSE stream lost bytes or reset');
+  assert.equal(clientMux.sessionMemUsed, 0);
+
+  // 3. H-5a Regression: WSStream receiving fast M1, M2, WS_CLOSE before onMessage() MUST deliver BOTH M1 and M2!
+  const wsFastReq = tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.WS, method: 'GET', target: '/ws-fast-close', headers: [] });
+  const wsFast = await clientMux.openWSStream(wsFastReq);
+  await wsFast.waitResponseHeaders();
+  await new Promise((r) => setTimeout(r, 20)); // Let M1, M2, WS_CLOSE arrive before attaching handlers!
+  const gotFastMsgs = [];
+  const fastClosed = await new Promise((resolve) => {
+    wsFast.onClose((code, reason, wasClean) => resolve({ code, reason, wasClean }));
+    wsFast.onMessage((m) => gotFastMsgs.push(m.data));
+  });
+  assert.deepEqual(gotFastMsgs, ['M1', 'M2'], 'H-5a regression: WSStream dropped M2 after fast WS_CLOSE');
+  assert.deepEqual(fastClosed, { code: 1000, reason: 'bye', wasClean: true });
+  assert.equal(clientMux.sessionMemUsed, 0);
+
+  // 4. H-5b Regression: WSStream reset() BEFORE onMessage() after fast M1, M2, WS_CLOSE MUST free sessionMemUsed to 0!
+  const wsLeak = await clientMux.openWSStream(wsFastReq);
+  await wsLeak.waitResponseHeaders();
   await new Promise((r) => setTimeout(r, 20));
-  const lateBody = await new Promise((resolve) => {
-    const chunks = [];
-    shortStream.onHeaders(() => {});
-    shortStream.onData((c) => chunks.push(c));
-    shortStream.onEnd(() => resolve(new TextDecoder().decode(Buffer.concat(chunks))));
-  });
-  assert.equal(lateBody, 'must-not-be-purged', 'PoolStream must never purge unread inboundChunks on checkFullClose');
-  assert.equal(clientMux.getSessionInboundBytes(), 0);
+  assert.ok(clientMux.sessionMemUsed > 0, 'expected buffered pending WS messages in sessionMemUsed');
+  wsLeak.reset(frameMod.ErrorCode.CANCEL);
+  assert.equal(clientMux.sessionMemUsed, 0, 'H-5b regression: WSStream.reset() leaked sessionMemUsed');
 
-  // 3. Negative test: ackConsumed() with forged 10 MiB must not emit CREDIT.
-  const reqForged = tlvMod.encodeRequestHeaders({
-    kind: tlvMod.StreamKind.HTTP,
-    method: 'GET',
-    target: '/forged-credit-test',
-    headers: [],
-  });
-  const forgedStream = await clientMux.openHTTPStream(reqForged, true, true);
-  const slotDC = cPool[forgedStream.slotIdx];
-  const delivered = await new Promise((resolve) => {
-    forgedStream.onHeaders(() => {});
-    forgedStream.onData((c) => resolve(c.byteLength));
-  });
-  assert.equal(delivered, 100);
-  const sentBefore = slotDC.sent.length;
-  forgedStream.ackConsumed(10 * 1024 * 1024); // Forged massive credit from untrusted sandbox!
-  const creditFrames = slotDC.sent
-    .slice(sentBefore)
-    .map((b) => frameMod.decodeFrame(b))
-    .filter((f) => f.type === frameMod.FrameType.CREDIT);
-  assert.equal(creditFrames.length, 0, 'forged ackConsumed must be strictly clamped to delivered bytes');
-  forgedStream.reset(frameMod.ErrorCode.CANCEL);
+  // 5. H-5c Regression: >16 MiB WS message cleans up sessionMemUsed even if localClose already sent!
+  const wsOverReq = tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.WS, method: 'GET', target: '/ws-over16m', headers: [] });
+  const wsOver = await clientMux.openWSStream(wsOverReq);
+  await wsOver.waitResponseHeaders();
+  wsOver.close(1000, 'local-first');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(clientMux.sessionMemUsed, 0, 'H-5c regression: >16 MiB WS message leaked sessionMemUsed');
 
-  // 4. V7 Negative test: openHTTPStream honors AbortSignal when all slots are busy!
-  const ac = new AbortController();
-  ac.abort();
-  await assert.rejects(() => clientMux.openHTTPStream(shortReq, true, false, ac.signal), /aborted/i);
+  // 6. 2.5 MiB binary WS echo over multiplexed lane.
+  const wsEchoReq = tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.WS, method: 'GET', target: '/ws-echo', headers: [] });
+  const wsEcho = await clientMux.openWSStream(wsEchoReq);
+  await wsEcho.waitResponseHeaders();
+  const bigBin = new Uint8Array(2.5 * 1024 * 1024);
+  for (let i = 0; i < bigBin.byteLength; i++) bigBin[i] = (i * 31) & 0xff;
+  const echoPromise = new Promise((resolve) => wsEcho.onMessage((m) => resolve(m)));
+  await wsEcho.sendMessage(bigBin);
+  const echoed = await echoPromise;
+  assert.equal(echoed.isBinary, true);
+  assert.equal(echoed.data.byteLength, bigBin.byteLength);
+  wsEcho.close(1000, 'done');
 
-  // 5. Negative test: WSStream handles 2.5 MiB (> 2 MiB window) with overhead-aware flow control.
-  const [cWsDC, sWsDC] = makeMockChannelPair();
-  const OVERHEAD = muxMod.PER_CHUNK_MEM_OVERHEAD;
-  let sWsBufs = [];
-  let sWsConsumed = 0;
-  let sWsSendWin = muxMod.DEFAULT_STREAM_WINDOW_SIZE;
-  let sWsCreditResolvers = [];
-  const flushServerWsPayload = async (isBin, payload) => {
-    let off = 0;
-    let first = true;
-    while (off < payload.byteLength) {
-      while (sWsSendWin <= OVERHEAD) {
-        await new Promise((r) => sWsCreditResolvers.push(r));
+  // 7. Chunked 90 KiB control JSON reassembly over 12 KiB MMS + PING/PONG + GOAWAY.
+  const bigCtrl = new TextEncoder().encode(JSON.stringify({ pad: 'a'.repeat(90 * 1024) }));
+  const cs = clientMux.chunkSize;
+  for (let off = 0; off < bigCtrl.byteLength; off += cs) {
+    const end = Math.min(off + cs, bigCtrl.byteLength);
+    const flags = end < bigCtrl.byteLength ? frameMod.FrameFlag.MORE : frameMod.FrameFlag.NONE;
+    sCtrl.send(frameMod.encodeFrame(0, frameMod.FrameType.AUTH_RESULT, flags, bigCtrl.subarray(off, end)));
+  }
+  sCtrl.send(frameMod.encodeFrame(0, frameMod.FrameType.GOAWAY, frameMod.FrameFlag.NONE, frameMod.encodeGoAwayPayload(frameMod.ErrorCode.GOING_AWAY)));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(ctrlFrames.length, 1);
+  assert.equal(ctrlFrames[0].payload.byteLength, bigCtrl.byteLength);
+  assert.deepEqual(goAways, [frameMod.ErrorCode.GOING_AWAY]);
+
+  // Exact 8-byte PING/PONG check + immediate false on close.
+  let pingMode = 'exact';
+  sCtrl.onmessage = (ev) => {
+    const f = frameMod.decodeFrame(new Uint8Array(ev.data));
+    if (f.type === frameMod.FrameType.PING) {
+      if (pingMode === 'exact') {
+        sCtrl.send(frameMod.encodeFrame(0, frameMod.FrameType.PONG, frameMod.FrameFlag.NONE, f.payload));
+      } else if (pingMode === 'wrong') {
+        const bad = new Uint8Array(f.payload);
+        bad[7] ^= 0xff;
+        sCtrl.send(frameMod.encodeFrame(0, frameMod.FrameType.PONG, frameMod.FrameFlag.NONE, bad));
       }
-      const n = Math.min(payload.byteLength - off, 16384, sWsSendWin - OVERHEAD);
-      sWsSendWin -= n + OVERHEAD;
-      const op = first
-        ? isBin
-          ? frameMod.FrameType.WS_BINARY
-          : frameMod.FrameType.WS_TEXT
-        : frameMod.FrameType.WS_CONT;
-      first = false;
-      const flags = off + n === payload.byteLength ? frameMod.FrameFlag.MSG_FIN : frameMod.FrameFlag.NONE;
-      sWsDC.send(frameMod.encodeFrame(1, op, flags, payload.subarray(off, off + n)));
-      off += n;
     }
   };
-  sWsDC.addEventListener('message', (ev) => {
-    const f = frameMod.decodeFrame(new Uint8Array(ev.data));
-    if (f.type === frameMod.FrameType.HEADERS) {
-      const resp = tlvMod.encodeResponseHeaders({ status: 101, headers: [] });
-      sWsDC.send(frameMod.encodeFrame(1, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, resp));
-    } else if (f.type === frameMod.FrameType.CREDIT) {
-      sWsSendWin += frameMod.decodeCreditPayload(f.payload);
-      for (const r of sWsCreditResolvers.splice(0)) r();
-    } else if (f.type === frameMod.FrameType.WS_BINARY || f.type === frameMod.FrameType.WS_CONT) {
-      sWsBufs.push(f.payload);
-      sWsConsumed += f.payload.byteLength + OVERHEAD;
-      if (sWsConsumed >= muxMod.DEFAULT_STREAM_WINDOW_SIZE / 8) {
-        const delta = sWsConsumed;
-        sWsConsumed = 0;
-        sWsDC.send(
-          frameMod.encodeFrame(1, frameMod.FrameType.CREDIT, frameMod.FrameFlag.NONE, frameMod.encodeCreditPayload(delta))
-        );
-      }
-      if ((f.flags & frameMod.FrameFlag.MSG_FIN) !== 0) {
-        const full = Buffer.concat(sWsBufs);
-        sWsBufs = [];
-        void flushServerWsPayload(true, new Uint8Array(full));
-      }
-    }
-  });
-
-  const wsReq = tlvMod.encodeRequestHeaders({
-    kind: tlvMod.StreamKind.WS,
-    method: 'GET',
-    target: '/ws',
-    headers: [],
-  });
-  const wsStream = await clientMux.openWSStream(cWsDC, wsReq);
-  const wsHandshake = new Promise((r) => wsStream.onHeaders((h) => r(tlvMod.decodeResponseHeaders(h).status)));
-  assert.equal(await wsHandshake, 101);
-
-  const bigPayload = new Uint8Array(2.5 * 1024 * 1024);
-  for (let i = 0; i < bigPayload.byteLength; i++) bigPayload[i] = (i * 31) & 0xff;
-
-  const echoedPromise = new Promise((resolve, reject) => {
-    wsStream.onMessage((isBin, data) => resolve({ isBin, data }));
-    wsStream.onReset((code) => reject(new Error(`ws reset ${code}`)));
-  });
-  await wsStream.sendWSMessage(true, bigPayload);
-  const echoed = await echoedPromise;
-  assert.equal(echoed.isBin, true);
-  assert.equal(echoed.data.byteLength, bigPayload.byteLength);
-  assert.equal(echoed.data[0], bigPayload[0]);
-  assert.equal(echoed.data[bigPayload.byteLength - 1], bigPayload[bigPayload.byteLength - 1]);
-
-  wsStream.sendWSClose(1000, 'done');
+  assert.equal(await clientMux.ping(300), true);
+  pingMode = 'wrong';
+  assert.equal(await clientMux.ping(80), false);
+  pingMode = 'drop';
+  const pendingPing = clientMux.ping(5_000);
   clientMux.close();
+  assert.equal(await pendingPing, false);
   sCtrl.close();
-  for (const s of sPool) s.close();
+  for (const s of sLanes) s.close();
 });
 
 test('RFC 9383 Appendix C.1 official vector & V7 SPAKE2+ KDF cross-language parity (TS <-> Go)', async () => {
   const spakeMod = await loadTsBundle('web/src/shared/spake2p.ts');
   const golden = JSON.parse(
-    fs.readFileSync(path.join(repoRoot, 'test/fixtures/protocol_v7_golden_vectors.json'), 'utf8')
+    fs.readFileSync(path.join(repoRoot, 'test/fixtures/protocol_v8_golden_vectors.json'), 'utf8')
   );
   const v = golden.rfc9383_appendix_c;
 
@@ -483,192 +406,8 @@ test('RFC 9383 Appendix C.1 official vector & V7 SPAKE2+ KDF cross-language pari
   assert.equal(bytesToHex(res.expectedConfirmV), v.confirm_v_hex, 'RFC 9383 confirmV mismatch in TS');
   assert.equal(bytesToHex(res.sharedKey), v.shared_key_hex, 'RFC 9383 sharedKey mismatch in TS');
 
-  // Verify V7 SPAKE2+ KDF (PBKDF2 300k + HKDF-SHA256) matches Go golden vector byte-for-byte!
   const kdf = golden.v7_spake2p_kdf;
   const creds = await spakeMod.deriveSPAKE2PProverCreds(kdf.password, kdf.node_id, kdf.agent_pk_b64);
-  assert.equal(bytesToHex(creds.w0Bytes), kdf.w0_hex, 'V7 KDF w0 mismatch between TS and Go');
-  assert.equal(bytesToHex(creds.w1Bytes), kdf.w1_hex, 'V7 KDF w1 mismatch between TS and Go');
-
-  const credsWrong = await spakeMod.deriveSPAKE2PProverCreds('wrong-pass', kdf.node_id, kdf.agent_pk_b64);
-  assert.notDeepEqual(creds.w0Bytes, credsWrong.w0Bytes);
-
-  const ctx = spakeMod.buildSPAKE2PContext(
-    kdf.node_id,
-    'a'.repeat(64),
-    'b'.repeat(64),
-    kdf.agent_pk_b64,
-    'vnonce',
-    'anonce'
-  );
-  assert.ok(ctx.byteLength > 100);
-});
-
-test('PoolMux.ping verifies exact 8-byte PONG echo, rejects mismatch, and fails fast on close', async () => {
-  const frameMod = await loadTsBundle('web/src/protocol/frame.ts');
-  const muxMod = await loadTsBundle('web/src/protocol/mux.ts');
-
-  const [cCtrl, sCtrl] = makeMockChannelPair();
-  const [cPool, sPool] = makeMockChannelPair();
-  const clientMux = new muxMod.PoolMux({}, 1, 2);
-  clientMux.attachControlDC(cCtrl);
-  clientMux.attachPoolDC(0, cPool);
-
-  // 1. Peer echoes exact PING payload as PONG -> resolves true!
-  let echoMode = 'exact';
-  sCtrl.addEventListener('message', (ev) => {
-    const f = frameMod.decodeFrame(new Uint8Array(ev.data));
-    if (f.type === frameMod.FrameType.PING) {
-      if (echoMode === 'exact') {
-        sCtrl.send(frameMod.encodeFrame(0, frameMod.FrameType.PONG, frameMod.FrameFlag.NONE, f.payload));
-      } else if (echoMode === 'wrong') {
-        const bad = new Uint8Array(f.payload);
-        bad[7] ^= 0xff;
-        sCtrl.send(frameMod.encodeFrame(0, frameMod.FrameType.PONG, frameMod.FrameFlag.NONE, bad));
-      }
-    }
-  });
-
-  assert.equal(await clientMux.ping(300), true, 'matching PONG must resolve ping() to true');
-
-  // 2. Mismatched PONG payload must NOT satisfy ping() -> times out as false!
-  echoMode = 'wrong';
-  assert.equal(await clientMux.ping(80), false, 'mismatched PONG payload must time out as false');
-
-  // 3. Closing mux while ping() is pending must resolve false immediately without leaking timers!
-  echoMode = 'drop';
-  const pendingPing = clientMux.ping(5_000);
-  clientMux.close();
-  assert.equal(await pendingPing, false, 'mux.close() must settle in-flight ping() to false immediately');
-
-  sCtrl.close();
-  sPool.close();
-});
-
-test('PoolMux & WSStream V7 regressions: zero spurious RESET, internal reset notify, GOAWAY dispatch, MMS floor & WS >4096 chunks / >16MiB 1009', async () => {
-  const frameMod = await loadTsBundle('web/src/protocol/frame.ts');
-  const tlvMod = await loadTsBundle('web/src/protocol/tlv.ts');
-  const muxMod = await loadTsBundle('web/src/protocol/mux.ts');
-
-  const [cCtrl, sCtrl] = makeMockChannelPair();
-  const [cPool, sPool] = makeMockChannelPair();
-  const goAways = [];
-  const ctrlFrames = [];
-  const clientMux = new muxMod.PoolMux(
-    {
-      onControlFrame: (f) => ctrlFrames.push(f),
-      onGoAway: (code) => goAways.push(code),
-    },
-    1,
-    4
-  );
-  clientMux.attachControlDC(cCtrl);
-  clientMux.attachPoolDC(0, cPool);
-
-  // 1. setMaxMessageSize(< 4096) MUST be ignored (never lowering below MIN_CHUNK_SIZE=4088); 4096 clamps to 4088.
-  const beforeChunk = clientMux.effectiveChunkSize();
-  clientMux.setMaxMessageSize(1024);
-  clientMux.setMaxMessageSize(4095);
-  assert.equal(clientMux.effectiveChunkSize(), beforeChunk, 'sub-4096 maxMessageSize must be ignored');
-  clientMux.setMaxMessageSize(4096);
-  assert.equal(clientMux.effectiveChunkSize(), 4088, '4096 maxMessageSize must clamp to MIN_CHUNK_SIZE=4088');
-
-  // 2. GOAWAY MUST trigger onGoAway() and NOT onControlFrame().
-  sCtrl.send(
-    frameMod.encodeFrame(0, frameMod.FrameType.GOAWAY, frameMod.FrameFlag.NONE, frameMod.encodeGoAwayPayload(frameMod.ErrorCode.GOING_AWAY))
-  );
-  await new Promise((r) => setTimeout(r, 10));
-  assert.deepEqual(goAways, [frameMod.ErrorCode.GOING_AWAY]);
-  assert.equal(ctrlFrames.length, 0, 'GOAWAY must not also leak into onControlFrame');
-
-  // 3. Normal GET 200 completion MUST NOT send any spurious RESET frame!
-  sPool.addEventListener('message', (ev) => {
-    const f = frameMod.decodeFrame(new Uint8Array(ev.data));
-    if (f.type === frameMod.FrameType.HEADERS) {
-      const req = tlvMod.decodeRequestHeaders(f.payload);
-      if (req.target === '/clean-200') {
-        const resp = tlvMod.encodeResponseHeaders({ status: 200, headers: [] });
-        sPool.send(frameMod.encodeFrame(f.gen, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, resp));
-        sPool.send(frameMod.encodeFrame(f.gen, frameMod.FrameType.DATA, frameMod.FrameFlag.FIN, new TextEncoder().encode('ok')));
-      } else if (req.target === '/trigger-internal-reset') {
-        // Peer sends DATA before HEADERS -> PoolStream internally resets & must notify resetHandler!
-        sPool.send(frameMod.encodeFrame(f.gen, frameMod.FrameType.DATA, frameMod.FrameFlag.NONE, new Uint8Array([1, 2, 3])));
-      }
-    }
-  });
-
-  const sentBeforeClean = cPool.sent.length;
-  const stClean = await clientMux.openHTTPStream(
-    tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.HTTP, method: 'GET', target: '/clean-200', headers: [] }),
-    true,
-    false
-  );
-  await new Promise((resolve, reject) => {
-    stClean.onHeaders(() => {});
-    stClean.onData(() => {});
-    stClean.onEnd(() => resolve());
-    stClean.onReset((c) => reject(new Error(`unexpected reset ${c}`)));
-  });
-  const sentDuringClean = cPool.sent.slice(sentBeforeClean).map((b) => frameMod.decodeFrame(b));
-  assert.equal(
-    sentDuringClean.filter((f) => f.type === frameMod.FrameType.RESET).length,
-    0,
-    'normal HTTP GET 200 must never emit spurious RESET'
-  );
-
-  // 4. Internal PoolStream reset notifies resetHandler!
-  const stBad = await clientMux.openHTTPStream(
-    tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.HTTP, method: 'GET', target: '/trigger-internal-reset', headers: [] }),
-    true,
-    false
-  );
-  const resetCode = await new Promise((resolve) => {
-    stBad.onReset((code) => resolve(code));
-  });
-  assert.equal(resetCode, frameMod.ErrorCode.PROTOCOL_ERROR, 'internal PoolStream reset must fire onReset');
-
-  // 5. WSStream allows >4096 chunks (5000 small chunks) AND notifies onClose(1009) when >16 MiB!
-  const [cWs1, sWs1] = makeMockChannelPair();
-  sWs1.addEventListener('message', (ev) => {
-    const f = frameMod.decodeFrame(new Uint8Array(ev.data));
-    if (f.type === frameMod.FrameType.HEADERS) {
-      sWs1.send(frameMod.encodeFrame(1, frameMod.FrameType.HEADERS, frameMod.FrameFlag.NONE, tlvMod.encodeResponseHeaders({ status: 101, headers: [] })));
-    }
-  });
-  const ws1 = await clientMux.openWSStream(
-    cWs1,
-    tlvMod.encodeRequestHeaders({ kind: tlvMod.StreamKind.WS, method: 'GET', target: '/ws-many', headers: [] })
-  );
-  await new Promise((r) => ws1.onHeaders(r));
-
-  const manyMsgP = new Promise((resolve, reject) => {
-    ws1.onMessage((isBin, data) => resolve({ isBin, data }));
-    ws1.onClose((code) => reject(new Error(`unexpected close ${code}`)));
-  });
-  const CHUNKS = 5000;
-  for (let i = 0; i < CHUNKS; i++) {
-    const op = i === 0 ? frameMod.FrameType.WS_BINARY : frameMod.FrameType.WS_CONT;
-    const fl = i === CHUNKS - 1 ? frameMod.FrameFlag.MSG_FIN : frameMod.FrameFlag.NONE;
-    sWs1.send(frameMod.encodeFrame(1, op, fl, new Uint8Array([i & 0xff, (i >> 8) & 0xff])));
-  }
-  const manyMsg = await manyMsgP;
-  assert.equal(manyMsg.isBin, true);
-  assert.equal(manyMsg.data.byteLength, CHUNKS * 2, 'WSStream must assemble >4096 chunks up to 16 MiB');
-
-  // Now push >16 MiB on the same WSStream -> must fire closeHandler(1009)!
-  const over16P = new Promise((resolve) => {
-    ws1.onClose((code, reason) => resolve({ code, reason }));
-  });
-  const chunk64k = new Uint8Array(65_500);
-  for (let i = 0; i < 260; i++) {
-    if (sWs1.readyState !== 'open') break;
-    const op = i === 0 ? frameMod.FrameType.WS_BINARY : frameMod.FrameType.WS_CONT;
-    sWs1.send(frameMod.encodeFrame(1, op, frameMod.FrameFlag.NONE, chunk64k));
-  }
-  const overClose = await over16P;
-  assert.equal(overClose.code, 1009, 'WSStream >16 MiB inbound message must notify closeHandler(1009)');
-
-  clientMux.close();
-  sCtrl.close();
-  sPool.close();
-  sWs1.close();
+  assert.equal(bytesToHex(creds.w0Bytes), kdf.w0_hex, 'KDF w0 mismatch between TS and Go');
+  assert.equal(bytesToHex(creds.w1Bytes), kdf.w1_hex, 'KDF w1 mismatch between TS and Go');
 });

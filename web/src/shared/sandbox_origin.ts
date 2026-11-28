@@ -1,12 +1,11 @@
 /**
- * V7 3-Tier Cross-Site Sandbox Origin Derivation
- * - Tier 1 Fixed Dual-Domain (`sandboxMode === 'fixed'`): returns the exact configured `sandboxHost`.
- * - Capability share visitors in wildcard/local modes: 128-bit random label (`sbx-<32hex>`),
- *   cached per tab across silent reconnects.
- * - Owner/public sessions in wildcard/local modes: per-device/per-node 128-bit localStorage salt +
- *   HMAC-SHA256(salt, nodeId + '\0' + targetOrigin).slice(0, 24) (`sbx-<24hex>`).
- *   Prevents cross-user deterministic subdomain guessing while keeping localStorage persistence
- *   and one-click "Reset Node Sandbox" salt rotation.
+ * Cross-Site Sandbox Origin Derivation
+ * - Tier 1 (Full Isolation): cross-site wildcard (`sandboxMode === 'wildcard'`, `!sameSiteMode`)
+ *   or loopback LocalDev (`*.localhost`). Each owner node gets a per-device/per-node 96-bit HMAC
+ *   label (`sbx-<24hex>`); capability share links get a 128-bit ephemeral label (`sbx-<32hex>`).
+ * - Tier 2 (Restricted Isolation):
+ *   a) Fixed single sandbox host (`sandboxMode === 'fixed'`): cross-site vs Portal, shared across tabs.
+ *   b) Same-site wildcard (`sameSiteMode === true`): adds Origin-Agent-Cluster: ?1.
  */
 
 import { hmacSha256Bytes, randomHex } from './crypto';
@@ -19,13 +18,20 @@ const memorySalts = new Map<string, string>();
 const textEncoder = new TextEncoder();
 
 export interface PortalDomainConfig {
+  portalOrigin?: string;
   portalDomain: string;
+  sandboxOrigin?: string;
   sandboxMode?: 'local' | 'fixed' | 'wildcard';
   sandboxDomain: string;
   sandboxHost?: string;
+  restrictedSandbox?: boolean;
   sameSiteMode: boolean;
   localDevMode: boolean;
   localPort?: string;
+}
+
+export function isRestrictedSandbox(cfg: PortalDomainConfig): boolean {
+  return Boolean(cfg.restrictedSandbox || cfg.sameSiteMode || cfg.sandboxMode === 'fixed');
 }
 
 export function normalizeNodeId(raw: string): string | null {
@@ -111,7 +117,10 @@ export async function computeSandboxOrigin(
   explicitSalt?: string
 ): Promise<string> {
   const proto = protocol === 'https:' ? 'https:' : 'http:';
-  if (cfg.sandboxMode === 'fixed' && (cfg.sandboxHost || cfg.sandboxDomain)) {
+  if (cfg.sandboxMode === 'fixed' && (cfg.sandboxOrigin || cfg.sandboxHost || cfg.sandboxDomain)) {
+    if (cfg.sandboxOrigin && !cfg.sandboxOrigin.includes('*.')) {
+      return cfg.sandboxOrigin;
+    }
     const fixedHost = cfg.sandboxHost || cfg.sandboxDomain;
     return `${proto}//${fixedHost}`;
   }

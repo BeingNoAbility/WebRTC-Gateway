@@ -136,6 +136,7 @@ export class SmartPill {
     pkHash: string;
     version: string;
     sameSiteMode: boolean;
+    restrictedSandbox?: boolean;
     canResetSandbox?: boolean;
   }): void {
     const parts = [
@@ -145,7 +146,9 @@ export class SmartPill {
       info.version,
     ];
     if (info.sameSiteMode) {
-      parts.push('⚠ Same-Site');
+      parts.push('⚠ Tier 2 Same-Site');
+    } else if (info.restrictedSandbox) {
+      parts.push('⚠ Tier 2 Fixed Sandbox');
     }
     this.metaEl.textContent = parts.join(' | ');
     this.shareBtn.style.display = info.role === 'owner' ? 'inline-flex' : 'none';
@@ -154,7 +157,7 @@ export class SmartPill {
 
   updateStats(snap: TunnelStatsSnapshot): void {
     const rtt = snap.rttMs !== null ? `${snap.rttMs} ms` : '—';
-    this.statsEl.textContent = `RTT: ${rtt} · ↑ ${formatRate(snap.txBps)} · ↓ ${formatRate(snap.rxBps)} · Streams: ${snap.activeStreams} · ${snap.poolSize} pool DCs (${snap.candidateType})`;
+    this.statsEl.textContent = `RTT: ${rtt} · ↑ ${formatRate(snap.txBps)} · ↓ ${formatRate(snap.rxBps)} · Streams: ${snap.activeStreams} · ${snap.poolSize} lanes (${snap.candidateType})`;
   }
 
   appendLog(line: string): void {
