@@ -18,7 +18,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.server
-    image: ghcr.io/beingnoability/webrtc-p2p-server:v5.0.0-alpha.3
+    image: ghcr.io/beingnoability/webrtc-p2p-server:v5.0.0-alpha.4
     container_name: webrtc-p2p-server
     restart: unless-stopped
     read_only: true
@@ -74,7 +74,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.agent
-    image: ghcr.io/beingnoability/webrtc-p2p-agent:v5.0.0-alpha.3
+    image: ghcr.io/beingnoability/webrtc-p2p-agent:v5.0.0-alpha.4
     container_name: webrtc-p2p-agent
     restart: unless-stopped
     read_only: true

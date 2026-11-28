@@ -18,7 +18,7 @@
 [![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions)](https://github.com/BeingNoAbility/WebRTC-Gateway/actions/workflows/ci.yml)
 
 > [!IMPORTANT]
-> **Release Status**: Current pre-release is **v5.0.0-alpha.3**, using the `P2PMux V8` wire protocol (see the [Protocol Specification](docs/en/guide/protocol-specification.md); the [V7 Architecture RFC](docs/en/rfcs/v7.0-architecture.md) is a historical decision record). Full version history is recorded in [CHANGELOG](CHANGELOG.md).
+> **Release Status**: Current pre-release is **v5.0.0-alpha.4**, using the `P2PMux V8` wire protocol (see the [Protocol Specification](docs/en/guide/protocol-specification.md); the [V7 Architecture RFC](docs/en/rfcs/v7.0-architecture.md) is a historical decision record). Full version history is recorded in [CHANGELOG](CHANGELOG.md).
 
 ---
 

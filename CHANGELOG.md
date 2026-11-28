@@ -8,6 +8,10 @@ Pre-release versions (tags containing `-`, such as `v5.0.0-alpha.3`) are publish
 
 ## [Unreleased]
 
+## [v5.0.0-alpha.4] - 2026-11-28
+
+> **Pre-release (P2PMux V8 audit hardening).** Moves `:v5.0.0-alpha.4`, `:5.0.0-alpha.4`, and `:alpha`; `:latest` is not moved.
+
 ### Changed
 - **P2PMux V8 Unified Data Plane**: Replaces the V7 `1 Ctrl` + `32` HTTP pool layout with 1 fragmented control channel (`id=0` `p2pctrl`) + 12 ordered multiplexed channels (`id=1..12` `p2p_01..p2p_12`) carrying HTTP and streaming WebSocket under monotonic `StreamID`s (zero dynamic DCEP channels); 8-byte fixed frame header, payload-byte `CREDIT` flow control, native Transferable `ReadableStream` IPC, and streaming gzip via `compress/gzip` / `DecompressionStream('gzip')`. Per-stream memory budgets (`memCost` + chunk cap), immutable HTTP/WS stream kind after `HEADERS`, a 10 s deadline for incomplete `HEADERS`, `MaxWSMessageChunks` (16384), and TS `PoolStream` 2 MiB / 32 MiB inbound and `WSStream` 16 MiB outbound caps are enforced.
 - **Startup-Explicit Origins**: `cmd/signal` requires explicit `-portal-origin` + `-sandbox-origin` (loopback requires explicit `-dev`), with Tier 1 cross-site wildcard and Tier 2 restricted isolation (fixed single-domain cross-site or `-allow-same-site-sandbox`); the Portal shows a Tier 2 warning banner.
